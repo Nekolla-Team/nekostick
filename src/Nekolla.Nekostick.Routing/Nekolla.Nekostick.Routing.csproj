@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Nekolla.Nekostick.Routing</AssemblyName>
+    <RootNamespace>Nekolla.Nekostick.Routing</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
+  </ItemGroup>
+</Project>

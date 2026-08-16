@@ -1,0 +1,41 @@
+[Unit]
+Description=Nekostick Host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=nekostick
+Group=nekostick
+WorkingDirectory=/opt/nekostick
+EnvironmentFile=/etc/nekostick/nekostick.env
+ExecStart=/usr/bin/dotnet /opt/nekostick/Nekolla.Nekostick.Host.dll run
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=45s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+# Extensions are trusted code loaded from the executable-adjacent directory and remain read-only.
+ReadOnlyPaths=/opt/nekostick/extensions
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Fixtures.Extension</AssemblyName>
+    <RootNamespace>Nekolla.Nekostick.Tests.Fixtures.Extension</RootNamespace>
+    <OutputType>Library</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
+    <EmbeddedResource Include="FixtureManifest.json" LogicalName="Fixtures.Extension.fixture-manifest.json" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Nekolla.Nekostick.IntegrationTests</AssemblyName>
+    <RootNamespace>Nekolla.Nekostick.IntegrationTests</RootNamespace>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
+    <ProjectReference Include="../Fixtures.Microservice/Fixtures.Microservice.csproj" />
+    <ProjectReference Include="../Fixtures.Extension/Fixtures.Extension.csproj" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
