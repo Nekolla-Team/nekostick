@@ -10,6 +10,8 @@
     <ProjectReference Include="../Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
     <ProjectReference Include="../Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
     <ProjectReference Include="../Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Proxy/Nekolla.Nekostick.Proxy.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Routing/Nekolla.Nekostick.Routing.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
   </ItemGroup>
 </Project>

@@ -12,11 +12,13 @@ internal static class HostEventIds
     internal static readonly EventId ConfigurationSnapshotRejected = new(1004, "ConfigurationSnapshotRejected");
     internal static readonly EventId ConfigurationRefreshUnavailable = new(1005, "ConfigurationRefreshUnavailable");
     internal static readonly EventId NodeHeartbeatUnavailable = new(1006, "NodeHeartbeatUnavailable");
+    internal static readonly EventId RouteRegexEvaluationTimedOut = new(1007, "RouteRegexEvaluationTimedOut");
 }
 
 internal static class HostLoggerCategory
 {
     internal const string Startup = "Nekolla.Nekostick.Host.Startup";
+    internal const string Routing = "Nekolla.Nekostick.Host.Routing";
 }
 
 internal static partial class HostLogMessages
@@ -62,6 +64,15 @@ internal static partial class HostLogMessages
         Level = LogLevel.Error,
         Message = "Node registration or heartbeat is unavailable.")]
     internal static partial void NodeHeartbeatUnavailable(ILogger logger);
+
+    [LoggerMessage(
+        EventId = 1007,
+        Level = LogLevel.Warning,
+        Message = "Route matching regex evaluation timed out. RouteIds: {RouteIds}. Count: {Count}.")]
+    internal static partial void RouteRegexEvaluationTimedOut(
+        ILogger logger,
+        Guid[] routeIds,
+        int count);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
@@ -83,8 +94,8 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
             NullScope.Instance;
 
         public bool IsEnabled(LogLevel logLevel) =>
-            logLevel >= LogLevel.Error &&
-            string.Equals(_categoryName, HostLoggerCategory.Startup, StringComparison.Ordinal);
+            logLevel >= LogLevel.Warning &&
+            (_categoryName is HostLoggerCategory.Startup or HostLoggerCategory.Routing);
 
         public void Log<TState>(
             LogLevel logLevel,

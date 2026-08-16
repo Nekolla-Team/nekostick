@@ -215,9 +215,27 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("configuration_poll_interval_seconds");
 
+                    b.Property<int>("ConnectTimeoutMilliseconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(10000)
+                        .HasColumnName("connect_timeout_milliseconds");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamptz")
                         .HasColumnName("created_at");
+
+                    b.Property<int>("HttpActivityTimeoutMilliseconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(30000)
+                        .HasColumnName("http_activity_timeout_milliseconds");
+
+                    b.Property<int>("HttpTotalTimeoutMilliseconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(100000)
+                        .HasColumnName("http_total_timeout_milliseconds");
 
                     b.Property<int>("MaxConcurrentRequests")
                         .HasColumnType("integer")
@@ -243,6 +261,12 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasDefaultValue(1L)
                         .HasColumnName("version");
 
+                    b.Property<int>("WebSocketIdleTimeoutMilliseconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(120000)
+                        .HasColumnName("websocket_idle_timeout_milliseconds");
+
                     b.HasKey("Id")
                         .HasName("pk_global_settings");
 
@@ -253,6 +277,8 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                             t.HasCheckConstraint("ck_global_settings_limits", "max_request_body_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0");
 
                             t.HasCheckConstraint("ck_global_settings_port_range", "auto_port_range_start BETWEEN 1 AND 65535 AND auto_port_range_end BETWEEN 1 AND 65535 AND auto_port_range_start <= auto_port_range_end");
+
+                            t.HasCheckConstraint("ck_global_settings_proxy_timeouts", "connect_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_activity_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_total_timeout_milliseconds BETWEEN 1 AND 86400000 AND websocket_idle_timeout_milliseconds BETWEEN 1 AND 86400000");
 
                             t.HasCheckConstraint("ck_global_settings_singleton", "id = '018f0f00-0000-7000-8000-000000000002'::uuid");
 
@@ -266,12 +292,16 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                             AutoPortRangeEnd = 29999,
                             AutoPortRangeStart = 20000,
                             ConfigurationPollIntervalSeconds = 30,
+                            ConnectTimeoutMilliseconds = 10000,
                             CreatedAt = new DateTimeOffset(new DateTime(2025, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            HttpActivityTimeoutMilliseconds = 30000,
+                            HttpTotalTimeoutMilliseconds = 100000,
                             MaxConcurrentRequests = 1024,
                             MaxRequestBodyBytes = 31457280L,
                             TrustedProxyCidrsJson = "[]",
                             UpdatedAt = new DateTimeOffset(new DateTime(2025, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
-                            Version = 1L
+                            Version = 1L,
+                            WebSocketIdleTimeoutMilliseconds = 120000
                         });
                 });
 

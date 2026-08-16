@@ -1,0 +1,355 @@
+using System.Net;
+using System.Net.Http;
+using Microsoft.AspNetCore.Http;
+using Yarp.ReverseProxy.Forwarder;
+
+namespace Nekolla.Nekostick.Proxy;
+
+/// <summary>Describes a non-sensitive microservice forwarding disposition.</summary>
+public enum MicroserviceProxyExecutionDisposition
+{
+    /// <summary>YARP handled the response on the current HTTP context.</summary>
+    Handled,
+
+    /// <summary>No endpoint was available for the service.</summary>
+    Unavailable,
+
+    /// <summary>The request or proxy policy was invalid.</summary>
+    BadRequest,
+
+    /// <summary>The destination could not produce a safe response.</summary>
+    BadGateway,
+
+    /// <summary>The forwarding activity exceeded its safe time budget.</summary>
+    GatewayTimeout,
+
+    /// <summary>The forwarding operation was cancelled.</summary>
+    Cancelled
+}
+
+/// <summary>Contains only the safe result category of one forwarding operation.</summary>
+public sealed class MicroserviceProxyExecutionResult
+{
+    private MicroserviceProxyExecutionResult(MicroserviceProxyExecutionDisposition disposition)
+    {
+        Disposition = disposition;
+    }
+
+    /// <summary>Gets the safe execution disposition.</summary>
+    public MicroserviceProxyExecutionDisposition Disposition { get; }
+
+    /// <summary>Gets whether YARP already handled the response.</summary>
+    public bool IsHandled => Disposition == MicroserviceProxyExecutionDisposition.Handled;
+
+    internal static MicroserviceProxyExecutionResult For(
+        MicroserviceProxyExecutionDisposition disposition) => new(disposition);
+
+    /// <summary>Returns a non-sensitive result representation.</summary>
+    public override string ToString() => $"MicroserviceProxyExecutionResult:{Disposition}";
+}
+
+internal enum MicroserviceCancellationCause
+{
+    None,
+    External,
+    OwnedTotal
+}
+
+internal sealed class MicroserviceCancellationCauseTracker
+{
+    private int _cause;
+
+    internal MicroserviceCancellationCause FirstCause =>
+        (MicroserviceCancellationCause)Volatile.Read(ref _cause);
+
+    internal void MarkExternal() => Interlocked.CompareExchange(
+        ref _cause,
+        (int)MicroserviceCancellationCause.External,
+        (int)MicroserviceCancellationCause.None);
+
+    internal void MarkExternalIfCanceled(CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            MarkExternal();
+        }
+    }
+
+    internal void MarkOwnedTotal() => Interlocked.CompareExchange(
+        ref _cause,
+        (int)MicroserviceCancellationCause.OwnedTotal,
+        (int)MicroserviceCancellationCause.None);
+}
+
+internal readonly struct MicroserviceCancellationInputs
+{
+    internal CancellationToken CallerCancellation { get; init; }
+
+    internal CancellationToken RequestAborted { get; init; }
+}
+
+internal sealed class MicroserviceCancellationScope : IDisposable
+{
+    private readonly MicroserviceCancellationCauseTracker _causeTracker;
+    private readonly CancellationTokenSource? _ownedTotal;
+    private readonly Timer? _ownedTotalTimer;
+    private readonly CancellationTokenSource _linkedCancellation;
+    private readonly CancellationTokenRegistration _callerRegistration;
+    private readonly CancellationTokenRegistration _requestAbortedRegistration;
+
+    internal MicroserviceCancellationScope(
+        MicroserviceCancellationInputs inputs,
+        TimeSpan httpTotalTimeout,
+        bool isWebSocket)
+    {
+        var callerCancellation = inputs.CallerCancellation;
+        var requestAborted = inputs.RequestAborted;
+        _causeTracker = new MicroserviceCancellationCauseTracker();
+        _causeTracker.MarkExternalIfCanceled(callerCancellation);
+        _causeTracker.MarkExternalIfCanceled(requestAborted);
+        _callerRegistration = callerCancellation.Register(
+            static state => ((MicroserviceCancellationCauseTracker)state!).MarkExternal(),
+            _causeTracker);
+        _requestAbortedRegistration = requestAborted.Register(
+            static state => ((MicroserviceCancellationCauseTracker)state!).MarkExternal(),
+            _causeTracker);
+
+        _ownedTotal = isWebSocket ? null : new CancellationTokenSource();
+        _ownedTotalTimer = _ownedTotal is null
+            ? null
+            : new Timer(
+                static state => ((OwnedTotalTimeoutState)state!).Fire(),
+                new OwnedTotalTimeoutState(_causeTracker, _ownedTotal),
+                httpTotalTimeout,
+                Timeout.InfiniteTimeSpan);
+        _linkedCancellation = _ownedTotal is null
+            ? CancellationTokenSource.CreateLinkedTokenSource(
+                callerCancellation,
+                requestAborted)
+            : CancellationTokenSource.CreateLinkedTokenSource(
+                callerCancellation,
+                requestAborted,
+                _ownedTotal.Token);
+        OperationToken = _linkedCancellation.Token;
+    }
+
+    internal CancellationToken OperationToken { get; }
+
+    internal MicroserviceCancellationCause FirstCause => _causeTracker.FirstCause;
+
+    internal bool HasOwnedTotalSource => _ownedTotal is not null;
+
+    public void Dispose()
+    {
+        _ownedTotalTimer?.Dispose();
+        _linkedCancellation.Dispose();
+        _ownedTotal?.Dispose();
+        _requestAbortedRegistration.Dispose();
+        _callerRegistration.Dispose();
+    }
+
+    private sealed class OwnedTotalTimeoutState
+    {
+        private readonly MicroserviceCancellationCauseTracker _causeTracker;
+        private readonly CancellationTokenSource _ownedTotal;
+
+        internal OwnedTotalTimeoutState(
+            MicroserviceCancellationCauseTracker causeTracker,
+            CancellationTokenSource ownedTotal)
+        {
+            _causeTracker = causeTracker;
+            _ownedTotal = ownedTotal;
+        }
+
+        internal void Fire()
+        {
+            _causeTracker.MarkOwnedTotal();
+            try
+            {
+                _ownedTotal.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+}
+
+/// <summary>Executes one safe microservice request through YARP's forwarder.</summary>
+public sealed class MicroserviceHttpExecutor
+{
+    private readonly IHttpForwarder _forwarder;
+    private readonly IMicroserviceEndpointResolver _endpointResolver;
+    private readonly MicroserviceHttpInvokerPool _invokerPool;
+
+    /// <summary>Creates an executor with shared YARP transport dependencies.</summary>
+    /// <param name="forwarder">The YARP forwarder.</param>
+    /// <param name="endpointResolver">The endpoint resolver.</param>
+    /// <param name="invokerPool">The bounded timeout-keyed HTTP invoker pool.</param>
+    public MicroserviceHttpExecutor(
+        IHttpForwarder forwarder,
+        IMicroserviceEndpointResolver endpointResolver,
+        MicroserviceHttpInvokerPool invokerPool)
+    {
+        _forwarder = forwarder ?? throw new ArgumentNullException(nameof(forwarder));
+        _endpointResolver = endpointResolver ?? throw new ArgumentNullException(nameof(endpointResolver));
+        _invokerPool = invokerPool ?? throw new ArgumentNullException(nameof(invokerPool));
+    }
+
+    /// <summary>Resolves and forwards one request without exposing destination details.</summary>
+    /// <param name="httpContext">The current ASP.NET request context.</param>
+    /// <param name="request">The immutable proxy request.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns>A safe typed disposition for host status mapping.</returns>
+    public async ValueTask<MicroserviceProxyExecutionResult> ExecuteAsync(
+        HttpContext httpContext,
+        MicroserviceProxyRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var timeoutPolicy = request.TimeoutPolicy;
+        var isWebSocket = httpContext.WebSockets.IsWebSocketRequest;
+        using var cancellationScope = new MicroserviceCancellationScope(
+            new MicroserviceCancellationInputs
+            {
+                CallerCancellation = cancellationToken,
+                RequestAborted = httpContext.RequestAborted
+            },
+            timeoutPolicy.HttpTotalTimeout,
+            isWebSocket);
+        var operationToken = cancellationScope.OperationToken;
+        MicroserviceEndpointResolution? resolution;
+        try
+        {
+            resolution = await _endpointResolver
+                .ResolveAsync(request.ServiceId, operationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return ResultForCancellation(cancellationScope.FirstCause);
+        }
+        catch (Exception)
+        {
+            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.Unavailable);
+        }
+
+        if (resolution is null
+            || !resolution.IsAvailable
+            || resolution.Endpoint is null)
+        {
+            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.Unavailable);
+        }
+
+        var originalPath = httpContext.Request.Path;
+        var originalPathBase = httpContext.Request.PathBase;
+        try
+        {
+            httpContext.Request.PathBase = PathString.Empty;
+            httpContext.Request.Path = request.ForwardedPath;
+            var transformer = new MicroserviceHttpTransformer(request, operationToken);
+            if (!_invokerPool.TryAcquire(timeoutPolicy.ConnectTimeout, out var lease)
+                || lease is null)
+            {
+                return MicroserviceProxyExecutionResult.For(
+                    MicroserviceProxyExecutionDisposition.BadGateway);
+            }
+
+            using (lease)
+            {
+                var requestConfig = new ForwarderRequestConfig
+                {
+                    Version = HttpVersion.Version11,
+                    VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+                    ActivityTimeout = isWebSocket
+                        ? timeoutPolicy.WebSocketIdleTimeout
+                        : timeoutPolicy.ActivityTimeout
+                };
+
+                var error = await _forwarder.SendAsync(
+                        httpContext,
+                        resolution.Endpoint.DestinationPrefix,
+                        lease.Invoker,
+                        requestConfig,
+                        transformer,
+                        operationToken)
+                    .ConfigureAwait(false);
+                return MapForwarderError(
+                    error,
+                    cancellationScope.FirstCause);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return ResultForCancellation(cancellationScope.FirstCause);
+        }
+        catch (InvalidOperationException)
+        {
+            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.BadRequest);
+        }
+        catch (Exception)
+        {
+            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.BadGateway);
+        }
+        finally
+        {
+            httpContext.Request.Path = originalPath;
+            httpContext.Request.PathBase = originalPathBase;
+        }
+    }
+
+    internal static MicroserviceProxyExecutionResult MapForwarderError(
+        ForwarderError error,
+        MicroserviceCancellationCause firstCause)
+    {
+        if (firstCause == MicroserviceCancellationCause.External)
+        {
+            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.Cancelled);
+        }
+
+        if (firstCause == MicroserviceCancellationCause.OwnedTotal)
+        {
+            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.GatewayTimeout);
+        }
+
+        return error switch
+        {
+            ForwarderError.None => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Handled),
+            ForwarderError.Request => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.BadGateway),
+            ForwarderError.RequestCreation => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.BadGateway),
+            ForwarderError.RequestTimedOut => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.GatewayTimeout),
+            ForwarderError.UpgradeActivityTimeout => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.GatewayTimeout),
+            ForwarderError.RequestCanceled => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled),
+            ForwarderError.RequestBodyCanceled => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled),
+            ForwarderError.ResponseBodyCanceled => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled),
+            ForwarderError.UpgradeRequestCanceled => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled),
+            ForwarderError.UpgradeResponseCanceled => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled),
+            _ => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.BadGateway)
+        };
+    }
+
+    internal static MicroserviceProxyExecutionResult ResultForCancellation(
+        MicroserviceCancellationCause firstCause) =>
+        firstCause switch
+        {
+            MicroserviceCancellationCause.OwnedTotal => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.GatewayTimeout),
+            MicroserviceCancellationCause.External => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled),
+            _ => MicroserviceProxyExecutionResult.For(
+                MicroserviceProxyExecutionDisposition.Cancelled)
+        };
+}
