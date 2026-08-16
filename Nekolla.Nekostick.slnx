@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Extensions/Nekolla.Nekostick.Extensions.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Proxy/Nekolla.Nekostick.Proxy.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Routing/Nekolla.Nekostick.Routing.csproj" />
+    <Project Path="src/Nekolla.Nekostick.Supervision/Nekolla.Nekostick.Supervision.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Fixtures.Extension/Fixtures.Extension.csproj" />
+    <Project Path="tests/Fixtures.Microservice/Fixtures.Microservice.csproj" />
+    <Project Path="tests/Nekolla.Nekostick.IntegrationTests/Nekolla.Nekostick.IntegrationTests.csproj" />
+    <Project Path="tests/Nekolla.Nekostick.UnitTests/Nekolla.Nekostick.UnitTests.csproj" />
+  </Folder>
+</Solution>

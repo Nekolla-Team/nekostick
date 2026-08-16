@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Nekolla.Nekostick.Contracts</AssemblyName>
+    <RootNamespace>Nekolla.Nekostick.Contracts</RootNamespace>
+  </PropertyGroup>
+</Project>

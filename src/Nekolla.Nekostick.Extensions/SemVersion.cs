@@ -1,0 +1,603 @@
+using System.Collections.Immutable;
+
+namespace Nekolla.Nekostick.Extensions;
+
+/// <summary>Represents a strict SemVer 2.0.0 value.</summary>
+public readonly struct SemVersion : IComparable<SemVersion>, IEquatable<SemVersion>
+{
+    private readonly string _prerelease;
+    private readonly string _build;
+
+    /// <summary>Creates a semantic version value.</summary>
+    /// <param name="major">The non-negative major component.</param>
+    /// <param name="minor">The non-negative minor component.</param>
+    /// <param name="patch">The non-negative patch component.</param>
+    /// <param name="prerelease">Optional SemVer prerelease identifiers.</param>
+    /// <param name="build">Optional SemVer build metadata.</param>
+    public SemVersion(
+        int major,
+        int minor,
+        int patch,
+        string? prerelease = null,
+        string? build = null)
+    {
+        if (major < 0 || minor < 0 || patch < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(major));
+        }
+
+        if (!SemVersionSyntax.IsValidIdentifiers(
+                prerelease,
+                allowEmpty: true,
+                rejectNumericLeadingZeros: true) ||
+            !SemVersionSyntax.IsValidIdentifiers(
+                build,
+                allowEmpty: true,
+                rejectNumericLeadingZeros: false))
+        {
+            throw new ArgumentException("The semantic version identifiers are invalid.");
+        }
+
+        Major = major;
+        Minor = minor;
+        Patch = patch;
+        _prerelease = prerelease ?? string.Empty;
+        _build = build ?? string.Empty;
+    }
+
+    /// <summary>Gets the major component.</summary>
+    public int Major { get; }
+
+    /// <summary>Gets the minor component.</summary>
+    public int Minor { get; }
+
+    /// <summary>Gets the patch component.</summary>
+    public int Patch { get; }
+
+    /// <summary>Gets the prerelease component without its leading hyphen.</summary>
+    public string Prerelease => _prerelease;
+
+    /// <summary>Gets the build metadata without its leading plus sign.</summary>
+    public string Build => _build;
+
+    /// <summary>Parses a strict SemVer 2.0.0 value.</summary>
+    /// <param name="text">The candidate version text.</param>
+    /// <param name="version">The parsed value when successful.</param>
+    /// <returns><see langword="true" /> when the text is valid SemVer.</returns>
+    public static bool TryParse(string? text, out SemVersion version)
+    {
+        version = default;
+        if (string.IsNullOrEmpty(text) || text.Length > 256)
+        {
+            return false;
+        }
+
+        var build = string.Empty;
+        var withoutBuild = text;
+        var plusIndex = text.IndexOf('+');
+        if (plusIndex >= 0)
+        {
+            if (text.IndexOf('+', plusIndex + 1) >= 0 || plusIndex == text.Length - 1)
+            {
+                return false;
+            }
+
+            build = text[(plusIndex + 1)..];
+            withoutBuild = text[..plusIndex];
+            if (!SemVersionSyntax.IsValidIdentifiers(
+                    build,
+                    allowEmpty: false,
+                    rejectNumericLeadingZeros: false))
+            {
+                return false;
+            }
+        }
+
+        var prerelease = string.Empty;
+        var core = withoutBuild;
+        var hyphenIndex = withoutBuild.IndexOf('-');
+        if (hyphenIndex >= 0)
+        {
+            if (hyphenIndex == withoutBuild.Length - 1)
+            {
+                return false;
+            }
+
+            prerelease = withoutBuild[(hyphenIndex + 1)..];
+            core = withoutBuild[..hyphenIndex];
+            if (!SemVersionSyntax.IsValidIdentifiers(
+                    prerelease,
+                    allowEmpty: false,
+                    rejectNumericLeadingZeros: true))
+            {
+                return false;
+            }
+        }
+
+        var parts = core.Split('.', StringSplitOptions.None);
+        if (parts.Length != 3 ||
+            !SemVersionSyntax.TryParseNumericIdentifier(parts[0], out var major) ||
+            !SemVersionSyntax.TryParseNumericIdentifier(parts[1], out var minor) ||
+            !SemVersionSyntax.TryParseNumericIdentifier(parts[2], out var patch))
+        {
+            return false;
+        }
+
+        version = new SemVersion(major, minor, patch, prerelease, build);
+        return true;
+    }
+
+    /// <summary>Compares semantic version precedence, ignoring build metadata.</summary>
+    /// <param name="other">The version to compare.</param>
+    /// <returns>A signed comparison result.</returns>
+    public int CompareTo(SemVersion other)
+    {
+        var major = Major.CompareTo(other.Major);
+        if (major != 0)
+        {
+            return major;
+        }
+
+        var minor = Minor.CompareTo(other.Minor);
+        if (minor != 0)
+        {
+            return minor;
+        }
+
+        var patch = Patch.CompareTo(other.Patch);
+        return patch != 0 ? patch : ComparePrerelease(_prerelease, other._prerelease);
+    }
+
+    /// <summary>Determines whether one version precedes another.</summary>
+    public static bool operator <(SemVersion left, SemVersion right) =>
+        left.CompareTo(right) < 0;
+
+    /// <summary>Determines whether one version does not exceed another.</summary>
+    public static bool operator <=(SemVersion left, SemVersion right) =>
+        left.CompareTo(right) <= 0;
+
+    /// <summary>Determines whether one version follows another.</summary>
+    public static bool operator >(SemVersion left, SemVersion right) =>
+        left.CompareTo(right) > 0;
+
+    /// <summary>Determines whether one version is not below another.</summary>
+    public static bool operator >=(SemVersion left, SemVersion right) =>
+        left.CompareTo(right) >= 0;
+
+    /// <summary>Compares semantic version precedence.</summary>
+    /// <param name="left">The first version.</param>
+    /// <param name="right">The second version.</param>
+    /// <returns>The precedence comparison result.</returns>
+    public static int Compare(SemVersion left, SemVersion right) => left.CompareTo(right);
+
+    /// <summary>Determines whether two versions have equal SemVer precedence.</summary>
+    /// <param name="other">The other version.</param>
+    /// <returns><see langword="true" /> when precedence is equal.</returns>
+    public bool Equals(SemVersion other) => CompareTo(other) == 0;
+
+    /// <summary>Determines whether two versions have equal SemVer precedence.</summary>
+    /// <param name="left">The first version.</param>
+    /// <param name="right">The second version.</param>
+    /// <returns><see langword="true" /> when precedence is equal.</returns>
+    public static bool operator ==(SemVersion left, SemVersion right) => left.Equals(right);
+
+    /// <summary>Determines whether two versions have different SemVer precedence.</summary>
+    /// <param name="left">The first version.</param>
+    /// <param name="right">The second version.</param>
+    /// <returns><see langword="true" /> when precedence differs.</returns>
+    public static bool operator !=(SemVersion left, SemVersion right) => !left.Equals(right);
+
+    /// <summary>Returns a version string.</summary>
+    /// <returns>The canonical version text.</returns>
+    public override string ToString()
+    {
+        var value = $"{Major}.{Minor}.{Patch}";
+        if (_prerelease.Length > 0)
+        {
+            value += $"-{_prerelease}";
+        }
+
+        return _build.Length > 0 ? $"{value}+{_build}" : value;
+    }
+
+    /// <summary>Returns the hash for SemVer precedence.</summary>
+    /// <returns>The precedence hash.</returns>
+    public override int GetHashCode() => HashCode.Combine(Major, Minor, Patch, _prerelease);
+
+    /// <summary>Determines whether an object is an equal semantic version.</summary>
+    /// <param name="obj">The object to compare.</param>
+    /// <returns><see langword="true" /> when the object is a matching version.</returns>
+    public override bool Equals(object? obj) => obj is SemVersion other && Equals(other);
+
+    private static int ComparePrerelease(string left, string right)
+    {
+        if (left.Length == 0)
+        {
+            return right.Length == 0 ? 0 : 1;
+        }
+
+        if (right.Length == 0)
+        {
+            return -1;
+        }
+
+        var leftParts = left.Split('.', StringSplitOptions.None);
+        var rightParts = right.Split('.', StringSplitOptions.None);
+        var count = Math.Min(leftParts.Length, rightParts.Length);
+        for (var index = 0; index < count; index++)
+        {
+            var leftNumeric = SemVersionSyntax.TryParseNumericIdentifier(leftParts[index], out var leftNumber);
+            var rightNumeric = SemVersionSyntax.TryParseNumericIdentifier(rightParts[index], out var rightNumber);
+            if (leftNumeric && rightNumeric)
+            {
+                var numeric = leftNumber.CompareTo(rightNumber);
+                if (numeric != 0)
+                {
+                    return numeric;
+                }
+
+                continue;
+            }
+
+            if (leftNumeric != rightNumeric)
+            {
+                return leftNumeric ? -1 : 1;
+            }
+
+            var text = string.CompareOrdinal(leftParts[index], rightParts[index]);
+            if (text != 0)
+            {
+                return text;
+            }
+        }
+
+        return leftParts.Length.CompareTo(rightParts.Length);
+    }
+}
+
+/// <summary>Represents a small deterministic SemVer range expression.</summary>
+public sealed class SemVersionRange
+{
+    private static readonly char[] RangeSeparators = [' ', '\t', '\r', '\n', ','];
+    private readonly ImmutableArray<ImmutableArray<VersionComparator>> _alternatives;
+
+    private SemVersionRange(string expression, ImmutableArray<ImmutableArray<VersionComparator>> alternatives)
+    {
+        Expression = expression;
+        _alternatives = alternatives;
+    }
+
+    /// <summary>Gets the normalized source expression.</summary>
+    public string Expression { get; }
+
+    /// <summary>Parses a supported SemVer range expression.</summary>
+    /// <param name="text">The range expression.</param>
+    /// <param name="range">The parsed range when successful.</param>
+    /// <returns><see langword="true" /> when the expression is supported and valid.</returns>
+    public static bool TryParse(string? text, out SemVersionRange? range)
+    {
+        range = null;
+        if (string.IsNullOrWhiteSpace(text) || text.Length > 512)
+        {
+            return false;
+        }
+
+        var expression = text.Trim();
+        var alternatives = ImmutableArray.CreateBuilder<ImmutableArray<VersionComparator>>();
+        var alternativeTexts = expression.Split("||", StringSplitOptions.None);
+        foreach (var alternativeText in alternativeTexts)
+        {
+            var tokens = alternativeText.Split(RangeSeparators, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length == 0)
+            {
+                return false;
+            }
+
+            var comparators = ImmutableArray.CreateBuilder<VersionComparator>();
+            foreach (var token in tokens)
+            {
+                if (!TryParseToken(token, comparators))
+                {
+                    return false;
+                }
+            }
+
+            alternatives.Add(comparators.ToImmutable());
+        }
+
+        range = new SemVersionRange(expression, alternatives.ToImmutable());
+        return true;
+    }
+
+    /// <summary>Tests a version against this range.</summary>
+    /// <param name="version">The candidate version.</param>
+    /// <returns><see langword="true" /> when any alternative fully matches.</returns>
+    public bool IsSatisfiedBy(SemVersion version)
+    {
+        foreach (var alternative in _alternatives)
+        {
+            var matches = true;
+            foreach (var comparator in alternative)
+            {
+                if (!comparator.Matches(version))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Returns the original range expression.</summary>
+    /// <returns>The range text.</returns>
+    public override string ToString() => Expression;
+
+    private static bool TryParseToken(string token, ImmutableArray<VersionComparator>.Builder comparators)
+    {
+        if (token is "*" or "x" or "X")
+        {
+            return true;
+        }
+
+        if (token[0] is '^' or '~')
+        {
+            if (!SemVersion.TryParse(token[1..], out var version))
+            {
+                return false;
+            }
+
+            comparators.Add(new VersionComparator(
+                VersionComparison.GreaterThanOrEqual,
+                version));
+            if (!TryGetUpperBound(token[0], version, out var upperBound))
+            {
+                return false;
+            }
+
+            comparators.Add(new VersionComparator(VersionComparison.LessThan, upperBound));
+            return true;
+        }
+
+        var operatorLength = token.StartsWith(">=", StringComparison.Ordinal) ||
+            token.StartsWith("<=", StringComparison.Ordinal)
+            ? 2
+            : token[0] is '>' or '<' or '='
+                ? 1
+                : 0;
+        var operatorText = operatorLength == 0 ? string.Empty : token[..operatorLength];
+        var operand = token[operatorLength..];
+        if (TryParseWildcard(operand, out var wildcardComparators))
+        {
+            if (operatorLength != 0)
+            {
+                return false;
+            }
+
+            comparators.AddRange(wildcardComparators);
+            return true;
+        }
+
+        if (!SemVersion.TryParse(operand, out var exactVersion))
+        {
+            return false;
+        }
+
+        var comparison = operatorText switch
+        {
+            ">" => VersionComparison.GreaterThan,
+            ">=" => VersionComparison.GreaterThanOrEqual,
+            "<" => VersionComparison.LessThan,
+            "<=" => VersionComparison.LessThanOrEqual,
+            "" or "=" => VersionComparison.Equal,
+            _ => VersionComparison.Invalid
+        };
+        if (comparison == VersionComparison.Invalid)
+        {
+            return false;
+        }
+
+        comparators.Add(new VersionComparator(comparison, exactVersion));
+        return true;
+    }
+
+    private static bool TryParseWildcard(
+        string text,
+        out ImmutableArray<VersionComparator> comparators)
+    {
+        comparators = ImmutableArray<VersionComparator>.Empty;
+        var parts = text.Split('.', StringSplitOptions.None);
+        if (parts.Length is < 1 or > 3)
+        {
+            return false;
+        }
+
+        var wildcardIndex = -1;
+        var values = new int[3];
+        for (var index = 0; index < parts.Length; index++)
+        {
+            if (parts[index] is "x" or "X" or "*")
+            {
+                if (wildcardIndex >= 0 || index == 0 && parts.Length == 1)
+                {
+                    return false;
+                }
+
+                wildcardIndex = index;
+                continue;
+            }
+
+            if (wildcardIndex >= 0 || !SemVersionSyntax.TryParseNumericIdentifier(parts[index], out values[index]))
+            {
+                return false;
+            }
+        }
+
+        if (wildcardIndex < 0)
+        {
+            return false;
+        }
+
+        var lower = new SemVersion(values[0], values[1], values[2]);
+        if (!TryGetWildcardUpperBound(wildcardIndex, values, out var upper))
+        {
+            return false;
+        }
+
+        comparators = ImmutableArray.Create(
+            new VersionComparator(VersionComparison.GreaterThanOrEqual, lower),
+            new VersionComparator(VersionComparison.LessThan, upper));
+        return true;
+    }
+
+    private static bool TryGetWildcardUpperBound(int wildcardIndex, int[] values, out SemVersion upper)
+    {
+        upper = default;
+        try
+        {
+            upper = wildcardIndex switch
+            {
+                0 => new SemVersion(1, 0, 0),
+                1 => new SemVersion(values[0] + 1, 0, 0),
+                2 => new SemVersion(values[0], values[1] + 1, 0),
+                _ => default
+            };
+            return wildcardIndex is >= 0 and <= 2;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetUpperBound(char operatorCharacter, SemVersion version, out SemVersion upper)
+    {
+        upper = default;
+        try
+        {
+            if (operatorCharacter == '~')
+            {
+                upper = new SemVersion(version.Major, checked(version.Minor + 1), 0);
+            }
+            else if (version.Major > 0)
+            {
+                upper = new SemVersion(checked(version.Major + 1), 0, 0);
+            }
+            else if (version.Minor > 0)
+            {
+                upper = new SemVersion(0, checked(version.Minor + 1), 0);
+            }
+            else
+            {
+                upper = new SemVersion(0, 0, checked(version.Patch + 1));
+            }
+
+            return true;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    private enum VersionComparison
+    {
+        Invalid,
+        Equal,
+        GreaterThan,
+        GreaterThanOrEqual,
+        LessThan,
+        LessThanOrEqual
+    }
+
+    private readonly record struct VersionComparator(VersionComparison Comparison, SemVersion Version)
+    {
+        internal bool Matches(SemVersion candidate)
+        {
+            var comparison = candidate.CompareTo(Version);
+            return Comparison switch
+            {
+                VersionComparison.Equal => comparison == 0,
+                VersionComparison.GreaterThan => comparison > 0,
+                VersionComparison.GreaterThanOrEqual => comparison >= 0,
+                VersionComparison.LessThan => comparison < 0,
+                VersionComparison.LessThanOrEqual => comparison <= 0,
+                _ => false
+            };
+        }
+    }
+}
+
+internal static class SemVersionSyntax
+{
+    internal static bool TryParseNumericIdentifier(string text, out int value)
+    {
+        value = 0;
+        if (string.IsNullOrEmpty(text) || text.Length > 10 ||
+            text.Length > 1 && text[0] == '0')
+        {
+            return false;
+        }
+
+        foreach (var character in text)
+        {
+            if (character is < '0' or > '9')
+            {
+                return false;
+            }
+
+            var digit = character - '0';
+            if (value > (int.MaxValue - digit) / 10)
+            {
+                return false;
+            }
+
+            value = value * 10 + digit;
+        }
+
+        return true;
+    }
+
+    internal static bool IsValidIdentifiers(
+        string? text,
+        bool allowEmpty,
+        bool rejectNumericLeadingZeros)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return allowEmpty;
+        }
+
+        var identifiers = text.Split('.', StringSplitOptions.None);
+        foreach (var identifier in identifiers)
+        {
+            if (identifier.Length == 0)
+            {
+                return false;
+            }
+
+            if (rejectNumericLeadingZeros && identifier.Length > 1 && identifier[0] == '0' &&
+                identifier.All(static character => character is >= '0' and <= '9'))
+            {
+                return false;
+            }
+
+            foreach (var character in identifier)
+            {
+                var isAlphaNumeric = character is >= '0' and <= '9' or >= 'a' and <= 'z' or >= 'A' and <= 'Z';
+                if (!isAlphaNumeric && character != '-')
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+}

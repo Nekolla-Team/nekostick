@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - ".github/workflows/**"
+      - "src/**"
+      - "tests/**"
+      - "deploy/**"
+      - "*.slnx"
+      - "global.json"
+      - "Directory.*"
+      - "NuGet.config"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "src/**"
+      - "tests/**"
+      - "deploy/**"
+      - "*.slnx"
+      - "global.json"
+      - "Directory.*"
+      - "NuGet.config"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PGHOST: 127.0.0.1
+  PGPORT: "5432"
+  PGDATABASE: nekostick_ci
+  PGUSER: nekostick_ci
+  PGPASSWORD: nekostick_ci_password
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+
+jobs:
+  ubuntu-ci:
+    name: Ubuntu .NET 10 and PostgreSQL 16 CI
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nekostick_ci
+          POSTGRES_USER: nekostick_ci
+          POSTGRES_PASSWORD: nekostick_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nekostick_ci -d nekostick_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.100"
+
+      - name: Verify PostgreSQL service health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            if docker exec "${{ job.services.postgres.id }}" pg_isready -U "$PGUSER" -d "$PGDATABASE" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          printf '%s\n' 'PostgreSQL service did not become ready.' >&2
+          exit 1
+
+      - name: Export isolated PostgreSQL test connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'NEKOSTICK_TEST_PG=Host=%s;Port=%s;Database=%s;Username=%s;Password=%s\n' \
+            "$PGHOST" "$PGPORT" "$PGDATABASE" "$PGUSER" "$PGPASSWORD" >> "$GITHUB_ENV"
+
+      - name: Restore canonical solution
+        run: dotnet restore Nekolla.Nekostick.slnx --nologo
+
+      - name: Build canonical solution
+        run: dotnet build Nekolla.Nekostick.slnx --configuration Release --no-restore --verbosity quiet --nologo
+
+      - name: Validate idempotent EF migration SQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          script_path="$RUNNER_TEMP/Nekolla.Nekostick.idempotent-migrations.sql"
+          repeat_script_path="$RUNNER_TEMP/Nekolla.Nekostick.idempotent-migrations.repeat.sql"
+          ef_tool="$HOME/.nuget/packages/microsoft.entityframeworkcore.tools/10.0.11/tools/net8.0/any/ef.dll"
+          test -f "$ef_tool"
+          export NEKOSTICK_CONNECTION_STRING="$NEKOSTICK_TEST_PG"
+
+          dotnet exec \
+            --depsfile src/Nekolla.Nekostick.Host/bin/Release/net10.0/Nekolla.Nekostick.Host.deps.json \
+            --runtimeconfig src/Nekolla.Nekostick.Host/bin/Release/net10.0/Nekolla.Nekostick.Host.runtimeconfig.json \
+            "$ef_tool" migrations script --idempotent \
+            --assembly src/Nekolla.Nekostick.Persistence/bin/Release/net10.0/Nekolla.Nekostick.Persistence.dll \
+            --startup-assembly src/Nekolla.Nekostick.Host/bin/Release/net10.0/Nekolla.Nekostick.Host.dll \
+            --project-dir src/Nekolla.Nekostick.Persistence \
+            --configuration Release \
+            --output "$script_path" \
+            --no-color
+
+          dotnet exec \
+            --depsfile src/Nekolla.Nekostick.Host/bin/Release/net10.0/Nekolla.Nekostick.Host.deps.json \
+            --runtimeconfig src/Nekolla.Nekostick.Host/bin/Release/net10.0/Nekolla.Nekostick.Host.runtimeconfig.json \
+            "$ef_tool" migrations script --idempotent \
+            --assembly src/Nekolla.Nekostick.Persistence/bin/Release/net10.0/Nekolla.Nekostick.Persistence.dll \
+            --startup-assembly src/Nekolla.Nekostick.Host/bin/Release/net10.0/Nekolla.Nekostick.Host.dll \
+            --project-dir src/Nekolla.Nekostick.Persistence \
+            --configuration Release \
+            --output "$repeat_script_path" \
+            --no-color
+
+          test -s "$script_path"
+          cmp --silent "$script_path" "$repeat_script_path"
+
+      - name: Test canonical solution
+        run: dotnet test Nekolla.Nekostick.slnx --configuration Release --no-build --no-restore --nologo --logger "console;verbosity=minimal"

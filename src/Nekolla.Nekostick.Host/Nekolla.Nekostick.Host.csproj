@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <AssemblyName>Nekolla.Nekostick.Host</AssemblyName>
+    <RootNamespace>Nekolla.Nekostick.Host</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

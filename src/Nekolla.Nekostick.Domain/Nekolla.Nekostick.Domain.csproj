@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Nekolla.Nekostick.Domain</AssemblyName>
+    <RootNamespace>Nekolla.Nekostick.Domain</RootNamespace>
+  </PropertyGroup>
+</Project>

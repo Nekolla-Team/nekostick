@@ -486,3 +486,5 @@ $RECYCLE.BIN/
 
 # IDE & Tools
 .orca/
+.slim/
+.ignore

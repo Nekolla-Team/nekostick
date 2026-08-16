@@ -1,0 +1,10 @@
+{
+  "id": "fixture.extension.deterministic",
+  "version": "1.0.0",
+  "entryPoint": "Nekolla.Nekostick.Tests.Fixtures.Extension.KnownFixtureHandler",
+  "service": "Nekolla.Nekostick.Tests.Fixtures.Extension.KnownFixtureService",
+  "capabilities": [
+    "deterministic-signal",
+    "cancellation-aware"
+  ]
+}
