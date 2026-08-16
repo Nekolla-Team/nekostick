@@ -163,7 +163,7 @@ public sealed record ServiceConfiguration
 /// <summary>Defines immutable global business settings.</summary>
 public sealed record GlobalSettingsConfiguration
 {
-    /// <summary>Creates global settings with the stage-A defaults.</summary>
+    /// <summary>Creates global settings with the business defaults.</summary>
     /// <param name="version">The optimistic-concurrency version.</param>
     /// <param name="autoPortRangeStart">The inclusive automatic port range start.</param>
     /// <param name="autoPortRangeEnd">The inclusive automatic port range end.</param>
@@ -171,6 +171,7 @@ public sealed record GlobalSettingsConfiguration
     /// <param name="maxConcurrentRequests">The node concurrency limit.</param>
     /// <param name="configurationPollInterval">The configuration version poll interval.</param>
     /// <param name="trustedProxyCidrs">The immutable trusted proxy CIDR list.</param>
+    /// <param name="proxyTimeouts">The immutable global proxy timeout settings.</param>
     public GlobalSettingsConfiguration(
         long version = 0,
         int autoPortRangeStart = 20000,
@@ -178,7 +179,8 @@ public sealed record GlobalSettingsConfiguration
         long maxRequestBodyBytes = 30 * 1024 * 1024,
         int maxConcurrentRequests = 1024,
         TimeSpan? configurationPollInterval = null,
-        ImmutableArray<string> trustedProxyCidrs = default)
+        ImmutableArray<string> trustedProxyCidrs = default,
+        ProxyTimeoutConfiguration? proxyTimeouts = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(version);
 
@@ -208,6 +210,7 @@ public sealed record GlobalSettingsConfiguration
         TrustedProxyCidrs = trustedProxyCidrs.IsDefault
             ? ImmutableArray<string>.Empty
             : trustedProxyCidrs;
+        ProxyTimeouts = proxyTimeouts ?? ProxyTimeoutConfiguration.Default;
     }
 
     /// <summary>Gets the global optimistic-concurrency version.</summary>
@@ -230,4 +233,7 @@ public sealed record GlobalSettingsConfiguration
 
     /// <summary>Gets the immutable trusted proxy CIDR list.</summary>
     public ImmutableArray<string> TrustedProxyCidrs { get; }
+
+    /// <summary>Gets the immutable global proxy timeout settings.</summary>
+    public ProxyTimeoutConfiguration ProxyTimeouts { get; }
 }

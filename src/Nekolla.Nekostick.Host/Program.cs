@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence;
+using Nekolla.Nekostick.Proxy;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -207,6 +208,20 @@ internal static class Program
         builder.Services.AddSingleton<HostConfigurationSnapshotHolder>();
         builder.Services.AddSingleton<IHostConfigurationSnapshotAccessor>(serviceProvider =>
             serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>());
+        builder.Services.AddSingleton<IHostRoutingSnapshotAccessor>(serviceProvider =>
+            new HostRoutingSnapshotAccessor(
+                serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>()));
+        builder.Services.AddSingleton<IRouteFallbackDispatcher>(NoOpRouteFallbackDispatcher.Instance);
+        builder.Services.AddMicroserviceProxy();
+        builder.Services.AddSingleton<IRouteTargetExecutor, HostRouteTargetExecutor>();
+        builder.Services.AddSingleton<HostRouteDispatcher>(serviceProvider =>
+            new HostRouteDispatcher(
+                serviceProvider.GetRequiredService<IHostRoutingSnapshotAccessor>(),
+                serviceProvider.GetRequiredService<IRouteFallbackDispatcher>(),
+                serviceProvider.GetRequiredService<IRouteTargetExecutor>(),
+                serviceProvider
+                    .GetRequiredService<ILoggerFactory>()
+                    .CreateLogger(HostLoggerCategory.Routing)));
         builder.Services.AddSingleton<HostRuntimeState>();
         builder.Services.AddDbContextFactory<NekostickDbContext>(dbContextOptions =>
             dbContextOptions.UseNekostickPostgres(bootstrap.ConnectionString));
@@ -267,12 +282,8 @@ internal static class Program
 
     private static void ConfigureRunPipeline(WebApplication app)
     {
-        app.Run(static async context =>
-        {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.ContentType = "text/plain; charset=utf-8";
-            await context.Response.WriteAsync("Service unavailable.", context.RequestAborted);
-        });
+        app.Run(context =>
+            context.RequestServices.GetRequiredService<HostRouteDispatcher>().DispatchAsync(context));
     }
 
     private static StatusReport CreateStatusFailureReport(StartupDatabaseErrorCode? errorCode)

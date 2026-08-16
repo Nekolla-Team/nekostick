@@ -59,6 +59,18 @@ public sealed class GlobalSettings
 
     /// <summary>Gets or sets the bigint optimistic-concurrency version.</summary>
     public long Version { get; set; }
+
+    /// <summary>Gets or sets the upstream connection timeout in milliseconds.</summary>
+    public int ConnectTimeoutMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the HTTP first-byte and activity timeout in milliseconds.</summary>
+    public int HttpActivityTimeoutMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the normal HTTP total timeout in milliseconds.</summary>
+    public int HttpTotalTimeoutMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the WebSocket idle timeout in milliseconds.</summary>
+    public int WebSocketIdleTimeoutMilliseconds { get; set; }
 }
 
 /// <summary>Stores a route and its validated polymorphic target boundary.</summary>

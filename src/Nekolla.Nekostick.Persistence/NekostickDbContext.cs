@@ -120,6 +120,9 @@ public sealed class NekostickDbContext : DbContext
                 "ck_global_settings_limits",
                 "max_request_body_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0");
             table.HasCheckConstraint(
+                "ck_global_settings_proxy_timeouts",
+                ProxyTimeoutPersistenceDefaults.CheckConstraintSql);
+            table.HasCheckConstraint(
                 "ck_global_settings_trusted_proxy_cidrs_json",
                 "jsonb_typeof(trusted_proxy_cidrs_json) = 'array' AND octet_length(trusted_proxy_cidrs_json::text) <= 262144");
         });
@@ -153,6 +156,26 @@ public sealed class NekostickDbContext : DbContext
         ConfigureUtcTimestamp(builder.Property(value => value.CreatedAt).HasColumnName("created_at"));
         ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
         ConfigureVersion(builder.Property(value => value.Version));
+        builder.Property(value => value.ConnectTimeoutMilliseconds)
+            .HasColumnName("connect_timeout_milliseconds")
+            .HasColumnType("integer")
+            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultConnectTimeoutMilliseconds)
+            .IsRequired();
+        builder.Property(value => value.HttpActivityTimeoutMilliseconds)
+            .HasColumnName("http_activity_timeout_milliseconds")
+            .HasColumnType("integer")
+            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultHttpActivityTimeoutMilliseconds)
+            .IsRequired();
+        builder.Property(value => value.HttpTotalTimeoutMilliseconds)
+            .HasColumnName("http_total_timeout_milliseconds")
+            .HasColumnType("integer")
+            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultHttpTotalTimeoutMilliseconds)
+            .IsRequired();
+        builder.Property(value => value.WebSocketIdleTimeoutMilliseconds)
+            .HasColumnName("websocket_idle_timeout_milliseconds")
+            .HasColumnType("integer")
+            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultWebSocketIdleTimeoutMilliseconds)
+            .IsRequired();
 
         builder.HasData(new GlobalSettings
         {
@@ -165,7 +188,11 @@ public sealed class NekostickDbContext : DbContext
             TrustedProxyCidrsJson = "[]",
             CreatedAt = SeedTimestamp,
             UpdatedAt = SeedTimestamp,
-            Version = 1
+            Version = 1,
+            ConnectTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultConnectTimeoutMilliseconds,
+            HttpActivityTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultHttpActivityTimeoutMilliseconds,
+            HttpTotalTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultHttpTotalTimeoutMilliseconds,
+            WebSocketIdleTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultWebSocketIdleTimeoutMilliseconds
         });
     }
 

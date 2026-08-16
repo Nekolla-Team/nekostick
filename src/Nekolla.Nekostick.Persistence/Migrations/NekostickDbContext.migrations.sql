@@ -299,3 +299,57 @@ BEGIN
 END $EF$;
 COMMIT;
 
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    ALTER TABLE nekostick.global_settings ADD connect_timeout_milliseconds integer NOT NULL DEFAULT 10000;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    ALTER TABLE nekostick.global_settings ADD http_activity_timeout_milliseconds integer NOT NULL DEFAULT 30000;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    ALTER TABLE nekostick.global_settings ADD http_total_timeout_milliseconds integer NOT NULL DEFAULT 100000;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    ALTER TABLE nekostick.global_settings ADD websocket_idle_timeout_milliseconds integer NOT NULL DEFAULT 120000;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    UPDATE nekostick.global_settings SET connect_timeout_milliseconds = 10000, http_activity_timeout_milliseconds = 30000, http_total_timeout_milliseconds = 100000, websocket_idle_timeout_milliseconds = 120000
+    WHERE id = '018f0f00-0000-7000-8000-000000000002';
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_proxy_timeouts CHECK (connect_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_activity_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_total_timeout_milliseconds BETWEEN 1 AND 86400000 AND websocket_idle_timeout_milliseconds BETWEEN 1 AND 86400000);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816170010_AddGlobalProxyTimeouts') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260816170010_AddGlobalProxyTimeouts', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+

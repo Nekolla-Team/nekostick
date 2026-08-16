@@ -1,6 +1,8 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence;
+using Nekolla.Nekostick.Routing;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -14,14 +16,74 @@ public interface IHostConfigurationSnapshotAccessor
     bool HasSnapshot { get; }
 }
 
+/// <summary>Provides the atomically published configuration, matcher, and executable route set.</summary>
+internal interface IHostRoutingSnapshotAccessor
+{
+    HostRoutingSnapshot? Current { get; }
+}
+
+/// <summary>Pairs one immutable configuration snapshot with all compiled route indexes.</summary>
+internal sealed class HostRoutingSnapshot
+{
+    internal HostRoutingSnapshot(HostConfigurationSnapshot configuration, RouteMatchSnapshot matcher)
+        : this(configuration, matcher, BuildExecutableRoutesOrEmpty(configuration))
+    {
+    }
+
+    internal HostRoutingSnapshot(
+        HostConfigurationSnapshot configuration,
+        RouteMatchSnapshot matcher,
+        ImmutableDictionary<Guid, ExecutableRoute> executableRoutes)
+    {
+        Configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        Matcher = matcher ?? throw new ArgumentNullException(nameof(matcher));
+        ExecutableRoutes = executableRoutes ?? throw new ArgumentNullException(nameof(executableRoutes));
+    }
+
+    /// <summary>Gets the configuration that produced <see cref="Matcher"/>.</summary>
+    internal HostConfigurationSnapshot Configuration { get; }
+
+    /// <summary>Gets the immutable route matcher compiled from <see cref="Configuration"/>.</summary>
+    internal RouteMatchSnapshot Matcher { get; }
+
+    /// <summary>Gets the immutable executable route metadata compiled from <see cref="Configuration"/>.</summary>
+    internal ImmutableDictionary<Guid, ExecutableRoute> ExecutableRoutes { get; }
+
+    private static ImmutableDictionary<Guid, ExecutableRoute> BuildExecutableRoutesOrEmpty(
+        HostConfigurationSnapshot configuration)
+    {
+        if (ExecutableRouteBuilder.TryBuild(configuration, out var routes))
+        {
+            return routes;
+        }
+
+        return ImmutableDictionary<Guid, ExecutableRoute>.Empty;
+    }
+}
+
+/// <summary>Adapts the holder's atomic publication to the Host-internal routing accessor.</summary>
+internal sealed class HostRoutingSnapshotAccessor : IHostRoutingSnapshotAccessor
+{
+    private readonly HostConfigurationSnapshotHolder _holder;
+
+    internal HostRoutingSnapshotAccessor(HostConfigurationSnapshotHolder holder)
+    {
+        _holder = holder ?? throw new ArgumentNullException(nameof(holder));
+    }
+
+    public HostRoutingSnapshot? Current => _holder.RoutingSnapshot;
+}
+
 /// <summary>Holds complete immutable configuration and replaces it atomically after validation.</summary>
 public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshotAccessor
 {
     private readonly object _replacementGate = new();
-    private HostConfigurationSnapshot? _current;
+    private HostRoutingSnapshot? _published;
 
     /// <inheritdoc />
-    public HostConfigurationSnapshot? Current => Volatile.Read(ref _current);
+    public HostConfigurationSnapshot? Current => Volatile.Read(ref _published)?.Configuration;
+
+    internal HostRoutingSnapshot? RoutingSnapshot => Volatile.Read(ref _published);
 
     /// <summary>Gets the current snapshot using the host configuration terminology.</summary>
     public HostConfigurationSnapshot? Snapshot => Current;
@@ -41,15 +103,36 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             return false;
         }
 
+        RouteSnapshotBuildResult routeBuild;
+        try
+        {
+            routeBuild = RouteMatchSnapshotBuilder.Build(snapshot.Routes);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+
+        if (!routeBuild.IsSuccess || routeBuild.Snapshot is null)
+        {
+            return false;
+        }
+
+        if (!ExecutableRouteBuilder.TryBuild(snapshot, out var executableRoutes))
+        {
+            return false;
+        }
+
+        var publication = new HostRoutingSnapshot(snapshot, routeBuild.Snapshot, executableRoutes);
         lock (_replacementGate)
         {
-            var current = Volatile.Read(ref _current);
-            if (current is not null && snapshot.Version < current.Version)
+            var current = Volatile.Read(ref _published);
+            if (current is not null && snapshot.Version < current.Configuration.Version)
             {
                 return false;
             }
 
-            Interlocked.Exchange(ref _current, snapshot);
+            Interlocked.Exchange(ref _published, publication);
             return true;
         }
     }

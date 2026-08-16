@@ -13,6 +13,8 @@
     <ProjectReference Include="../../src/Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Proxy/Nekolla.Nekostick.Proxy.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Routing/Nekolla.Nekostick.Routing.csproj" />
     <ProjectReference Include="../Fixtures.Microservice/Fixtures.Microservice.csproj" />
     <ProjectReference Include="../Fixtures.Extension/Fixtures.Extension.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />

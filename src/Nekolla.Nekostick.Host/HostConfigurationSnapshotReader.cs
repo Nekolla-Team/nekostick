@@ -132,7 +132,12 @@ internal static class HostConfigurationSnapshotMapper
             globalSettings.MaxRequestBodyBytes,
             globalSettings.MaxConcurrentRequests,
             TimeSpan.FromSeconds(globalSettings.ConfigurationPollIntervalSeconds),
-            ReadStringArray(globalSettings.TrustedProxyCidrsJson));
+            ReadStringArray(globalSettings.TrustedProxyCidrsJson),
+            new ProxyTimeoutConfiguration(
+                connectTimeout: TimeSpan.FromMilliseconds(globalSettings.ConnectTimeoutMilliseconds),
+                httpActivityTimeout: TimeSpan.FromMilliseconds(globalSettings.HttpActivityTimeoutMilliseconds),
+                httpTotalTimeout: TimeSpan.FromMilliseconds(globalSettings.HttpTotalTimeoutMilliseconds),
+                webSocketIdleTimeout: TimeSpan.FromMilliseconds(globalSettings.WebSocketIdleTimeoutMilliseconds)));
 
         return new HostConfigurationSnapshot(
             revision.Version,

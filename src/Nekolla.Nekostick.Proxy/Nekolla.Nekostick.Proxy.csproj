@@ -2,5 +2,11 @@
   <PropertyGroup>
     <AssemblyName>Nekolla.Nekostick.Proxy</AssemblyName>
     <RootNamespace>Nekolla.Nekostick.Proxy</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Yarp.ReverseProxy" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
 </Project>

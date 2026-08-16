@@ -133,10 +133,17 @@ public sealed class StaticFileResolution
 /// <summary>Owns an opened read-only static file and its fixed content type.</summary>
 public sealed class StaticFileReadHandle : IDisposable
 {
-    internal StaticFileReadHandle(FileStream stream, string contentType)
+    internal StaticFileReadHandle(
+        FileStream stream,
+        string contentType,
+        long length,
+        DateTimeOffset lastModifiedUtc)
     {
         Stream = stream;
         ContentType = contentType;
+        Length = length;
+        LastModifiedUtc = lastModifiedUtc.ToUniversalTime();
+        ETag = $"W/\"{Length}-{LastModifiedUtc.UtcDateTime.Ticks}\"";
     }
 
     /// <summary>Gets the read-only file stream.</summary>
@@ -145,8 +152,14 @@ public sealed class StaticFileReadHandle : IDisposable
     /// <summary>Gets the fixed content type selected without user configuration.</summary>
     public string ContentType { get; }
 
-    /// <summary>Gets the length observed from the opened stream.</summary>
-    public long Length => Stream.Length;
+    /// <summary>Gets the length observed from opened-file metadata.</summary>
+    public long Length { get; }
+
+    /// <summary>Gets the last-write timestamp observed for the opened file, in UTC.</summary>
+    public DateTimeOffset LastModifiedUtc { get; }
+
+    /// <summary>Gets the stable entity tag generated from the opened file metadata.</summary>
+    public string ETag { get; }
 
     /// <summary>Disposes the opened stream.</summary>
     public void Dispose() => Stream.Dispose();
@@ -158,6 +171,8 @@ public sealed class StaticFileReadHandle : IDisposable
 /// <summary>Contains the result of opening a previously safe static-file resolution.</summary>
 public sealed class StaticFileOpenResult : IDisposable
 {
+    private StaticFileReadHandle? _handle;
+
     internal StaticFileOpenResult(
         StaticFileOpenKind kind,
         StaticFileFailureReason failureReason,
@@ -165,7 +180,7 @@ public sealed class StaticFileOpenResult : IDisposable
     {
         Kind = kind;
         FailureReason = failureReason;
-        Handle = handle;
+        _handle = handle;
     }
 
     /// <summary>Gets the opening outcome.</summary>
@@ -178,10 +193,21 @@ public sealed class StaticFileOpenResult : IDisposable
     public bool IsOpened => Kind == StaticFileOpenKind.Opened && Handle is not null;
 
     /// <summary>Gets the opened file handle, or <see langword="null"/> for a failed open.</summary>
-    public StaticFileReadHandle? Handle { get; }
+    public StaticFileReadHandle? Handle => _handle;
+
+    internal StaticFileReadHandle? TransferHandle()
+    {
+        var handle = _handle;
+        _handle = null;
+        return handle;
+    }
 
     /// <summary>Disposes the opened file, if any.</summary>
-    public void Dispose() => Handle?.Dispose();
+    public void Dispose()
+    {
+        _handle?.Dispose();
+        _handle = null;
+    }
 
     /// <summary>Returns a non-sensitive representation that never contains a filesystem path.</summary>
     public override string ToString() => $"StaticFileOpenResult:{Kind}";
