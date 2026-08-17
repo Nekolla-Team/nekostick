@@ -3,18 +3,18 @@ using Npgsql;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence;
 using Xunit;
-using static Nekolla.Nekostick.IntegrationTests.PhaseBPostgresContractTestData;
+using static Nekolla.Nekostick.IntegrationTests.PostgresConfigurationContractTestData;
 
 namespace Nekolla.Nekostick.IntegrationTests;
 
-/// <summary>Exercises Phase B extension settings contracts against real PostgreSQL.</summary>
-public sealed partial class PhaseBPostgresContractTests
+/// <summary>Exercises PostgreSQL extension settings contracts.</summary>
+public sealed partial class PostgresConfigurationContractTests
 {
     /// <summary>Verifies extension settings have independent versions and advance the global revision.</summary>
     [Fact]
     public async Task ExtensionSettingsReadWriteAndConflictUseSettingsVersions()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var database = test.Database;
         var api = test.Api;
         var cancellationToken = TestContext.Current.CancellationToken;

@@ -5,10 +5,10 @@ using Xunit;
 
 namespace Nekolla.Nekostick.UnitTests;
 
-public sealed class OraclePhaseADiagnosticsTests
+public sealed class DiagnosticsSerializationTests
 {
     private const string OpaqueSecretToken =
-        "oracle-phase-a-opaque-secret-7f4e9b2c";
+        "opaque-diagnostic-secret-7f4e9b2c";
     private const string ExceptionText =
         "System.InvalidOperationException: synthetic diagnostic failure";
     private static readonly string[] ExpectedDiagnosticPropertyNames =

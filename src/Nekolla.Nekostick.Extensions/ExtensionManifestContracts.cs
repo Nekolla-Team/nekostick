@@ -8,8 +8,8 @@ public enum ManifestSourceFormat
     /// <summary>The strict JSON manifest format.</summary>
     Json,
 
-    /// <summary>YAML was selected, but its dependency-backed adapter is deferred.</summary>
-    YamlDeferred
+    /// <summary>The safe scalar/map/list YAML manifest format.</summary>
+    Yaml
 }
 
 /// <summary>Provides stable, non-sensitive failure categories for extension core operations.</summary>
@@ -27,9 +27,8 @@ public enum ExtensionFailureCode
     /// <summary>More than one manifest file was found.</summary>
     DuplicateManifest,
 
-    /// <summary>A YAML manifest was selected without a parser adapter.</summary>
-    YamlParserDeferred,
-
+    /// <summary>A YAML manifest was selected but is invalid.</summary>
+    YamlInvalid,
     /// <summary>The manifest was not valid strict JSON.</summary>
     JsonInvalid,
 
@@ -78,7 +77,7 @@ public enum ExtensionFailureCode
     /// <summary>The entry type could not be found.</summary>
     EntryTypeMissing,
 
-    /// <summary>The entry type does not implement the current internal marker.</summary>
+    /// <summary>The entry type does not implement the public Contracts lifecycle ABI.</summary>
     EntryTypeNotCompatible,
 
     /// <summary>The collectible load operation failed.</summary>
@@ -89,11 +88,63 @@ public enum ExtensionFailureCode
 
     /// <summary>The unload operation is currently in progress.</summary>
     UnloadInProgress,
+    /// <summary>The extension entry constructor failed safely.</summary>
+    EntryConstructorFailed,
 
-    /// <summary>The collectible context was not confirmed released after three GC cycles.</summary>
+    /// <summary>The extension lifecycle callback failed safely.</summary>
+    LifecycleFailed,
+
+    /// <summary>The extension handler registry conflicts with an existing registration.</summary>
+    HandlerConflict,
+
+    /// <summary>The global extension fallback is already registered.</summary>
+    FallbackConflict,
+
+    /// <summary>The extension runtime operation could not complete.</summary>
+    RuntimeUnavailable,
+
+    /// <summary>The requested extension handler failed safely.</summary>
+    HandlerFailed,
+
+    /// <summary>The event or task callback failed safely.</summary>
+    CallbackFailed,
+
+    /// <summary>The extension reached its rolling failure threshold.</summary>
+    FailureThresholdReached,
+
+    /// <summary>The requested extension is not loaded.</summary>
+    ExtensionNotLoaded,
+
+    /// <summary>The requested handler is not available.</summary>
+    HandlerUnavailable,
+
+    /// <summary>The operation was cancelled before completion.</summary>
+    Cancelled,
+
+    /// <summary>The replacement could not be committed and the previous instance was preserved.</summary>
+    ReplacementPreserved,
+
+    /// <summary>The extension handler drain exceeded its bounded timeout.</summary>
+    DrainTimeout,
+
+    /// <summary>The previous extension stop failed safely.</summary>
+    StopFailed,
+
+    /// <summary>The extension was already stopped.</summary>
+    AlreadyStopped,
+
+    /// <summary>The extension task limit was reached.</summary>
+    TaskLimitReached,
+
+    /// <summary>The event queue is full and dropped the newest event.</summary>
+    EventQueueFull,
+
+    /// <summary>The collectible context could not be released after bounded verification.</summary>
+    UnloadLeak,
+
+    /// <summary>The collectible context could not be released after bounded verification.</summary>
     UnloadNotConfirmed
 }
-
 /// <summary>Describes one manifest dependency.</summary>
 public sealed record ExtensionDependency
 {

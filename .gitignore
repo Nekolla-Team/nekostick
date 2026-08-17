@@ -65,6 +65,7 @@ project.lock.json
 project.fragment.lock.json
 artifacts/
 
+src/Nekolla.Nekostick.Host/.nativehelper/
 # Tye
 .tye/
 
@@ -487,4 +488,5 @@ $RECYCLE.BIN/
 # IDE & Tools
 .orca/
 .slim/
+.omp/
 .ignore

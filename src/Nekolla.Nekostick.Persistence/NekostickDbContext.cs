@@ -35,6 +35,8 @@ public sealed class NekostickDbContext : DbContext
 
     /// <summary>Gets the node registration set.</summary>
     public DbSet<Node> Nodes => Set<Node>();
+    /// <summary>Gets persisted node-local service runtime state.</summary>
+    public DbSet<ServiceRuntime> ServiceRuntimes => Set<ServiceRuntime>();
 
     /// <summary>Gets the port lease set.</summary>
     public DbSet<PortLease> PortLeases => Set<PortLease>();
@@ -55,8 +57,29 @@ public sealed class NekostickDbContext : DbContext
         ConfigureService(modelBuilder.Entity<Service>());
         ConfigureExtensionRecord(modelBuilder.Entity<ExtensionRecord>());
         ConfigureExtensionSetting(modelBuilder.Entity<ExtensionSetting>());
+        ConfigureServiceRuntime(modelBuilder.Entity<ServiceRuntime>());
         ConfigureNode(modelBuilder.Entity<Node>());
         ConfigurePortLease(modelBuilder.Entity<PortLease>());
+
+    }
+
+    private static void ConfigureServiceRuntime(EntityTypeBuilder<ServiceRuntime> builder)
+    {
+        builder.ToTable("service_runtimes", PersistenceDatabaseDefaults.Schema, table =>
+        {
+            table.HasCheckConstraint("ck_service_runtimes_state", "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
+        });
+        builder.HasKey(value => new { value.NodeId, value.ServiceId }).HasName("pk_service_runtimes");
+        builder.HasIndex(value => value.ServiceId).HasDatabaseName("ix_service_runtimes_service_id");
+        builder.Property(value => value.NodeId).HasColumnName("node_id").HasMaxLength(128).IsRequired();
+        builder.Property(value => value.ServiceId).HasColumnName("service_id").HasColumnType("uuid").IsRequired();
+        ConfigureEnum(builder.Property(value => value.Lifecycle).HasColumnName("lifecycle"), 16);
+        ConfigureEnum(builder.Property(value => value.Health).HasColumnName("health"), 16);
+        builder.Property(value => value.RestartCount).HasColumnName("restart_count").HasColumnType("integer").IsRequired();
+        ConfigureUtcTimestamp(builder.Property(value => value.CreatedAt).HasColumnName("created_at"));
+        ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
+        ConfigureVersion(builder.Property(value => value.Version));
+        builder.HasOne(value => value.Service).WithMany().HasForeignKey(value => value.ServiceId).HasConstraintName("fk_service_runtimes_services_service_id").OnDelete(DeleteBehavior.Restrict);
     }
 
     private static void ConfigureConfigurationRevision(EntityTypeBuilder<ConfigurationRevision> builder)

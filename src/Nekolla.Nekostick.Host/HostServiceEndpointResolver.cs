@@ -1,0 +1,92 @@
+using System.Collections.Immutable;
+using System.Net;
+using Nekolla.Nekostick.Proxy;
+
+namespace Nekolla.Nekostick.Host;
+
+/// <summary>Provides the immutable, already-published local endpoint lease view.</summary>
+public interface IHostServiceEndpointSnapshotAccessor
+{
+    /// <summary>Gets the atomically published endpoint leases.</summary>
+    ImmutableDictionary<Guid, HostServiceEndpointLease> Current { get; }
+}
+
+/// <summary>Safe endpoint lease data published by Host lifecycle composition.</summary>
+/// <param name="ServiceId">The service identifier associated with the lease.</param>
+/// <param name="Port">The loopback port assigned to the service.</param>
+/// <param name="ExpiresAt">The time at which the lease expires.</param>
+public sealed record HostServiceEndpointLease(Guid ServiceId, int Port, DateTimeOffset ExpiresAt)
+{
+    /// <summary>Determines whether the lease identifies a valid, unexpired endpoint at the specified time.</summary>
+    /// <param name="now">The current time.</param>
+    /// <returns><see langword="true"/> when the lease is active; otherwise, <see langword="false"/>.</returns>
+    public bool IsActive(DateTimeOffset now) =>
+        ServiceId != Guid.Empty && Port is >= 1 and <= 65535 && now < ExpiresAt;
+}
+
+/// <summary>Atomically publishes a complete endpoint lease snapshot.</summary>
+public sealed class HostServiceEndpointSnapshotPublisher : IHostServiceEndpointSnapshotAccessor
+{
+    private ImmutableDictionary<Guid, HostServiceEndpointLease> _current =
+        ImmutableDictionary<Guid, HostServiceEndpointLease>.Empty;
+
+    /// <summary>Gets the current immutable endpoint lease view.</summary>
+    public ImmutableDictionary<Guid, HostServiceEndpointLease> Current =>
+        Volatile.Read(ref _current);
+
+    /// <summary>Replaces the complete lease view; invalid entries are discarded.</summary>
+    /// <param name="leases">The leases to validate and publish.</param>
+    public void Publish(IEnumerable<HostServiceEndpointLease> leases)
+    {
+        ArgumentNullException.ThrowIfNull(leases);
+        var builder = ImmutableDictionary.CreateBuilder<Guid, HostServiceEndpointLease>();
+        foreach (var lease in leases)
+        {
+            if (lease is not null && lease.IsActive(DateTimeOffset.UtcNow))
+            {
+                builder[lease.ServiceId] = lease;
+            }
+        }
+        Interlocked.Exchange(ref _current, builder.ToImmutable());
+    }
+}
+
+/// <summary>Resolves only active, non-expired local loopback leases from one immutable view.</summary>
+public sealed class HostServiceEndpointResolver : IMicroserviceEndpointResolver
+{
+    private readonly IHostServiceEndpointSnapshotAccessor _accessor;
+
+    /// <summary>Creates a resolver over the supplied endpoint snapshot accessor.</summary>
+    /// <param name="accessor">The immutable endpoint snapshot accessor.</param>
+    public HostServiceEndpointResolver(IHostServiceEndpointSnapshotAccessor accessor)
+    {
+        _accessor = accessor ?? throw new ArgumentNullException(nameof(accessor));
+    }
+
+    /// <summary>Resolves an active service lease to a local loopback endpoint.</summary>
+    /// <param name="serviceId">The service identifier to resolve.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The available loopback endpoint, or an unavailable result.</returns>
+    public ValueTask<MicroserviceEndpointResolution> ResolveAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (serviceId == Guid.Empty ||
+            !_accessor.Current.TryGetValue(serviceId, out var lease) ||
+            !lease.IsActive(DateTimeOffset.UtcNow))
+        {
+            return ValueTask.FromResult(MicroserviceEndpointResolution.Unavailable);
+        }
+        try
+        {
+            var endpoint = new MicroserviceEndpoint(
+                new UriBuilder(Uri.UriSchemeHttp, IPAddress.Loopback.ToString(), lease.Port).Uri);
+            return ValueTask.FromResult(MicroserviceEndpointResolution.Available(endpoint));
+        }
+        catch (Exception)
+        {
+            return ValueTask.FromResult(MicroserviceEndpointResolution.Unavailable);
+        }
+    }
+}

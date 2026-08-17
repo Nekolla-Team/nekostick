@@ -5,7 +5,7 @@ using Xunit;
 
 namespace Nekolla.Nekostick.UnitTests;
 
-public sealed class RoutingPhaseCTests
+public sealed class RoutingMatchingTests
 {
     [Theory]
     [InlineData("/a/./b/../c", "/a/c")]

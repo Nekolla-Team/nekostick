@@ -1,59 +1,53 @@
+using Nekolla.Nekostick.Contracts;
+
 namespace Nekolla.Nekostick.Extensions;
 
-// This is deliberately internal until the stable extension ABI is published in Contracts.
-internal interface IInternalExtensionEntryMarker
+internal sealed class ExtensionHostBridge : IExtensionHostBridge
 {
+    internal ExtensionHostBridge(
+        HostApiVersion apiVersion,
+        ExtensionSettingsConfiguration? settings,
+        ExtensionTaskTracker tasks,
+        ExtensionEventQueue events,
+        Action<ExtensionStatus> reportStatus,
+        Action<ExtensionLogLevel, string> reportLog)
+    {
+        ApiVersion = apiVersion;
+        Configuration = new ExtensionSettingsReader(settings);
+        Tasks = tasks;
+        Events = events;
+        Status = new ExtensionStatusSink(reportStatus);
+        Logger = new ExtensionLogger(reportLog);
+    }
+
+    public HostApiVersion ApiVersion { get; }
+
+    public IExtensionSettingsReader Configuration { get; }
+
+    public IExtensionTaskScheduler Tasks { get; }
+
+    public IExtensionEventPublisher Events { get; }
+
+    public IExtensionStatusSink Status { get; }
+
+    public IExtensionLogger Logger { get; }
 }
 
-// Deferred until the YAML dependency and its safe scalar/map/list policy are fixed.
-internal interface IDeferredYamlManifestParser
+internal sealed class ExtensionStartContext : IExtensionStartContext
 {
-    ManifestDiscoveryResult Parse(string canonicalRoot, string canonicalManifestPath);
-}
+    internal ExtensionStartContext(
+        bool reloading,
+        IExtensionHostBridge host,
+        ExtensionHandlerRegistry registration)
+    {
+        Reloading = reloading;
+        Host = host;
+        Registration = registration;
+    }
 
-// Future Host binding seam only. No implementation, DI access, HTTP access, or persistence is provided here.
-internal interface IExtensionHostBridge
-{
-    IExtensionServiceScope Services { get; }
+    public bool Reloading { get; }
 
-    IExtensionTaskScheduler Tasks { get; }
+    public IExtensionHostBridge Host { get; }
 
-    IExtensionLogger Logger { get; }
-
-    IExtensionStatusSink Status { get; }
-
-    IExtensionEventPublisher Events { get; }
-
-    IExtensionConfigurationReader Configuration { get; }
-}
-
-internal interface IExtensionServiceScope
-{
-}
-
-internal interface IExtensionTaskScheduler
-{
-}
-
-internal interface IExtensionLogger
-{
-}
-
-internal interface IExtensionStatusSink
-{
-}
-
-internal interface IExtensionEventPublisher
-{
-}
-
-internal interface IExtensionConfigurationReader
-{
-}
-
-internal interface IInternalExtensionEntry : IInternalExtensionEntryMarker
-{
-    ValueTask StartAsync(IExtensionHostBridge hostBridge, CancellationToken cancellationToken);
-
-    ValueTask StopAsync(CancellationToken cancellationToken);
+    public IExtensionRegistration Registration { get; }
 }

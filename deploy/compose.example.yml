@@ -16,9 +16,11 @@ services:
       retries: 12
 
   nekostick:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    # The Host publish embeds NativeHelper; no helper artifact is mounted or copied.
     environment:
       NEKOSTICK_CONNECTION_STRING: ${NEKOSTICK_CONNECTION_STRING:?NEKOSTICK_CONNECTION_STRING must be set}
       NEKOSTICK_NODE_ID: ${NEKOSTICK_NODE_ID:?NEKOSTICK_NODE_ID must be set to a stable unique value}

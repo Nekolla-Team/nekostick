@@ -6,14 +6,14 @@ using Xunit;
 
 namespace Nekolla.Nekostick.IntegrationTests;
 
-/// <summary>Owns the common real-PostgreSQL scope used by Phase B contract tests.</summary>
-internal sealed class PhaseBPostgresContractTestScope : IAsyncDisposable
+/// <summary>Owns the common real-PostgreSQL scope used by configuration contract tests.</summary>
+internal sealed class PostgresConfigurationTestScope : IAsyncDisposable
 {
     private readonly NekostickDbContext context;
     private readonly string connectionString;
     private int disposed;
 
-    private PhaseBPostgresContractTestScope(
+    private PostgresConfigurationTestScope(
         PostgresTestDatabase database,
         NekostickDbContext context,
         EfHostConfigApi api,
@@ -35,7 +35,7 @@ internal sealed class PhaseBPostgresContractTestScope : IAsyncDisposable
     internal NekostickDbContext Context => context;
 
     /// <summary>Creates and migrates an isolated PostgreSQL test scope.</summary>
-    internal static async Task<PhaseBPostgresContractTestScope> CreateAsync()
+    internal static async Task<PostgresConfigurationTestScope> CreateAsync()
     {
         var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
         var database = await PostgresTestDatabase.CreateAsync(connectionString);
@@ -48,7 +48,7 @@ internal sealed class PhaseBPostgresContractTestScope : IAsyncDisposable
                 .MigrateAndValidateAsync(context, TestContext.Current.CancellationToken);
             Assert.True(result.IsSuccess, result.Error?.Message);
             api = new EfHostConfigApi(context);
-            return new PhaseBPostgresContractTestScope(database, context, api, connectionString);
+            return new PostgresConfigurationTestScope(database, context, api, connectionString);
         }
         catch
         {
@@ -84,8 +84,8 @@ internal sealed class PhaseBPostgresContractTestScope : IAsyncDisposable
     }
 }
 
-/// <summary>Shared identifiers and configuration builders for Phase B contract tests.</summary>
-internal static class PhaseBPostgresContractTestData
+/// <summary>Shared identifiers and configuration builders for PostgreSQL contract tests.</summary>
+internal static class PostgresConfigurationContractTestData
 {
     internal static readonly Guid ServiceId =
         Guid.Parse("018f0f00-0000-7000-8000-000000000010");
@@ -96,7 +96,7 @@ internal static class PhaseBPostgresContractTestData
     internal static readonly Guid MissingServiceId =
         Guid.Parse("018f0f00-0000-7000-8000-000000000012");
 
-    internal const string ExtensionId = "phase-b-extension";
+    internal const string ExtensionId = "fixture-extension";
 
     internal static ConfigurationChangeSet CreateCompleteChangeSet(
         HostConfigurationSnapshot snapshot)
@@ -164,11 +164,11 @@ internal static class PhaseBPostgresContractTestData
         new(
             id,
             enabled: true,
-            fileName: "/usr/bin/phase-b-fixture",
+            fileName: "/usr/bin/fixture-service",
             argumentList: ImmutableArray.Create("--integration"),
             workingDirectory: "/tmp",
             environment: ImmutableDictionary<string, string>.Empty
-                .Add("PHASE_B_MODE", "enabled"),
+                .Add("FIXTURE_MODE", "enabled"),
             startMode: ServiceStartMode.Eager,
             restartPolicy: ServiceRestartPolicy.Always,
             healthCheck: new ServiceHealthCheckConfiguration(
@@ -185,7 +185,7 @@ internal static class PhaseBPostgresContractTestData
             enabled: true,
             matcher: new RouteMatcherConfiguration(
                 RouteMatcherType.Exact,
-                "/phase-b",
+                "/fixture",
                 ImmutableArray<string>.Empty,
                 ImmutableArray<string>.Empty),
             target: new MicroserviceRouteTargetConfiguration(serviceId),

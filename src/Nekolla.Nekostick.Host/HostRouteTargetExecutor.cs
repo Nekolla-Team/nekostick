@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
 using Nekolla.Nekostick.Contracts;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Proxy;
 using Nekolla.Nekostick.Routing;
 using ProxyHeaderRewrite = Nekolla.Nekostick.Proxy.HeaderRewriteConfiguration;
@@ -9,8 +10,8 @@ using ProxyHeaderRewriteOperation = Nekolla.Nekostick.Proxy.HeaderRewriteOperati
 
 namespace Nekolla.Nekostick.Host;
 
-/// <summary>Executes static and microservice targets from one published Host snapshot.</summary>
-internal sealed class HostRouteTargetExecutor : IRouteTargetExecutor
+/// <summary>Executes static, microservice, and staged extension targets from one snapshot.</summary>
+internal sealed class HostRouteTargetExecutor : ILeasedRouteTargetExecutor
 {
     private static readonly string[] StaticRequestHeaderNames =
     [
@@ -21,17 +22,37 @@ internal sealed class HostRouteTargetExecutor : IRouteTargetExecutor
     ];
 
     private readonly MicroserviceHttpExecutor _microserviceExecutor;
+    private readonly IHostServiceLifecycleCoordinator? _lifecycleCoordinator;
 
-    internal HostRouteTargetExecutor(MicroserviceHttpExecutor microserviceExecutor)
+    internal HostRouteTargetExecutor(
+        MicroserviceHttpExecutor microserviceExecutor,
+        IHostServiceLifecycleCoordinator? lifecycleCoordinator = null)
     {
         _microserviceExecutor = microserviceExecutor
             ?? throw new ArgumentNullException(nameof(microserviceExecutor));
+        _lifecycleCoordinator = lifecycleCoordinator;
     }
 
-    public async ValueTask<RouteTargetExecutionResult> ExecuteAsync(
+    public ValueTask<RouteTargetExecutionResult> ExecuteAsync(
         HttpContext context,
         HostRoutingSnapshot snapshot,
         RouteMatch match,
+        CancellationToken cancellationToken) =>
+        ExecuteCoreAsync(context, snapshot, match, null, cancellationToken);
+
+    public ValueTask<RouteTargetExecutionResult> ExecuteAsync(
+        HttpContext context,
+        HostRoutingSnapshot snapshot,
+        RouteMatch match,
+        HostRoutingSnapshotLease publicationLease,
+        CancellationToken cancellationToken) =>
+        ExecuteCoreAsync(context, snapshot, match, publicationLease, cancellationToken);
+
+    private async ValueTask<RouteTargetExecutionResult> ExecuteCoreAsync(
+        HttpContext context,
+        HostRoutingSnapshot snapshot,
+        RouteMatch match,
+        HostRoutingSnapshotLease? publicationLease,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -50,8 +71,14 @@ internal sealed class HostRouteTargetExecutor : IRouteTargetExecutor
                 StaticFileRouteTargetConfiguration =>
                     await ExecuteStaticAsync(context, match, executable, cancellationToken),
                 MicroserviceRouteTargetConfiguration =>
-                    await ExecuteMicroserviceAsync(context, match, executable, cancellationToken),
-                ExtensionHandlerRouteTargetConfiguration => RouteTargetExecutionResult.Deferred,
+                    await ExecuteMicroserviceAsync(context, snapshot, match, executable, cancellationToken),
+                ExtensionHandlerRouteTargetConfiguration extension =>
+                    await ExecuteExtensionAsync(
+                        context,
+                        snapshot,
+                        extension.HandlerId,
+                        publicationLease,
+                        cancellationToken),
                 _ => RouteTargetExecutionResult.SafeFailure
             };
         }
@@ -72,6 +99,72 @@ internal sealed class HostRouteTargetExecutor : IRouteTargetExecutor
             }
 
             return RouteTargetExecutionResult.SafeFailure;
+        }
+    }
+
+    private static async ValueTask<RouteTargetExecutionResult> ExecuteExtensionAsync(
+        HttpContext context,
+        HostRoutingSnapshot snapshot,
+        string handlerId,
+        HostRoutingSnapshotLease? publicationLease,
+        CancellationToken cancellationToken)
+    {
+        ExtensionDispatchLease? dispatchLease = publicationLease?.DispatchLease;
+        var ownsLease = false;
+        if (dispatchLease is null && snapshot.DispatchGeneration is not null)
+        {
+            dispatchLease = snapshot.DispatchGeneration.TryAcquireLease();
+            ownsLease = dispatchLease is not null;
+        }
+
+        if (dispatchLease is null)
+        {
+            return RouteTargetExecutionResult.Unavailable;
+        }
+
+        try
+        {
+            var request = await ExtensionHttpAdapter.CreateRequestAsync(
+                    context,
+                    snapshot.Configuration.GlobalSettings.MaxRequestBodyBytes,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (request is null)
+            {
+                return RouteTargetExecutionResult.BadRequest;
+            }
+
+            var result = await dispatchLease
+                .HandleAsync(handlerId, request, cancellationToken)
+                .ConfigureAwait(false);
+            return result.State switch
+            {
+                ExtensionInvocationState.Handled when result.Response is not null =>
+                    await ExtensionHttpAdapter.WriteResponseAsync(
+                        context,
+                        result.Response,
+                        cancellationToken).ConfigureAwait(false)
+                        ? RouteTargetExecutionResult.Handled
+                        : RouteTargetExecutionResult.InternalServerError,
+                ExtensionInvocationState.Failed => RouteTargetExecutionResult.InternalServerError,
+                ExtensionInvocationState.Unavailable => RouteTargetExecutionResult.Unavailable,
+                _ => RouteTargetExecutionResult.Unavailable
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return RouteTargetExecutionResult.Cancelled;
+        }
+        catch
+        {
+            return RouteTargetExecutionResult.InternalServerError;
+        }
+        finally
+        {
+            if (ownsLease)
+            {
+                dispatchLease.Dispose();
+            }
         }
     }
 
@@ -180,6 +273,7 @@ internal sealed class HostRouteTargetExecutor : IRouteTargetExecutor
 
     private async ValueTask<RouteTargetExecutionResult> ExecuteMicroserviceAsync(
         HttpContext context,
+        HostRoutingSnapshot snapshot,
         RouteMatch match,
         ExecutableRoute executable,
         CancellationToken cancellationToken)
@@ -191,6 +285,17 @@ internal sealed class HostRouteTargetExecutor : IRouteTargetExecutor
 
         try
         {
+            if (_lifecycleCoordinator is not null)
+            {
+                var readiness = await _lifecycleCoordinator
+                    .EnsureReadyAsync(snapshot.Configuration, target.ServiceId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!readiness.IsReady)
+                {
+                    return RouteTargetExecutionResult.Unavailable;
+                }
+            }
+
             var effectiveClientIdentity = MicroserviceHttpTransformer
                 .ResolveEffectiveClientIdentity(context, executable.TrustedProxyPolicy);
             var expansionContext = new RequestHeaderExpansionContext(

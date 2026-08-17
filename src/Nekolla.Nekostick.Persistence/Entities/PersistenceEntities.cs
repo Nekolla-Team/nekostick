@@ -318,3 +318,33 @@ public sealed class PortLease
     /// <summary>Gets or sets the service navigation.</summary>
     public Service? Service { get; set; }
 }
+/// <summary>Stores node-local observable runtime state for one service.</summary>
+public sealed class ServiceRuntime
+{
+    /// <summary>Gets or sets the referenced service identifier.</summary>
+    public Guid ServiceId { get; set; }
+
+    /// <summary>Gets or sets the owning stable node identifier.</summary>
+    public string NodeId { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the service lifecycle state.</summary>
+    public ServiceLifecycleState Lifecycle { get; set; }
+
+    /// <summary>Gets or sets the service health state.</summary>
+    public ServiceHealthState Health { get; set; }
+
+    /// <summary>Gets or sets the active-window restart count.</summary>
+    public int RestartCount { get; set; }
+
+    /// <summary>Gets or sets the UTC creation timestamp.</summary>
+    public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>Gets or sets the UTC update timestamp.</summary>
+    public DateTimeOffset UpdatedAt { get; set; }
+
+    /// <summary>Gets or sets the bigint optimistic-concurrency version.</summary>
+    public long Version { get; set; }
+
+    /// <summary>Gets or sets the service navigation.</summary>
+    public Service? Service { get; set; }
+}

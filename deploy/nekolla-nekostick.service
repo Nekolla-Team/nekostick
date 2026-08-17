@@ -9,7 +9,7 @@ User=nekostick
 Group=nekostick
 WorkingDirectory=/opt/nekostick
 EnvironmentFile=/etc/nekostick/nekostick.env
-ExecStart=/usr/bin/dotnet /opt/nekostick/Nekolla.Nekostick.Host.dll run
+ExecStart=/opt/nekostick/Nekolla.Nekostick.Host run
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM
@@ -21,7 +21,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
-ProtectHome=true
+# The Host extracts its embedded helper into the nekostick user's cache.
+ProtectHome=false
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -34,7 +35,7 @@ AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 
-# Extensions are trusted code loaded from the executable-adjacent directory and remain read-only.
+# Extensions are trusted code loaded from /opt/nekostick/extensions and remain read-only.
 ReadOnlyPaths=/opt/nekostick/extensions
 
 [Install]

@@ -11,6 +11,7 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Extensions/Nekolla.Nekostick.Extensions.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Proxy/Nekolla.Nekostick.Proxy.csproj" />

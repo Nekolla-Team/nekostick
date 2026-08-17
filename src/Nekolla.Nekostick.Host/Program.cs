@@ -7,8 +7,10 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Proxy;
+using Nekolla.Nekostick.Supervision;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -137,8 +139,8 @@ internal static class Program
                 return 1;
             }
 
-            var snapshotHolder = app.Services.GetRequiredService<HostConfigurationSnapshotHolder>();
-            if (!snapshotHolder.TryReplace(snapshotResult.Value))
+            var publisher = app.Services.GetRequiredService<HostConfigurationPublisher>();
+            if (!await publisher.PublishAsync(snapshotResult.Value, cancellationToken).ConfigureAwait(false))
             {
                 var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
                 var logger = loggerFactory.CreateLogger(HostLoggerCategory.Startup);
@@ -211,9 +213,15 @@ internal static class Program
         builder.Services.AddSingleton<IHostRoutingSnapshotAccessor>(serviceProvider =>
             new HostRoutingSnapshotAccessor(
                 serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>()));
-        builder.Services.AddSingleton<IRouteFallbackDispatcher>(NoOpRouteFallbackDispatcher.Instance);
+        builder.Services.AddSingleton<ExtensionRuntimeManager>(_ =>
+            new ExtensionRuntimeManager(HostApiVersion.Current));
+        builder.Services.AddSingleton<HostConfigurationPublisher>();
+        builder.Services.AddSingleton<IRouteFallbackDispatcher, ExtensionRouteFallbackDispatcher>();
         builder.Services.AddMicroserviceProxy();
-        builder.Services.AddSingleton<IRouteTargetExecutor, HostRouteTargetExecutor>();
+        builder.Services.AddSingleton<IRouteTargetExecutor>(serviceProvider =>
+            new HostRouteTargetExecutor(
+                serviceProvider.GetRequiredService<MicroserviceHttpExecutor>(),
+                serviceProvider.GetService<IHostServiceLifecycleCoordinator>()));
         builder.Services.AddSingleton<HostRouteDispatcher>(serviceProvider =>
             new HostRouteDispatcher(
                 serviceProvider.GetRequiredService<IHostRoutingSnapshotAccessor>(),
@@ -245,7 +253,30 @@ internal static class Program
                 new PostgresHostNodeActivityLease(
                     serviceProvider.GetRequiredService<HostRuntimeOptions>()));
             builder.Services.AddHostedService<HostConfigurationRefreshService>();
-            builder.Services.AddHostedService<HostNodeRegistrationService>();
+            if (!command.RunOptions.DisableSupervisor)
+            {
+                builder.Services.AddSingleton<HostServiceEndpointSnapshotPublisher>();
+                builder.Services.AddSingleton<IHostServiceEndpointSnapshotAccessor>(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostServiceEndpointSnapshotPublisher>());
+                builder.Services.AddSingleton<IMicroserviceEndpointResolver, HostServiceEndpointResolver>();
+                var helperPath = NativeHelperExtractor.TryExtract();
+                builder.Services.AddSingleton<IProcessExecutor>(_ => new PosixProcessExecutor(helperPath));
+                builder.Services.AddSingleton<IServiceHealthProbe>(serviceProvider =>
+                    new ServiceHealthProbe(
+                        serviceProvider.GetRequiredService<IProcessExecutor>()));
+                builder.Services.AddSingleton<HostPortLeaseStoreAdapter>(serviceProvider =>
+                    new HostPortLeaseStoreAdapter(
+                        serviceProvider.GetRequiredService<IDbContextFactory<NekostickDbContext>>(),
+                        serviceProvider.GetRequiredService<HostRuntimeState>()));
+                builder.Services.AddSingleton<IPortLeaseStore>(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());
+                builder.Services.AddSingleton<HostServiceLifecycleManager>();
+                builder.Services.AddSingleton<IHostServiceLifecycleCoordinator>(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
+                builder.Services.AddHostedService(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
+                builder.Services.AddHostedService<HostNodeRegistrationService>();
+            }
 
             // ConfigureKestrel only builds endpoint options. The endpoint is not bound until
             // RunAsync, which is called after InspectDatabaseAsync has succeeded.

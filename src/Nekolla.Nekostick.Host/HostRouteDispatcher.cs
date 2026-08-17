@@ -12,6 +12,15 @@ internal interface IRouteFallbackDispatcher
     ValueTask<bool> TryDispatchAsync(HttpContext context, RouteNoMatchReason reason);
 }
 
+/// <summary>Dispatches a fallback while holding the selected snapshot publication lease.</summary>
+internal interface ILeasedRouteFallbackDispatcher : IRouteFallbackDispatcher
+{
+    ValueTask<bool> TryDispatchAsync(
+        HttpContext context,
+        RouteNoMatchReason reason,
+        HostRoutingSnapshotLease publicationLease);
+}
+
 /// <summary>Declines every no-match fallback without loading any target or extension.</summary>
 internal sealed class NoOpRouteFallbackDispatcher : IRouteFallbackDispatcher
 {
@@ -92,8 +101,8 @@ internal sealed class HostRouteDispatcher
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var snapshot = _snapshotAccessor.Current;
-        if (snapshot is null)
+        await using var publicationLease = TryAcquireSnapshotLease();
+        if (publicationLease is null)
         {
             await WriteResponseAsync(
                 context,
@@ -102,6 +111,7 @@ internal sealed class HostRouteDispatcher
             return;
         }
 
+        var snapshot = publicationLease.Snapshot;
         RouteMatchResult result;
         try
         {
@@ -129,11 +139,11 @@ internal sealed class HostRouteDispatcher
                 return;
 
             case RouteMatchStatus.NoMatch:
-                await DispatchFallbackOrNotFoundAsync(context, result);
+                await DispatchFallbackOrNotFoundAsync(context, result, publicationLease);
                 return;
 
             case RouteMatchStatus.Matched:
-                await DispatchMatchedRouteAsync(context, snapshot, result.Match);
+                await DispatchMatchedRouteAsync(context, snapshot, result.Match, publicationLease);
                 return;
 
             default:
@@ -145,10 +155,16 @@ internal sealed class HostRouteDispatcher
         }
     }
 
+    private HostRoutingSnapshotLease? TryAcquireSnapshotLease() =>
+        _snapshotAccessor is IHostRoutingSnapshotLeaseAccessor leaseAccessor
+            ? leaseAccessor.TryAcquireLease()
+            : HostRoutingSnapshotLease.Capture(_snapshotAccessor.Current);
+
     private async Task DispatchMatchedRouteAsync(
         HttpContext context,
         HostRoutingSnapshot snapshot,
-        RouteMatch? match)
+        RouteMatch? match,
+        HostRoutingSnapshotLease publicationLease)
     {
         if (match is null)
         {
@@ -158,15 +174,22 @@ internal sealed class HostRouteDispatcher
                 ServiceUnavailableMessage);
             return;
         }
-
         RouteTargetExecutionResult executionResult;
+
         try
         {
-            executionResult = await _targetExecutor.ExecuteAsync(
-                context,
-                snapshot,
-                match,
-                context.RequestAborted);
+            executionResult = _targetExecutor is ILeasedRouteTargetExecutor leasedExecutor
+                ? await leasedExecutor.ExecuteAsync(
+                    context,
+                    snapshot,
+                    match,
+                    publicationLease,
+                    context.RequestAborted)
+                : await _targetExecutor.ExecuteAsync(
+                    context,
+                    snapshot,
+                    match,
+                    context.RequestAborted);
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
@@ -211,6 +234,8 @@ internal sealed class HostRouteDispatcher
                 (StatusCodes.Status502BadGateway, BadGatewayMessage),
             RouteTargetExecutionResult.GatewayTimeout =>
                 (StatusCodes.Status504GatewayTimeout, GatewayTimeoutMessage),
+            RouteTargetExecutionResult.InternalServerError =>
+                (StatusCodes.Status500InternalServerError, "Internal server error."),
             _ => (StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage)
         };
         await WriteResponseAsync(context, statusCode, message);
@@ -233,13 +258,25 @@ internal sealed class HostRouteDispatcher
         return string.IsNullOrEmpty(host) ? null : host;
     }
 
-    private async Task DispatchFallbackOrNotFoundAsync(HttpContext context, RouteMatchResult result)
+    private async Task DispatchFallbackOrNotFoundAsync(
+        HttpContext context,
+        RouteMatchResult result,
+        HostRoutingSnapshotLease publicationLease)
     {
         var reason = result.NoMatchReason ?? RouteNoMatchReason.NoRoute;
+        if (reason != RouteNoMatchReason.NoRoute &&
+            _fallbackDispatcher is ILeasedRouteFallbackDispatcher)
+        {
+            await WriteResponseAsync(context, StatusCodes.Status404NotFound, NotFoundMessage);
+            return;
+        }
+
         var handled = false;
         try
         {
-            handled = await _fallbackDispatcher.TryDispatchAsync(context, reason);
+            handled = _fallbackDispatcher is ILeasedRouteFallbackDispatcher leasedDispatcher
+                ? await leasedDispatcher.TryDispatchAsync(context, reason, publicationLease)
+                : await _fallbackDispatcher.TryDispatchAsync(context, reason);
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {

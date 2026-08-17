@@ -2,18 +2,18 @@ using System.Collections.Immutable;
 using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
 using Xunit;
-using static Nekolla.Nekostick.IntegrationTests.PhaseBPostgresContractTestData;
+using static Nekolla.Nekostick.IntegrationTests.PostgresConfigurationContractTestData;
 
 namespace Nekolla.Nekostick.IntegrationTests;
 
-/// <summary>Exercises complete Phase B snapshot round-trips against real PostgreSQL.</summary>
-public sealed partial class PhaseBPostgresContractTests
+/// <summary>Exercises complete PostgreSQL configuration snapshot round-trips.</summary>
+public sealed partial class PostgresConfigurationContractTests
 {
     /// <summary>Verifies a complete snapshot round-trips every configuration collection.</summary>
     [Fact]
     public async Task CompleteSnapshotReadAndWriteRoundTripsAllCollections()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var api = test.Api;
         var cancellationToken = TestContext.Current.CancellationToken;
 
@@ -47,8 +47,8 @@ public sealed partial class PhaseBPostgresContractTests
 
         var service = Assert.Single(current.Value!.Services);
         Assert.Equal(ServiceId, service.Id);
-        Assert.Equal("/usr/bin/phase-b-fixture", service.FileName);
-        Assert.Equal("enabled", service.Environment["PHASE_B_MODE"]);
+        Assert.Equal("/usr/bin/fixture-service", service.FileName);
+        Assert.Equal("enabled", service.Environment["FIXTURE_MODE"]);
         Assert.Equal(1L, service.Version);
 
         var route = Assert.Single(current.Value!.Routes);
