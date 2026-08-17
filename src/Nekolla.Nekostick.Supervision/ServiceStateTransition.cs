@@ -100,6 +100,32 @@ public static class ServiceStateTransition
             consecutiveHealthFailures: 0);
     }
 
+    /// <summary>Records cancellation of a start operation without mutating the prior snapshot.</summary>
+    /// <param name="current">The current immutable snapshot.</param>
+    /// <param name="now">The UTC transition instant.</param>
+    /// <returns>The next immutable snapshot.</returns>
+    public static ServiceRuntimeSnapshot RecordStartCancelled(
+        ServiceRuntimeSnapshot current,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+
+        if (current.Desired != DesiredServiceState.Running)
+        {
+            return current;
+        }
+
+        return NewSnapshot(
+            current,
+            current.Desired,
+            ServiceLifecycleState.Failed,
+            ServiceHealthState.Unknown,
+            ServiceStateReasonCode.Cancelled,
+            now,
+            deadline: null,
+            consecutiveHealthFailures: 0);
+    }
+
     /// <summary>Records a process executor start result.</summary>
     /// <param name="current">The current immutable snapshot.</param>
     /// <param name="accepted">Whether the executor accepted the start.</param>
@@ -298,6 +324,54 @@ public static class ServiceStateTransition
             consecutiveHealthFailures: current.ConsecutiveHealthFailures);
     }
 
+    /// <summary>Applies a pure restart plan and records its immutable attempt state.</summary>
+    /// <param name="current">The current immutable snapshot.</param>
+    /// <param name="plan">The safe restart plan.</param>
+    /// <param name="now">The UTC transition instant.</param>
+    /// <returns>The next immutable snapshot.</returns>
+    public static ServiceRuntimeSnapshot RecordRestartPlan(
+        ServiceRuntimeSnapshot current,
+        RestartPlan plan,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+        ArgumentNullException.ThrowIfNull(plan);
+
+        if (plan.ShouldRestart && current.Desired == DesiredServiceState.Running)
+        {
+            var deadline = plan.NotBefore is { } notBefore
+                ? new ServiceDeadline(ServiceDeadlineKind.RestartBackoff, notBefore)
+                : (ServiceDeadline?)null;
+            return NewSnapshot(
+                current,
+                current.Desired,
+                ServiceLifecycleState.Starting,
+                ServiceHealthState.Unknown,
+                ServiceStateReasonCode.ProcessExited,
+                now,
+                deadline,
+                observation: null,
+                consecutiveHealthFailures: 0,
+                restartAttempts: plan.NextAttemptState);
+        }
+
+        return NewSnapshot(
+            current,
+            current.Desired,
+            current.Desired == DesiredServiceState.Running
+                ? ServiceLifecycleState.Failed
+                : ServiceLifecycleState.Disabled,
+            current.Desired == DesiredServiceState.Running
+                ? ServiceHealthState.Unhealthy
+                : ServiceHealthState.Unknown,
+            plan.Reason,
+            now,
+            deadline: null,
+            observation: null,
+            consecutiveHealthFailures: current.ConsecutiveHealthFailures,
+            restartAttempts: plan.NextAttemptState);
+    }
+
     private static ServiceRuntimeSnapshot NewSnapshot(
         ServiceRuntimeSnapshot current,
         DesiredServiceState desired,
@@ -307,7 +381,8 @@ public static class ServiceStateTransition
         DateTimeOffset now,
         ServiceDeadline? deadline,
         HealthObservationResult? observation = null,
-        int consecutiveHealthFailures = 0) => new(
+        int consecutiveHealthFailures = 0,
+        RestartAttemptState? restartAttempts = null) => new(
             current.ServiceId,
             desired,
             lifecycle,
@@ -316,6 +391,6 @@ public static class ServiceStateTransition
             now,
             observation ?? current.LastHealthObservation,
             deadline,
-            current.RestartAttempts,
+            restartAttempts ?? current.RestartAttempts,
             consecutiveHealthFailures);
 }

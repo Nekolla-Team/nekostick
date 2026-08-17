@@ -145,7 +145,7 @@ public sealed record HealthRetryPolicy
     /// <summary>Gets the consecutive failure threshold.</summary>
     public int FailureThreshold { get; }
 
-    /// <summary>Gets the Phase-F default policy.</summary>
+    /// <summary>Gets the default policy.</summary>
     public static HealthRetryPolicy Default => new(
         TimeSpan.FromSeconds(30),
         TimeSpan.FromSeconds(1),

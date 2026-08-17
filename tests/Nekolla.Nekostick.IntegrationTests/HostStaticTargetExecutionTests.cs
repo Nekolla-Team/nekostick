@@ -20,7 +20,7 @@ public sealed class HostStaticTargetExecutionTests
         var root = HostIntegrationTestSupport.CreateTempRoot();
         try
         {
-            var content = Encoding.UTF8.GetBytes("D/E static content\n");
+            var content = Encoding.UTF8.GetBytes("static fixture content\n");
             await File.WriteAllBytesAsync(
                 Path.Combine(root, "index.html"),
                 content,

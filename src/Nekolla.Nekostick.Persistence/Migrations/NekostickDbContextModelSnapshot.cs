@@ -660,6 +660,60 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ServiceRuntime", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("node_id");
+
+                    b.Property<Guid>("ServiceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("service_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Health")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("health");
+
+                    b.Property<string>("Lifecycle")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("lifecycle");
+
+                    b.Property<int>("RestartCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("restart_count");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("version");
+
+                    b.HasKey("NodeId", "ServiceId")
+                        .HasName("pk_service_runtimes");
+
+                    b.HasIndex("ServiceId")
+                        .HasDatabaseName("ix_service_runtimes_service_id");
+
+                    b.ToTable("service_runtimes", "nekostick", t =>
+                        {
+                            t.HasCheckConstraint("ck_service_runtimes_state", "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
+                        });
+                });
+
             modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ExtensionSetting", b =>
                 {
                     b.HasOne("Nekolla.Nekostick.Persistence.Entities.ExtensionRecord", "ExtensionRecord")
@@ -701,6 +755,18 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasForeignKey("ServiceId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_routes_services_service_id");
+
+                    b.Navigation("Service");
+                });
+
+            modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ServiceRuntime", b =>
+                {
+                    b.HasOne("Nekolla.Nekostick.Persistence.Entities.Service", "Service")
+                        .WithMany()
+                        .HasForeignKey("ServiceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_service_runtimes_services_service_id");
 
                     b.Navigation("Service");
                 });

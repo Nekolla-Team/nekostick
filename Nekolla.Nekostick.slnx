@@ -8,6 +8,7 @@
     <Project Path="src/Nekolla.Nekostick.Proxy/Nekolla.Nekostick.Proxy.csproj" />
     <Project Path="src/Nekolla.Nekostick.Routing/Nekolla.Nekostick.Routing.csproj" />
     <Project Path="src/Nekolla.Nekostick.Supervision/Nekolla.Nekostick.Supervision.csproj" />
+    <Project Path="src/Nekolla.Nekostick.NativeHelper/Nekolla.Nekostick.NativeHelper.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Fixtures.Extension/Fixtures.Extension.csproj" />

@@ -2,18 +2,18 @@ using Npgsql;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence;
 using Xunit;
-using static Nekolla.Nekostick.IntegrationTests.PhaseBPostgresContractTestData;
+using static Nekolla.Nekostick.IntegrationTests.PostgresConfigurationContractTestData;
 
 namespace Nekolla.Nekostick.IntegrationTests;
 
-/// <summary>Exercises Phase B concurrency, revision, and notification contracts.</summary>
-public sealed partial class PhaseBPostgresContractTests
+/// <summary>Exercises PostgreSQL configuration concurrency, revision, and notification contracts.</summary>
+public sealed partial class PostgresConfigurationContractTests
 {
     /// <summary>Verifies stale global versions are rejected without changing the committed snapshot.</summary>
     [Fact]
     public async Task SnapshotWriteRejectsOptimisticVersionConflict()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var api = test.Api;
         var cancellationToken = TestContext.Current.CancellationToken;
 
@@ -49,7 +49,7 @@ public sealed partial class PhaseBPostgresContractTests
     [Fact]
     public async Task CommittedSnapshotMutationsIncrementTheGlobalRevision()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var database = test.Database;
         var api = test.Api;
         var cancellationToken = TestContext.Current.CancellationToken;
@@ -88,7 +88,7 @@ public sealed partial class PhaseBPostgresContractTests
     [Fact]
     public async Task SnapshotWritePublishesCommittedRevisionNotification()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var api = test.Api;
         await using var listener = test.CreateConnection();
         var cancellationToken = TestContext.Current.CancellationToken;

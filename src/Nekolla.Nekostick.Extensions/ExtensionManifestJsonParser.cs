@@ -1,20 +1,11 @@
-using System.Collections.Immutable;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace Nekolla.Nekostick.Extensions;
 
 internal static class JsonManifestParser
 {
     private const int MaxManifestBytes = 1024 * 1024;
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        PropertyNameCaseInsensitive = false,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-        ReadCommentHandling = JsonCommentHandling.Disallow,
-        AllowTrailingCommas = false,
-        MaxDepth = 32
-    };
+    private const int MaxManifestDepth = 32;
 
     internal static ManifestDiscoveryResult Parse(string root, string manifestPath)
     {
@@ -23,7 +14,7 @@ internal static class JsonManifestParser
             var bytes = File.ReadAllBytes(manifestPath);
             if (bytes.Length > MaxManifestBytes)
             {
-                return ManifestDiscoveryResult.Failure(ExtensionFailureCode.JsonInvalid, ManifestSourceFormat.Json);
+                return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.JsonInvalid);
             }
 
             using var document = JsonDocument.Parse(
@@ -32,11 +23,11 @@ internal static class JsonManifestParser
                 {
                     AllowTrailingCommas = false,
                     CommentHandling = JsonCommentHandling.Disallow,
-                    MaxDepth = 32
+                    MaxDepth = MaxManifestDepth
                 });
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
-                return ManifestDiscoveryResult.Failure(ExtensionFailureCode.JsonInvalid, ManifestSourceFormat.Json);
+                return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.JsonInvalid);
             }
 
             var rootFields = new HashSet<string>(StringComparer.Ordinal);
@@ -44,245 +35,121 @@ internal static class JsonManifestParser
             {
                 if (!rootFields.Add(property.Name))
                 {
-                    return ManifestDiscoveryResult.Failure(
-                        ExtensionFailureCode.DuplicateManifestField,
-                        ManifestSourceFormat.Json);
+                    return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.DuplicateManifestField);
                 }
             }
 
-            if (!rootFields.IsSubsetOf(ManifestJsonDto.AllowedFields))
+            if (!rootFields.IsSubsetOf(ManifestSchema.AllowedFields))
             {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.UnknownManifestField,
-                    ManifestSourceFormat.Json);
+                return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.UnknownManifestField);
             }
 
-            if (!TryValidateDependencyFields(
-                    document.RootElement,
-                    out var dependencyFieldFailure))
+            if (!rootFields.SetEquals(ManifestSchema.AllowedFields))
             {
-                return ManifestDiscoveryResult.Failure(
-                    dependencyFieldFailure,
-                    ManifestSourceFormat.Json);
+                return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.ManifestSchemaInvalid);
             }
 
-            var dto = JsonSerializer.Deserialize<ManifestJsonDto>(bytes, SerializerOptions);
-            if (dto is null || dto.SchemaVersion is null || dto.Id is null || dto.Version is null ||
-                dto.EntryAssembly is null || dto.EntryType is null ||
-                dto.RequiredHostApiVersion is null || dto.Dependencies is null ||
-                !HasExactlyRequiredRootFields(rootFields))
+            var rootElement = document.RootElement;
+            if (!TryGetInt(rootElement, "schemaVersion", out var schemaVersion) ||
+                !TryGetString(rootElement, "id", out var id) ||
+                !TryGetString(rootElement, "version", out var version) ||
+                !TryGetString(rootElement, "entryAssembly", out var entryAssembly) ||
+                !TryGetString(rootElement, "entryType", out var entryType) ||
+                !TryGetString(rootElement, "requiredHostApiVersion", out var hostApiVersion) ||
+                !rootElement.TryGetProperty("dependencies", out var dependenciesElement) ||
+                dependenciesElement.ValueKind != JsonValueKind.Array)
             {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.ManifestSchemaInvalid,
-                    ManifestSourceFormat.Json);
+                return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.ManifestSchemaInvalid);
             }
 
-            if (dto.SchemaVersion != 1)
+            var dependencies = new List<ManifestDependencyValues?>();
+            foreach (var dependencyElement in dependenciesElement.EnumerateArray())
             {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.ManifestSchemaInvalid,
-                    ManifestSourceFormat.Json);
+                if (dependencyElement.ValueKind != JsonValueKind.Object)
+                {
+                    return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.ManifestSchemaInvalid);
+                }
+
+                var dependencyFields = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var property in dependencyElement.EnumerateObject())
+                {
+                    if (!dependencyFields.Add(property.Name))
+                    {
+                        return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.DuplicateManifestField);
+                    }
+                }
+
+                if (!dependencyFields.IsSubsetOf(ManifestSchema.DependencyFields))
+                {
+                    return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.UnknownManifestField);
+                }
+
+                if (!dependencyFields.SetEquals(ManifestSchema.DependencyFields) ||
+                    !TryGetString(dependencyElement, "id", out var dependencyId) ||
+                    !TryGetString(dependencyElement, "versionRange", out var dependencyRange))
+                {
+                    return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.ManifestSchemaInvalid);
+                }
+
+                dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange));
             }
 
-            if (!ExtensionIdentifierSyntax.IsValid(dto.Id))
-            {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.InvalidIdentifier,
-                    ManifestSourceFormat.Json);
-            }
-
-            if (!SemVersion.TryParse(dto.Version, out var version))
-            {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.InvalidVersion,
-                    ManifestSourceFormat.Json);
-            }
-
-            if (!SemVersionRange.TryParse(dto.RequiredHostApiVersion, out var hostRange) || hostRange is null)
-            {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.InvalidVersionRange,
-                    ManifestSourceFormat.Json);
-            }
-
-            if (!ManifestNameSyntax.IsValidEntryAssembly(dto.EntryAssembly) ||
-                !ManifestNameSyntax.IsValidEntryType(dto.EntryType))
-            {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.UnsafePath,
-                    ManifestSourceFormat.Json);
-            }
-
-            var declaredEntryPath = Path.Combine(
+            return ManifestParserCore.Validate(
                 root,
-                dto.EntryAssembly.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(declaredEntryPath))
-            {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.EntryAssemblyMissing,
-                    ManifestSourceFormat.Json);
-            }
-
-            if (!CanonicalPath.TryCanonicalFileInRoot(
-                    root,
-                    declaredEntryPath,
-                    out var entryAssemblyPath))
-            {
-                return ManifestDiscoveryResult.Failure(
-                    ExtensionFailureCode.UnsafePath,
-                    ManifestSourceFormat.Json);
-            }
-
-            var dependencies = ImmutableArray.CreateBuilder<ExtensionDependency>(dto.Dependencies.Count);
-            var dependencyIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var dependencyDto in dto.Dependencies)
-            {
-                if (dependencyDto is null || !ExtensionIdentifierSyntax.IsValid(dependencyDto.Id))
-                {
-                    return ManifestDiscoveryResult.Failure(
-                        ExtensionFailureCode.InvalidIdentifier,
-                        ManifestSourceFormat.Json);
-                }
-
-                if (!dependencyIds.Add(dependencyDto.Id!))
-                {
-                    return ManifestDiscoveryResult.Failure(
-                        ExtensionFailureCode.DuplicateExtensionId,
-                        ManifestSourceFormat.Json);
-                }
-
-                if (!SemVersionRange.TryParse(dependencyDto.VersionRange, out var dependencyRange) ||
-                    dependencyRange is null)
-                {
-                    return ManifestDiscoveryResult.Failure(
-                        ExtensionFailureCode.InvalidVersionRange,
-                        ManifestSourceFormat.Json);
-                }
-
-                dependencies.Add(new ExtensionDependency(dependencyDto.Id!, dependencyRange));
-            }
-
-            return ManifestDiscoveryResult.Success(
                 ManifestSourceFormat.Json,
-                new ExtensionManifest(
-                    dto.SchemaVersion.Value,
-                    dto.Id,
+                new ManifestDocumentValues(
+                    schemaVersion,
+                    id,
                     version,
-                    dto.EntryAssembly,
-                    dto.EntryType,
-                    hostRange,
-                    dependencies.ToImmutable(),
-                    root,
-                    entryAssemblyPath));
+                    entryAssembly,
+                    entryType,
+                    dependencies,
+                    hostApiVersion));
         }
         catch (JsonException)
         {
-            return ManifestDiscoveryResult.Failure(ExtensionFailureCode.JsonInvalid, ManifestSourceFormat.Json);
+            return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.JsonInvalid);
         }
         catch (Exception)
         {
-            return ManifestDiscoveryResult.Failure(ExtensionFailureCode.LoadFailed, ManifestSourceFormat.Json);
+            return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.LoadFailed);
         }
     }
 
-    private static bool HasExactlyRequiredRootFields(HashSet<string> fields) =>
-        fields.Count == ManifestJsonDto.AllowedFields.Count &&
-        fields.SetEquals(ManifestJsonDto.AllowedFields);
-
-    private static bool TryValidateDependencyFields(
-        JsonElement root,
-        out ExtensionFailureCode failureCode)
+    private static bool TryGetString(JsonElement root, string name, out string? value)
     {
-        failureCode = ExtensionFailureCode.None;
-        if (!root.TryGetProperty("dependencies", out var dependencies))
-        {
-            return true;
-        }
-
-        if (dependencies.ValueKind != JsonValueKind.Array)
-        {
-            failureCode = ExtensionFailureCode.ManifestSchemaInvalid;
-            return false;
-        }
-
-        foreach (var dependency in dependencies.EnumerateArray())
-        {
-            if (dependency.ValueKind != JsonValueKind.Object)
-            {
-                failureCode = ExtensionFailureCode.ManifestSchemaInvalid;
-                return false;
-            }
-
-            var fields = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var property in dependency.EnumerateObject())
-            {
-                if (!fields.Add(property.Name))
-                {
-                    failureCode = ExtensionFailureCode.DuplicateManifestField;
-                    return false;
-                }
-            }
-
-            if (!fields.IsSubsetOf(DependencyJsonDto.AllowedFields))
-            {
-                failureCode = ExtensionFailureCode.UnknownManifestField;
-                return false;
-            }
-
-            if (fields.Count != DependencyJsonDto.AllowedFields.Count ||
-                !fields.SetEquals(DependencyJsonDto.AllowedFields))
-            {
-                failureCode = ExtensionFailureCode.ManifestSchemaInvalid;
-                return false;
-            }
-        }
-
-        return true;
+        value = null;
+        return root.TryGetProperty(name, out var property) &&
+            property.ValueKind == JsonValueKind.String &&
+            (value = property.GetString()) is not null;
     }
 
-    private sealed class ManifestJsonDto
+    private static bool TryGetInt(JsonElement root, string name, out int? value)
     {
-        internal static readonly ImmutableHashSet<string> AllowedFields =
-            ImmutableHashSet.Create(StringComparer.Ordinal,
-                "schemaVersion",
-                "id",
-                "version",
-                "entryAssembly",
-                "entryType",
-                "dependencies",
-                "requiredHostApiVersion");
-
-        [JsonPropertyName("schemaVersion")]
-        public int? SchemaVersion { get; set; }
-
-        [JsonPropertyName("id")]
-        public string? Id { get; set; }
-
-        [JsonPropertyName("version")]
-        public string? Version { get; set; }
-
-        [JsonPropertyName("entryAssembly")]
-        public string? EntryAssembly { get; set; }
-
-        [JsonPropertyName("entryType")]
-        public string? EntryType { get; set; }
-
-        [JsonPropertyName("dependencies")]
-        public List<DependencyJsonDto?>? Dependencies { get; set; }
-
-        [JsonPropertyName("requiredHostApiVersion")]
-        public string? RequiredHostApiVersion { get; set; }
+        value = null;
+        return root.TryGetProperty(name, out var property) &&
+            property.ValueKind == JsonValueKind.Number &&
+            property.TryGetInt32(out var parsed) &&
+            (value = parsed) is not null;
     }
+}
 
-    private sealed class DependencyJsonDto
+internal static class ManifestSchema
+{
+    internal static readonly IReadOnlySet<string> AllowedFields = new HashSet<string>(StringComparer.Ordinal)
     {
-        internal static readonly ImmutableHashSet<string> AllowedFields =
-            ImmutableHashSet.Create(StringComparer.Ordinal, "id", "versionRange");
+        "schemaVersion",
+        "id",
+        "version",
+        "entryAssembly",
+        "entryType",
+        "dependencies",
+        "requiredHostApiVersion"
+    };
 
-        [JsonPropertyName("id")]
-        public string? Id { get; set; }
-
-        [JsonPropertyName("versionRange")]
-        public string? VersionRange { get; set; }
-    }
+    internal static readonly IReadOnlySet<string> DependencyFields = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "id",
+        "versionRange"
+    };
 }

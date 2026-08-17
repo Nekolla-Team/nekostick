@@ -5,14 +5,14 @@ using Xunit;
 
 namespace Nekolla.Nekostick.IntegrationTests;
 
-/// <summary>Exercises the Phase B PostgreSQL node constraint contract.</summary>
-public sealed partial class PhaseBPostgresContractTests
+/// <summary>Exercises the PostgreSQL node constraint contract.</summary>
+public sealed partial class PostgresConfigurationContractTests
 {
     /// <summary>Verifies the active default node uniqueness guard rejects a second active registration.</summary>
     [Fact]
     public async Task SecondActiveDefaultNodeRegistrationIsRejected()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var database = test.Database;
         var context = test.Context;
 

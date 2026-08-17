@@ -11,7 +11,10 @@
     <ProjectReference Include="../../src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Domain/Nekolla.Nekostick.Domain.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Routing/Nekolla.Nekostick.Routing.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Supervision/Nekolla.Nekostick.Supervision.csproj" />
     <ProjectReference Include="../../src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj" />
+    <ProjectReference Include="../../src/Nekolla.Nekostick.Extensions/Nekolla.Nekostick.Extensions.csproj" />
+    <ProjectReference Include="../Fixtures.Extension/Fixtures.Extension.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />

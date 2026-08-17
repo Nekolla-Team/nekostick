@@ -3,18 +3,18 @@ using Npgsql;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence;
 using Xunit;
-using static Nekolla.Nekostick.IntegrationTests.PhaseBPostgresContractTestData;
+using static Nekolla.Nekostick.IntegrationTests.PostgresConfigurationContractTestData;
 
 namespace Nekolla.Nekostick.IntegrationTests;
 
-/// <summary>Exercises Phase B validation and reference contracts against real PostgreSQL.</summary>
-public sealed partial class PhaseBPostgresContractTests
+/// <summary>Exercises PostgreSQL configuration validation and reference contracts.</summary>
+public sealed partial class PostgresConfigurationContractTests
 {
     /// <summary>Verifies a bad reference rejects the complete batch without partial rows or revision changes.</summary>
     [Fact]
     public async Task InvalidReferenceRollsBackTheCompleteSnapshotBatch()
     {
-        await using var test = await PhaseBPostgresContractTestScope.CreateAsync();
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
         var database = test.Database;
         var api = test.Api;
         var cancellationToken = TestContext.Current.CancellationToken;

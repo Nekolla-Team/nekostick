@@ -15,6 +15,9 @@ internal enum RouteTargetExecutionResult
     /// <summary>The selected target is currently unavailable.</summary>
     Unavailable,
 
+    /// <summary>The selected handler failed before writing a response.</summary>
+    InternalServerError,
+
     /// <summary>The executor encountered a failure that is safe to expose only as a generic 503.</summary>
     SafeFailure,
 
@@ -48,6 +51,17 @@ internal interface IRouteTargetExecutor
         HttpContext context,
         HostRoutingSnapshot snapshot,
         RouteMatch match,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Executes a target while retaining the exact publication selected by the matcher.</summary>
+internal interface ILeasedRouteTargetExecutor : IRouteTargetExecutor
+{
+    ValueTask<RouteTargetExecutionResult> ExecuteAsync(
+        HttpContext context,
+        HostRoutingSnapshot snapshot,
+        RouteMatch match,
+        HostRoutingSnapshotLease publicationLease,
         CancellationToken cancellationToken);
 }
 

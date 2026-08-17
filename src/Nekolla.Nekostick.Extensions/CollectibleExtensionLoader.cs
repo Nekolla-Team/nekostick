@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using Nekolla.Nekostick.Contracts;
 
@@ -78,7 +79,7 @@ public sealed class ExtensionUnloadResult
 public sealed class ExtensionLoadHandle : IDisposable
 {
     private readonly object _gate = new();
-    private readonly WeakReference<AssemblyLoadContext> _weakContext;
+    private readonly WeakReference _weakContext;
     private readonly ExtensionManifest _manifest;
     private ExtensionLoadContext? _loadContext;
     private Assembly? _entryAssembly;
@@ -95,7 +96,7 @@ public sealed class ExtensionLoadHandle : IDisposable
         _loadContext = loadContext;
         _entryAssembly = entryAssembly;
         _entryType = entryType;
-        _weakContext = new WeakReference<AssemblyLoadContext>(loadContext);
+        _weakContext = new WeakReference(loadContext);
         _state = ExtensionRuntimeState.Loaded;
     }
 
@@ -113,70 +114,43 @@ public sealed class ExtensionLoadHandle : IDisposable
             }
         }
     }
+    internal IExtensionEntrypoint CreateEntrypoint(IExtensionHostBridge hostBridge)
+    {
+        ArgumentNullException.ThrowIfNull(hostBridge);
+        Type entryType;
+        lock (_gate)
+        {
+            if (_state != ExtensionRuntimeState.Loaded || _entryType is null)
+            {
+                throw new InvalidOperationException("The extension load is not active.");
+            }
+
+            entryType = _entryType;
+        }
+
+        var bridgeConstructor = entryType.GetConstructor(new[] { typeof(IExtensionHostBridge) });
+        var entry = bridgeConstructor is not null
+            ? bridgeConstructor.Invoke(new object?[] { hostBridge })
+            : Activator.CreateInstance(entryType);
+        return entry as IExtensionEntrypoint ??
+            throw new InvalidOperationException("The extension entrypoint is incompatible.");
+    }
+
 
     /// <summary>Requests unload and verifies collection for at most three GC cycles.</summary>
     /// <returns>A safe bounded unload result.</returns>
     public ExtensionUnloadResult Unload()
     {
-        ExtensionLoadContext? context;
-        lock (_gate)
-        {
-            if (_state == ExtensionRuntimeState.Unloaded)
-            {
-                return ExtensionUnloadResult.Create(true, ExtensionFailureCode.AlreadyUnloaded, _state);
-            }
-
-            if (_state == ExtensionRuntimeState.Unloading)
-            {
-                return ExtensionUnloadResult.Create(false, ExtensionFailureCode.UnloadInProgress, _state);
-            }
-
-            _state = ExtensionRuntimeState.Unloading;
-            context = _loadContext;
-            GC.KeepAlive(_entryAssembly);
-            GC.KeepAlive(_entryType);
-            _loadContext = null;
-            _entryAssembly = null;
-            _entryType = null;
-        }
-
         try
         {
-            if (context is not null)
+            var preparation = PrepareAndRequestUnload();
+            var immediateResult = preparation.ImmediateResult;
+            if (immediateResult is not null)
             {
-                RequestContextUnload(context);
+                return immediateResult;
             }
 
-            context = null;
-            for (var cycle = 0; cycle < 3; cycle++)
-            {
-                if (!_weakContext.TryGetTarget(out _))
-                {
-                    lock (_gate)
-                    {
-                        _state = ExtensionRuntimeState.Unloaded;
-                    }
-
-                    return ExtensionUnloadResult.Create(
-                        true,
-                        ExtensionFailureCode.None,
-                        ExtensionRuntimeState.Unloaded);
-                }
-
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-                GC.Collect();
-            }
-
-            lock (_gate)
-            {
-                _state = ExtensionRuntimeState.UnloadNotConfirmed;
-            }
-
-            return ExtensionUnloadResult.Create(
-                false,
-                ExtensionFailureCode.UnloadNotConfirmed,
-                ExtensionRuntimeState.UnloadNotConfirmed);
+            return ConfirmUnload(preparation.WeakContext);
         }
         catch (Exception)
         {
@@ -195,7 +169,96 @@ public sealed class ExtensionLoadHandle : IDisposable
     /// <summary>Requests unload when the handle is disposed.</summary>
     public void Dispose() => _ = Unload();
 
-    private static void RequestContextUnload(ExtensionLoadContext context) => context.Unload();
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private UnloadPreparation PrepareAndRequestUnload()
+    {
+        ExtensionLoadContext? context;
+        lock (_gate)
+        {
+            if (_state == ExtensionRuntimeState.Unloaded)
+            {
+                return UnloadPreparation.Immediate(
+                    _weakContext,
+                    ExtensionUnloadResult.Create(true, ExtensionFailureCode.AlreadyUnloaded, _state));
+            }
+
+            if (_state == ExtensionRuntimeState.Unloading)
+            {
+                return UnloadPreparation.Immediate(
+                    _weakContext,
+                    ExtensionUnloadResult.Create(false, ExtensionFailureCode.UnloadInProgress, _state));
+            }
+
+            _state = ExtensionRuntimeState.Unloading;
+            context = _loadContext;
+            var entryAssembly = _entryAssembly;
+            var entryType = _entryType;
+            GC.KeepAlive(entryAssembly);
+            GC.KeepAlive(entryType);
+            _loadContext = null;
+            _entryAssembly = null;
+            _entryType = null;
+        }
+
+        context?.Unload();
+        return UnloadPreparation.ForConfirmation(_weakContext);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ExtensionUnloadResult ConfirmUnload(WeakReference weakContext)
+    {
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            if (!weakContext.IsAlive)
+            {
+                lock (_gate)
+                {
+                    _state = ExtensionRuntimeState.Unloaded;
+                }
+
+                return ExtensionUnloadResult.Create(
+                    true,
+                    ExtensionFailureCode.None,
+                    ExtensionRuntimeState.Unloaded);
+            }
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        lock (_gate)
+        {
+            _state = ExtensionRuntimeState.UnloadNotConfirmed;
+        }
+
+        return ExtensionUnloadResult.Create(
+            false,
+            ExtensionFailureCode.UnloadNotConfirmed,
+            ExtensionRuntimeState.UnloadNotConfirmed);
+    }
+
+    private readonly struct UnloadPreparation
+    {
+        private UnloadPreparation(
+            WeakReference weakContext,
+            ExtensionUnloadResult? immediateResult)
+        {
+            WeakContext = weakContext;
+            ImmediateResult = immediateResult;
+        }
+
+        internal WeakReference WeakContext { get; }
+
+        internal ExtensionUnloadResult? ImmediateResult { get; }
+
+        internal static UnloadPreparation ForConfirmation(
+            WeakReference weakContext) => new(weakContext, null);
+
+        internal static UnloadPreparation Immediate(
+            WeakReference weakContext,
+            ExtensionUnloadResult result) => new(weakContext, result);
+    }
 }
 
 /// <summary>Loads one previously discovered manifest in a collectible context.</summary>
@@ -244,7 +307,7 @@ public sealed class CollectibleExtensionLoader
                 return ExtensionLoadResult.Failure(ExtensionFailureCode.EntryTypeMissing);
             }
 
-            if (!typeof(IInternalExtensionEntryMarker).IsAssignableFrom(entryType) ||
+            if (!typeof(IExtensionEntrypoint).IsAssignableFrom(entryType) ||
                 !entryType.IsClass || entryType.IsAbstract)
             {
                 loadContext.Unload();

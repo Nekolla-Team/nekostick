@@ -210,8 +210,15 @@ internal static class HostIntegrationTestSupport
             "Nekolla.Nekostick.Host.HostRouteTargetExecutor",
             throwOnError: true)!;
         var constructor = executorType.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
-            .Single(value => value.GetParameters().Length == 1);
-        return constructor.Invoke([executor]);
+            .Single(value =>
+            {
+                var parameters = value.GetParameters();
+                return parameters.Length == 2
+                    && parameters[0].ParameterType == typeof(MicroserviceHttpExecutor)
+                    && parameters[1].ParameterType == typeof(IHostServiceLifecycleCoordinator)
+                    && !parameters[1].ParameterType.IsValueType;
+            });
+        return constructor.Invoke([executor, null]);
     }
 
     internal static async Task<IntegrationStageEvidence> ExecuteMatchedTargetAsync(

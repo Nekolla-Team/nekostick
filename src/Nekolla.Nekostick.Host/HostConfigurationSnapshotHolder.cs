@@ -1,9 +1,9 @@
 using System.Collections.Immutable;
 using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Routing;
-
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Provides lock-free access to the current immutable host configuration snapshot.</summary>
@@ -22,22 +22,31 @@ internal interface IHostRoutingSnapshotAccessor
     HostRoutingSnapshot? Current { get; }
 }
 
+/// <summary>Provides a short-lived lease over one immutable routing publication.</summary>
+internal interface IHostRoutingSnapshotLeaseAccessor
+{
+    HostRoutingSnapshotLease? TryAcquireLease();
+}
+
 /// <summary>Pairs one immutable configuration snapshot with all compiled route indexes.</summary>
 internal sealed class HostRoutingSnapshot
 {
     internal HostRoutingSnapshot(HostConfigurationSnapshot configuration, RouteMatchSnapshot matcher)
-        : this(configuration, matcher, BuildExecutableRoutesOrEmpty(configuration))
+        : this(configuration, matcher, BuildExecutableRoutesOrEmpty(configuration), null)
     {
     }
 
     internal HostRoutingSnapshot(
         HostConfigurationSnapshot configuration,
         RouteMatchSnapshot matcher,
-        ImmutableDictionary<Guid, ExecutableRoute> executableRoutes)
+        ImmutableDictionary<Guid, ExecutableRoute> executableRoutes,
+        ExtensionDispatchGeneration? dispatchGeneration)
     {
         Configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         Matcher = matcher ?? throw new ArgumentNullException(nameof(matcher));
         ExecutableRoutes = executableRoutes ?? throw new ArgumentNullException(nameof(executableRoutes));
+        DispatchGeneration = dispatchGeneration;
+        Publication = new HostSnapshotPublicationState(dispatchGeneration);
     }
 
     /// <summary>Gets the configuration that produced <see cref="Matcher"/>.</summary>
@@ -48,6 +57,11 @@ internal sealed class HostRoutingSnapshot
 
     /// <summary>Gets the immutable executable route metadata compiled from <see cref="Configuration"/>.</summary>
     internal ImmutableDictionary<Guid, ExecutableRoute> ExecutableRoutes { get; }
+
+    /// <summary>Gets the opaque extension dispatch generation paired with this snapshot.</summary>
+    internal ExtensionDispatchGeneration? DispatchGeneration { get; }
+
+    internal HostSnapshotPublicationState Publication { get; }
 
     private static ImmutableDictionary<Guid, ExecutableRoute> BuildExecutableRoutesOrEmpty(
         HostConfigurationSnapshot configuration)
@@ -61,8 +75,169 @@ internal sealed class HostRoutingSnapshot
     }
 }
 
+/// <summary>Owns request leases and deferred retirement for one published snapshot.</summary>
+internal sealed class HostSnapshotPublicationState
+{
+    private readonly object _gate = new();
+    private readonly ExtensionDispatchGeneration? _generation;
+    private Task? _retirementTask;
+    private TaskCompletionSource<bool>? _retirementCompletion;
+    private bool _accepting = true;
+    private bool _retirementRequested;
+    private bool _retireGeneration;
+    private int _activeLeases;
+
+    internal HostSnapshotPublicationState(ExtensionDispatchGeneration? generation) => _generation = generation;
+
+    internal HostRoutingSnapshotLease? TryAcquire(HostRoutingSnapshot snapshot)
+    {
+        lock (_gate)
+        {
+            if (!_accepting)
+            {
+                return null;
+            }
+
+            ExtensionDispatchLease? dispatchLease = null;
+            if (_generation is not null)
+            {
+                dispatchLease = _generation.TryAcquireLease();
+                if (dispatchLease is null)
+                {
+                    return null;
+                }
+            }
+
+            _activeLeases++;
+            return new HostRoutingSnapshotLease(snapshot, this, dispatchLease);
+        }
+    }
+
+    internal Task BeginRetirement(bool retireGeneration)
+    {
+        lock (_gate)
+        {
+            _accepting = false;
+            _retirementRequested = true;
+            _retireGeneration |= retireGeneration;
+            if (_activeLeases == 0)
+            {
+                StartRetirementLocked();
+            }
+            else
+            {
+                _retirementCompletion ??= new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            return _retirementTask ?? _retirementCompletion!.Task;
+        }
+    }
+
+    internal void Release(ExtensionDispatchLease? dispatchLease)
+    {
+        dispatchLease?.Dispose();
+        lock (_gate)
+        {
+            if (_activeLeases > 0)
+            {
+                _activeLeases--;
+            }
+
+            if (_retirementRequested && _activeLeases == 0)
+            {
+                StartRetirementLocked();
+            }
+        }
+    }
+
+    private void StartRetirementLocked()
+    {
+        if (_retirementTask is not null)
+        {
+            return;
+        }
+
+        _retirementTask = RetireAsync(_retireGeneration);
+    }
+
+    private async Task RetireAsync(bool retireGeneration)
+    {
+        try
+        {
+            if (retireGeneration && _generation is not null)
+            {
+                try
+                {
+                    await _generation.RetireAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Runtime retirement is bounded and remains responsible for eventual release.
+                }
+            }
+        }
+        finally
+        {
+            _retirementCompletion?.TrySetResult(true);
+        }
+    }
+    internal Task RetirementTask
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _retirementTask ?? _retirementCompletion?.Task ?? Task.CompletedTask;
+            }
+        }
+    }
+}
+
+/// <summary>Captures one immutable Host snapshot and its matching extension lease.</summary>
+internal sealed class HostRoutingSnapshotLease : IDisposable, IAsyncDisposable
+{
+    private HostSnapshotPublicationState? _publication;
+    private ExtensionDispatchLease? _dispatchLease;
+
+    internal HostRoutingSnapshotLease(
+        HostRoutingSnapshot snapshot,
+        HostSnapshotPublicationState publication,
+        ExtensionDispatchLease? dispatchLease)
+    {
+        Snapshot = snapshot;
+        _publication = publication;
+        _dispatchLease = dispatchLease;
+    }
+
+    internal HostRoutingSnapshot Snapshot { get; }
+
+    internal ExtensionDispatchLease? DispatchLease => _dispatchLease;
+
+    internal static HostRoutingSnapshotLease? Capture(HostRoutingSnapshot? snapshot) =>
+        snapshot?.Publication.TryAcquire(snapshot);
+
+    public void Dispose()
+    {
+        var publication = Interlocked.Exchange(ref _publication, null);
+        if (publication is null)
+        {
+            return;
+        }
+
+        var lease = Interlocked.Exchange(ref _dispatchLease, null);
+        publication.Release(lease);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
+    }
+}
+
 /// <summary>Adapts the holder's atomic publication to the Host-internal routing accessor.</summary>
-internal sealed class HostRoutingSnapshotAccessor : IHostRoutingSnapshotAccessor
+internal sealed class HostRoutingSnapshotAccessor : IHostRoutingSnapshotAccessor, IHostRoutingSnapshotLeaseAccessor
 {
     private readonly HostConfigurationSnapshotHolder _holder;
 
@@ -72,10 +247,12 @@ internal sealed class HostRoutingSnapshotAccessor : IHostRoutingSnapshotAccessor
     }
 
     public HostRoutingSnapshot? Current => _holder.RoutingSnapshot;
+
+    public HostRoutingSnapshotLease? TryAcquireLease() => _holder.TryAcquireRoutingLease();
 }
 
 /// <summary>Holds complete immutable configuration and replaces it atomically after validation.</summary>
-public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshotAccessor
+public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshotAccessor, IHostRoutingSnapshotLeaseAccessor, IAsyncDisposable
 {
     private readonly object _replacementGate = new();
     private HostRoutingSnapshot? _published;
@@ -92,9 +269,11 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     public bool HasSnapshot => Current is not null;
 
     /// <summary>Attempts to replace the current snapshot with a complete validated value.</summary>
-    /// <param name="snapshot">The immutable candidate snapshot.</param>
-    /// <returns><see langword="true"/> when the replacement was committed.</returns>
-    public bool TryReplace(HostConfigurationSnapshot snapshot)
+    public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null);
+
+    internal bool TryReplace(
+        HostConfigurationSnapshot snapshot,
+        ExtensionDispatchGeneration? dispatchGeneration)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         if (!HostConfigurationSnapshotValidator.IsComplete(snapshot) ||
@@ -113,27 +292,60 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             return false;
         }
 
-        if (!routeBuild.IsSuccess || routeBuild.Snapshot is null)
+        if (!routeBuild.IsSuccess || routeBuild.Snapshot is null ||
+            !ExecutableRouteBuilder.TryBuild(snapshot, out var executableRoutes))
         {
             return false;
         }
 
-        if (!ExecutableRouteBuilder.TryBuild(snapshot, out var executableRoutes))
-        {
-            return false;
-        }
-
-        var publication = new HostRoutingSnapshot(snapshot, routeBuild.Snapshot, executableRoutes);
+        var publication = new HostRoutingSnapshot(
+            snapshot,
+            routeBuild.Snapshot,
+            executableRoutes,
+            dispatchGeneration);
+        HostRoutingSnapshot? previous;
         lock (_replacementGate)
         {
-            var current = Volatile.Read(ref _published);
-            if (current is not null && snapshot.Version < current.Configuration.Version)
+            previous = Volatile.Read(ref _published);
+            if (previous is not null && snapshot.Version < previous.Configuration.Version)
             {
                 return false;
             }
 
+            if (previous?.DispatchGeneration is not null && dispatchGeneration is null)
+            {
+                return false;
+            }
+
+            previous?.Publication.BeginRetirement(
+                retireGeneration: previous.DispatchGeneration is not null &&
+                    !ReferenceEquals(previous.DispatchGeneration, dispatchGeneration));
             Interlocked.Exchange(ref _published, publication);
-            return true;
+        }
+
+        return true;
+    }
+
+    internal HostRoutingSnapshotLease? TryAcquireRoutingLease() =>
+        HostRoutingSnapshotLease.Capture(Volatile.Read(ref _published));
+    HostRoutingSnapshotLease? IHostRoutingSnapshotLeaseAccessor.TryAcquireLease() => TryAcquireRoutingLease();
+
+    /// <inheritdoc />
+    public async ValueTask DisposeAsync()
+    {
+        HostRoutingSnapshot? previous;
+        Task retirement;
+        lock (_replacementGate)
+        {
+            previous = Interlocked.Exchange(ref _published, null);
+            retirement = previous?.Publication.BeginRetirement(retireGeneration: previous.DispatchGeneration is not null)
+                ?? Task.CompletedTask;
+        }
+
+        await retirement.ConfigureAwait(false);
+        if (previous?.Publication.RetirementTask is { } finalRetirement)
+        {
+            await finalRetirement.ConfigureAwait(false);
         }
     }
 }

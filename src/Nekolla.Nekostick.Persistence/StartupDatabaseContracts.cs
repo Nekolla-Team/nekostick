@@ -102,7 +102,7 @@ public sealed record SchemaValidationResult
 /// <summary>Validates schema objects, migration history, and singleton seeds.</summary>
 public interface IMigrationSchemaValidator
 {
-    /// <summary>Checks the complete stage-A persistence schema.</summary>
+    /// <summary>Checks the complete persistence schema.</summary>
     /// <param name="dbContext">The PostgreSQL-backed context.</param>
     /// <param name="cancellationToken">The operation cancellation token.</param>
     /// <returns>A safe validation result.</returns>

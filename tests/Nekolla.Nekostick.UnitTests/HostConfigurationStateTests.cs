@@ -2,13 +2,14 @@ using System.Collections.Immutable;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
-using Nekolla.Nekostick.Host;
 using Nekolla.Nekostick.Persistence;
+using Nekolla.Nekostick.Host;
+using Nekolla.Nekostick.Extensions;
 using Xunit;
 
 namespace Nekolla.Nekostick.UnitTests;
 
-public sealed class OraclePhaseBHostConfigurationTests
+public sealed class HostConfigurationStateTests
 {
     private static readonly Guid RouteId =
         Guid.Parse("018f3a52-4cde-7abc-8def-0123456789ab");
@@ -103,12 +104,17 @@ public sealed class OraclePhaseBHostConfigurationTests
         var holder = new HostConfigurationSnapshotHolder();
         Assert.True(holder.TryReplace(prior));
 
-        var runtimeState = new HostRuntimeState(
-            holder,
-            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));
+        var nodeOptions = new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false);
+        var runtimeState = new HostRuntimeState(holder, nodeOptions);
         runtimeState.MarkSnapshotAccepted();
 
         var revisionReader = new UnavailableRevisionReader();
+        var runtimeManager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var publisher = new HostConfigurationPublisher(
+            holder,
+            runtimeManager,
+            nodeOptions,
+            NullLogger<HostConfigurationPublisher>.Instance);
         var service = new HostConfigurationRefreshService(
             holder,
             new UnusedSnapshotReader(),
@@ -116,6 +122,7 @@ public sealed class OraclePhaseBHostConfigurationTests
             runtimeState,
             new RevisionScopeFactory(revisionReader),
             new HostRuntimeOptions("synthetic-storage", "test-node", readOnly: false),
+            publisher,
             NullLogger<HostConfigurationRefreshService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -137,6 +144,7 @@ public sealed class OraclePhaseBHostConfigurationTests
         finally
         {
             await service.StopAsync(CancellationToken.None);
+            await publisher.DisposeAsync();
         }
     }
 

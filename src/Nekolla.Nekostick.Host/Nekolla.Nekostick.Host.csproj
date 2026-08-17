@@ -4,6 +4,15 @@
     <RootNamespace>Nekolla.Nekostick.Host</RootNamespace>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <NativeHelperProject>$(MSBuildProjectDirectory)/../Nekolla.Nekostick.NativeHelper/Nekolla.Nekostick.NativeHelper.csproj</NativeHelperProject>
+    <NativeHelperRuntimeIdentifier Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</NativeHelperRuntimeIdentifier>
+    <NativeHelperRuntimeIdentifier Condition="'$(NativeHelperRuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</NativeHelperRuntimeIdentifier>
+    <NativeHelperPublishDirectory>$(MSBuildProjectDirectory)/.nativehelper/$(Configuration)/$(NativeHelperRuntimeIdentifier)</NativeHelperPublishDirectory>
+    <NativeHelperBinaryPath>$(NativeHelperPublishDirectory)/Nekolla.Nekostick.NativeHelper</NativeHelperBinaryPath>
+    <NativeHelperResourceName>Nekolla.Nekostick.Host.Resources.Nekolla.Nekostick.NativeHelper</NativeHelperResourceName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,6 +21,15 @@
     <ProjectReference Include="../Nekolla.Nekostick.Persistence/Nekolla.Nekostick.Persistence.csproj" />
     <ProjectReference Include="../Nekolla.Nekostick.Proxy/Nekolla.Nekostick.Proxy.csproj" />
     <ProjectReference Include="../Nekolla.Nekostick.Routing/Nekolla.Nekostick.Routing.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Supervision/Nekolla.Nekostick.Supervision.csproj" />
+    <ProjectReference Include="../Nekolla.Nekostick.Extensions/Nekolla.Nekostick.Extensions.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+    <EmbeddedResource Include="$(NativeHelperBinaryPath)" LogicalName="$(NativeHelperResourceName)" />
   </ItemGroup>
+
+  <Target Name="PublishNativeHelper" BeforeTargets="BeforeCompile;PrepareResourceNames;CoreCompile">
+    <Error Condition="'$(NativeHelperRuntimeIdentifier)' == ''" Text="NativeHelper requires a runtime identifier." />
+    <MakeDir Directories="$(NativeHelperPublishDirectory)" />
+    <Exec Command="dotnet publish &quot;$(NativeHelperProject)&quot; --configuration &quot;$(Configuration)&quot; --runtime &quot;$(NativeHelperRuntimeIdentifier)&quot; --self-contained false --property:PublishReadyToRun=true --property:PublishSingleFile=true --output &quot;$(NativeHelperPublishDirectory)&quot;" />
+  </Target>
 </Project>

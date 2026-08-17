@@ -15,8 +15,8 @@ public static class ExtensionManifestDiscovery
 
         var manifestFiles = new List<(string Name, ManifestSourceFormat Format)>();
         AddExistingManifest(root, "manifest.json", ManifestSourceFormat.Json, manifestFiles);
-        AddExistingManifest(root, "manifest.yaml", ManifestSourceFormat.YamlDeferred, manifestFiles);
-        AddExistingManifest(root, "manifest.yml", ManifestSourceFormat.YamlDeferred, manifestFiles);
+        AddExistingManifest(root, "manifest.yaml", ManifestSourceFormat.Yaml, manifestFiles);
+        AddExistingManifest(root, "manifest.yml", ManifestSourceFormat.Yaml, manifestFiles);
 
         if (manifestFiles.Count == 0)
         {
@@ -29,20 +29,16 @@ public static class ExtensionManifestDiscovery
         }
 
         var selected = manifestFiles[0];
-        if (selected.Format == ManifestSourceFormat.YamlDeferred)
-        {
-            return ManifestDiscoveryResult.Failure(
-                ExtensionFailureCode.YamlParserDeferred,
-                ManifestSourceFormat.YamlDeferred);
-        }
-
         var manifestPath = Path.Combine(root, selected.Name);
         if (!CanonicalPath.TryCanonicalFileInRoot(root, manifestPath, out var canonicalManifestPath))
         {
             return ManifestDiscoveryResult.Failure(ExtensionFailureCode.UnsafePath, selected.Format);
         }
 
-        return JsonManifestParser.Parse(root, canonicalManifestPath);
+        return selected.Format == ManifestSourceFormat.Json
+            ? JsonManifestParser.Parse(root, canonicalManifestPath)
+            : YamlManifestParser.Parse(root, canonicalManifestPath);
+
     }
 
     private static void AddExistingManifest(

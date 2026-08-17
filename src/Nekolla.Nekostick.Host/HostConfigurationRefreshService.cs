@@ -69,12 +69,12 @@ public sealed class PostgresConfigurationChangeSignal : IConfigurationChangeSign
 public sealed class HostConfigurationRefreshService : BackgroundService
 {
     private readonly HostConfigurationSnapshotHolder _snapshotAccessor;
-    private readonly HostConfigurationSnapshotHolder _snapshotHolder;
     private readonly IHostConfigurationSnapshotReader _snapshotReader;
     private readonly IConfigurationChangeSignal _changeSignal;
     private readonly HostRuntimeState _runtimeState;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly HostRuntimeOptions _options;
+    private readonly HostConfigurationPublisher _publisher;
     private readonly ILogger<HostConfigurationRefreshService> _logger;
 
     /// <summary>Creates the runtime configuration refresh service.</summary>
@@ -85,15 +85,16 @@ public sealed class HostConfigurationRefreshService : BackgroundService
         HostRuntimeState runtimeState,
         IServiceScopeFactory scopeFactory,
         HostRuntimeOptions options,
+        HostConfigurationPublisher publisher,
         ILogger<HostConfigurationRefreshService> logger)
     {
         _snapshotAccessor = snapshotHolder ?? throw new ArgumentNullException(nameof(snapshotHolder));
-        _snapshotHolder = snapshotHolder;
         _snapshotReader = snapshotReader ?? throw new ArgumentNullException(nameof(snapshotReader));
         _changeSignal = changeSignal ?? throw new ArgumentNullException(nameof(changeSignal));
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -203,7 +204,7 @@ public sealed class HostConfigurationRefreshService : BackgroundService
             return;
         }
 
-        if (_snapshotHolder.TryReplace(loaded.Value))
+        if (await _publisher.PublishAsync(loaded.Value, cancellationToken).ConfigureAwait(false))
         {
             _runtimeState.MarkSnapshotAccepted();
         }
