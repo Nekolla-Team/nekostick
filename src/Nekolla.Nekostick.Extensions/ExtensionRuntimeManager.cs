@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Extensions;
@@ -146,21 +147,25 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     private readonly object _gate = new();
     private readonly CollectibleExtensionLoader _loader;
     private readonly HostApiVersion _hostApiVersion;
+    private readonly ExtensionContractCatalog _contractCatalog;
     private readonly Dictionary<string, ExtensionInstance> _instances = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HandlerBinding> _handlers = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _dispatchLifetime = new();
     private HandlerBinding? _fallback;
     private bool _disposed;
 
-    /// <summary>Creates an explicit-only runtime manager for one host API version.</summary>
+    /// <summary>Creates an explicit-only runtime manager for one host API version and catalog.</summary>
     /// <param name="hostApiVersion">The host API version used for compatibility checks.</param>
-    public ExtensionRuntimeManager(HostApiVersion hostApiVersion)
+    /// <param name="contractCatalog">The immutable host-owned shared contract catalog.</param>
+    public ExtensionRuntimeManager(
+        HostApiVersion hostApiVersion,
+        ExtensionContractCatalog? contractCatalog = null)
     {
         _hostApiVersion = hostApiVersion;
-        _loader = new CollectibleExtensionLoader(new SemVersion(
-            hostApiVersion.Major,
-            hostApiVersion.Minor,
-            hostApiVersion.Patch));
+        _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault();
+        _loader = new CollectibleExtensionLoader(
+            new SemVersion(hostApiVersion.Major, hostApiVersion.Minor, hostApiVersion.Patch),
+            _contractCatalog);
     }
 
     /// <summary>Loads and starts one explicitly supplied manifest.</summary>
@@ -317,6 +322,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
                 else
                 {
                     previous.MarkDraining();
+                    PublishExtensionState(previous, ExtensionLoadState.Unloading);
                 }
             }
 
@@ -332,6 +338,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
             if (!oldStopped)
             {
                 previous.ResumeServing();
+                PublishExtensionState(previous, ExtensionLoadState.Loaded);
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                 return ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.StopFailed,
@@ -341,6 +348,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
             if (!await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
             {
                 previous.ResumeServing();
+                PublishExtensionState(previous, ExtensionLoadState.Loaded);
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                 return ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.LifecycleFailed,
@@ -356,10 +364,12 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
                     RemoveInstanceRegistrations(previous);
                     CommitInstance(candidate);
                     previous.MarkStopped();
+                    PublishExtensionState(previous, ExtensionLoadState.Stopped);
                 }
                 else
                 {
                     previous.ResumeServing();
+                    PublishExtensionState(previous, ExtensionLoadState.Loaded);
                 }
             }
 
@@ -427,12 +437,14 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
 
                 RemoveInstanceRegistrations(instance);
                 instance.MarkDraining();
+                PublishExtensionState(instance, ExtensionLoadState.Unloading);
                 _instances.Remove(extensionId);
             }
 
             var stopped = await instance.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
             await instance.ReleaseAsync().ConfigureAwait(false);
             instance.MarkStopped();
+            PublishExtensionState(instance, ExtensionLoadState.Stopped);
             return stopped
                 ? ExtensionRuntimeOperationResult.Success(instance.GetStatus())
                 : ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.StopFailed, instance.GetStatus());
@@ -655,6 +667,11 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
             return CandidateResult.Failure(ExtensionFailureCode.Cancelled);
         }
 
+        var contractFailure = ValidateManifestContracts(manifest);
+        if (contractFailure != ExtensionFailureCode.None)
+        {
+            return CandidateResult.Failure(contractFailure);
+        }
         var loaded = _loader.Load(manifest);
         if (!loaded.Succeeded || loaded.Handle is null)
         {
@@ -668,7 +685,8 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
                 manifest,
                 loaded.Handle,
                 _hostApiVersion,
-                settings);
+                settings,
+                ResolveContractProvider);
             instance.SetSettings(settings);
             instance.SetFailureCallback(exception =>
                 RecordFailureAsync(instance, ExtensionFailureCode.CallbackFailed, exception));
@@ -713,6 +731,110 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
         }
         return ExtensionFailureCode.None;
     }
+    private ExtensionFailureCode ValidateManifestContracts(ExtensionManifest manifest)
+    {
+        var imports = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var import in manifest.Imports)
+        {
+            if (!imports.Add(import.ContractId))
+            {
+                return ExtensionFailureCode.DuplicateContractDeclaration;
+            }
+
+            var provider = manifest.Exports.FirstOrDefault(export =>
+                string.Equals(export.ContractId, import.ContractId, StringComparison.Ordinal));
+            if (provider is null && !TryFindContractProvider(import, out provider))
+            {
+                return ExtensionFailureCode.MissingContractProvider;
+            }
+
+            if (!import.VersionRange.IsSatisfiedBy(provider.Version))
+            {
+                return ExtensionFailureCode.ContractVersionIncompatible;
+            }
+
+            if (!string.Equals(import.AssemblyIdentity, provider.AssemblyIdentity, StringComparison.Ordinal) ||
+                !string.Equals(import.TypeIdentity, provider.TypeIdentity, StringComparison.Ordinal))
+            {
+                return ExtensionFailureCode.ContractIdentityMismatch;
+            }
+        }
+
+        return ExtensionFailureCode.None;
+    }
+
+    private bool TryFindContractProvider(
+        ExtensionContractImport import,
+        out ExtensionContractExport provider)
+    {
+        lock (_gate)
+        {
+            foreach (var instance in _instances.Values.Concat(_dispatchCandidates))
+            {
+                provider = instance.Manifest.Exports.FirstOrDefault(export =>
+                    string.Equals(export.ContractId, import.ContractId, StringComparison.Ordinal))!;
+                if (provider is not null)
+                {
+                    return true;
+                }
+            }
+        }
+
+        provider = null!;
+        return false;
+    }
+
+    private object? ResolveContractProvider(string contractId, Type contractType)
+    {
+        lock (_gate)
+        {
+            foreach (var instance in _instances.Values.Concat(_dispatchCandidates))
+            {
+                if (instance.Manifest.Exports.Any(export =>
+                        string.Equals(export.ContractId, contractId, StringComparison.Ordinal)) &&
+                    instance.TryResolveContract(contractId, contractType, out var value))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Publishes one required node-local core event without blocking the caller.</summary>
+    /// <param name="event">The immutable core event.</param>
+    /// <returns>The number of active extension queues that accepted the event.</returns>
+    public int PublishCoreEvent(ExtensionCoreEvent? @event)
+    {
+        if (@event is null)
+        {
+            return 0;
+        }
+
+        var extensionEvent = new ExtensionEvent(
+            @event.Kind.ToString(),
+            @event.Version,
+            @event.PayloadJson);
+        ExtensionInstance[] recipients;
+        lock (_gate)
+        {
+            recipients = _instances.Values
+                .Where(static instance => instance.IsServing)
+                .ToArray();
+        }
+
+        var accepted = 0;
+        foreach (var recipient in recipients)
+        {
+            if (recipient.TryPublishEvent(extensionEvent))
+            {
+                accepted++;
+            }
+        }
+
+        return accepted;
+    }
 
     private void CommitInstance(ExtensionInstance instance)
     {
@@ -728,6 +850,30 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
         }
 
         instance.MarkServing();
+        PublishExtensionState(instance, ExtensionLoadState.Loaded);
+    }
+    private void PublishExtensionState(ExtensionInstance instance, ExtensionLoadState state)
+    {
+        try
+        {
+            var payloadJson = JsonSerializer.Serialize(new
+            {
+                extensionId = instance.Manifest.Id,
+                version = instance.Manifest.Version.ToString(),
+                state = state.ToString()
+            });
+            if (payloadJson.Length <= 4096)
+            {
+                PublishCoreEvent(new ExtensionCoreEvent(
+                    ExtensionCoreEventKind.ExtensionStateChanged,
+                    1,
+                    payloadJson));
+            }
+        }
+        catch (Exception)
+        {
+            // Lifecycle publication is best effort and must not alter extension transitions.
+        }
     }
 
     private void RemoveInstanceRegistrations(ExtensionInstance instance)
@@ -776,6 +922,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
                 {
                     published = _publishedDispatchGeneration is not null;
                     instance.MarkFailed();
+                    PublishExtensionState(instance, ExtensionLoadState.Failed);
                     if (!published)
                     {
                         RemoveInstanceRegistrations(instance);
@@ -822,33 +969,39 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
 {
     private readonly object _gate = new();
     private readonly ExtensionLoadHandle _loadHandle;
-    private readonly ExtensionTaskTracker _tasks;
-    private readonly ExtensionEventQueue _events;
-    private readonly ExtensionFailureTracker _failures = new();
-    private readonly ExtensionHostBridge _bridge;
-    private readonly ExtensionHandlerRegistry _registry = new();
     private IExtensionEntrypoint? _entrypoint;
-    private ExtensionLoadState _state = ExtensionLoadState.Discovered;
-    private ExtensionFailureCode _lastFailure;
     private Func<Exception, ValueTask>? _failureCallback;
     private Task<bool>? _stopTask;
     private int _activeRequests;
-
+    private readonly ExtensionTaskTracker _tasks;
+    private readonly ExtensionEventQueue _events;
+    private readonly ExtensionContractRegistry _contracts;
+    private readonly ExtensionFailureTracker _failures = new();
+    private readonly ExtensionHostBridge _bridge;
+    private readonly ExtensionHandlerRegistry _registry = new();
+    private ExtensionLoadState _state = ExtensionLoadState.Discovered;
+    private ExtensionFailureCode _lastFailure;
     internal ExtensionInstance(
         ExtensionManifest manifest,
         ExtensionLoadHandle loadHandle,
         HostApiVersion hostApiVersion,
-        ExtensionSettingsConfiguration? settings)
+        ExtensionSettingsConfiguration? settings,
+        Func<string, Type, object?> resolveProvider)
     {
         Manifest = manifest;
         _loadHandle = loadHandle;
-        _events = new ExtensionEventQueue(NotifyFailureAsync);
+        _events = new ExtensionEventQueue(NotifyFailureAsync, onDrop: RecordDroppedEvent);
         _tasks = new ExtensionTaskTracker(NotifyFailureAsync);
+        _contracts = new ExtensionContractRegistry(
+            manifest.Exports,
+            manifest.Imports,
+            resolveProvider);
         _bridge = new ExtensionHostBridge(
             hostApiVersion,
             settings,
             _tasks,
             _events,
+            _contracts,
             _ => { },
             (_, _) => { });
         _entrypoint = loadHandle.CreateEntrypoint(_bridge);
@@ -872,7 +1025,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(timeout);
             await _entrypoint!.StartAsync(
-                    new ExtensionStartContext(reloading, _bridge, _registry),
+                    new ExtensionStartContext(reloading, _bridge, _contracts, _registry),
                     timeoutSource.Token)
                 .AsTask()
                 .WaitAsync(timeoutSource.Token)
@@ -883,6 +1036,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                 return false;
             }
 
+            _contracts.CompleteStartup();
             return true;
         }
         catch (OperationCanceledException)
@@ -1002,6 +1156,18 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
 
         return _failures.Record(DateTimeOffset.UtcNow);
     }
+    private ValueTask RecordDroppedEvent(long droppedCount)
+    {
+        if (droppedCount > 0)
+        {
+            lock (_gate)
+            {
+                _lastFailure = ExtensionFailureCode.EventQueueFull;
+            }
+        }
+
+        return ValueTask.CompletedTask;
+    }
 
     internal ExtensionRuntimeStatus GetStatus()
     {
@@ -1020,7 +1186,23 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                 _lastFailure);
         }
     }
+    internal bool IsServing
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _state == ExtensionLoadState.Loaded;
+            }
+        }
+    }
 
+    internal bool TryPublishEvent(ExtensionEvent @event) =>
+        IsServing && _events.TryPublish(@event);
+
+    /// <inheritdoc />
+    public ValueTask DisposeAsync() =>
+        AbortAsync(ExtensionRuntimeManager.LifecycleTimeout);
     internal async ValueTask AbortAsync(TimeSpan timeout)
     {
         MarkDraining();
@@ -1028,12 +1210,14 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         await ReleaseAsync().ConfigureAwait(false);
     }
 
-    public ValueTask DisposeAsync() => AbortAsync(ExtensionRuntimeManager.LifecycleTimeout);
+    internal bool TryResolveContract(string contractId, Type contractType, out object? value) =>
+        _contracts.TryResolveExport(contractId, contractType, out value);
 
     internal ValueTask ReleaseAsync()
     {
         _entrypoint = null;
         _registry.Clear();
+        _contracts.Dispose();
         _loadHandle.Unload();
         return ValueTask.CompletedTask;
     }

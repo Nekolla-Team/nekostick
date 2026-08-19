@@ -108,7 +108,7 @@ internal sealed class HostValue
             else if (colonCount == 1)
             {
                 var colon = input.IndexOf(':');
-                if (!TryPort(input[(colon + 1)..]))
+                if (!TryPort(input[colon..]))
                 {
                     return false;
                 }

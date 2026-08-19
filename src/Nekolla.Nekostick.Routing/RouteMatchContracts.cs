@@ -39,6 +39,12 @@ public enum RouteNoMatchReason
     /// <summary>Path candidates were rejected by method conditions.</summary>
     MethodMismatch,
 
+    /// <summary>Path selection reached a static target whose file was not found.</summary>
+    StaticNotFound,
+
+    /// <summary>Path selection reached a static directory without its configured index.</summary>
+    StaticIndexMissing,
+
     /// <summary>Path candidates were rejected by more than one condition.</summary>
     ConditionMismatch
 }

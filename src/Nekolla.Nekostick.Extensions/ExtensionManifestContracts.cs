@@ -70,6 +70,20 @@ public enum ExtensionFailureCode
 
     /// <summary>The dependency graph contains a cycle.</summary>
     DependencyCycle,
+    /// <summary>The requested shared contract catalog entry is unavailable.</summary>
+    ContractCatalogUnavailable,
+
+    /// <summary>A manifest contains duplicate export or import declarations.</summary>
+    DuplicateContractDeclaration,
+
+    /// <summary>An imported contract has no compatible provider.</summary>
+    MissingContractProvider,
+
+    /// <summary>A provider contract version does not satisfy the import range.</summary>
+    ContractVersionIncompatible,
+
+    /// <summary>A shared contract assembly or type identity is incompatible.</summary>
+    ContractIdentityMismatch,
 
     /// <summary>The requested contracts assembly identity was not approved.</summary>
     ContractsIdentityMismatch,
@@ -169,6 +183,84 @@ public sealed record ExtensionDependency
     public SemVersionRange VersionRange { get; }
 }
 
+/// <summary>Declares one shared contract exported by an extension.</summary>
+public sealed record ExtensionContractExport
+{
+    /// <summary>Creates an export declaration.</summary>
+    public ExtensionContractExport(
+        string contractId,
+        SemVersion version,
+        string assemblyIdentity,
+        string typeIdentity)
+    {
+        ValidateIdentity(contractId, assemblyIdentity, typeIdentity);
+        ContractId = contractId;
+        Version = version;
+        AssemblyIdentity = assemblyIdentity;
+        TypeIdentity = typeIdentity;
+    }
+
+    /// <summary>Gets the stable contract ID.</summary>
+    public string ContractId { get; }
+
+    /// <summary>Gets the exported semantic version.</summary>
+    public SemVersion Version { get; }
+
+    /// <summary>Gets the exact shared assembly identity.</summary>
+    public string AssemblyIdentity { get; }
+
+    /// <summary>Gets the exact shared contract type identity.</summary>
+    public string TypeIdentity { get; }
+
+    internal static void ValidateIdentity(string contractId, string assemblyIdentity, string typeIdentity)
+    {
+        if (!ExtensionIdentifierSyntax.IsValid(contractId))
+        {
+            throw new ArgumentException("A safe contract identifier is required.", nameof(contractId));
+        }
+
+        if (string.IsNullOrWhiteSpace(assemblyIdentity) || assemblyIdentity.Length > 1024)
+        {
+            throw new ArgumentException("A shared assembly identity is required.", nameof(assemblyIdentity));
+        }
+
+        if (string.IsNullOrWhiteSpace(typeIdentity) || typeIdentity.Length > 1024)
+        {
+            throw new ArgumentException("A shared type identity is required.", nameof(typeIdentity));
+        }
+    }
+}
+
+/// <summary>Declares one shared contract imported by an extension.</summary>
+public sealed record ExtensionContractImport
+{
+    /// <summary>Creates an import declaration.</summary>
+    public ExtensionContractImport(
+        string contractId,
+        SemVersionRange versionRange,
+        string assemblyIdentity,
+        string typeIdentity)
+    {
+        ExtensionContractExport.ValidateIdentity(contractId, assemblyIdentity, typeIdentity);
+        ContractId = contractId;
+        VersionRange = versionRange ?? throw new ArgumentNullException(nameof(versionRange));
+        AssemblyIdentity = assemblyIdentity;
+        TypeIdentity = typeIdentity;
+    }
+
+    /// <summary>Gets the stable contract ID.</summary>
+    public string ContractId { get; }
+
+    /// <summary>Gets the accepted semantic version range.</summary>
+    public SemVersionRange VersionRange { get; }
+
+    /// <summary>Gets the exact shared assembly identity.</summary>
+    public string AssemblyIdentity { get; }
+
+    /// <summary>Gets the exact shared contract type identity.</summary>
+    public string TypeIdentity { get; }
+}
+
 /// <summary>Contains the validated immutable extension manifest.</summary>
 public sealed class ExtensionManifest
 {
@@ -180,6 +272,8 @@ public sealed class ExtensionManifest
         string entryType,
         SemVersionRange requiredHostApiVersion,
         ImmutableArray<ExtensionDependency> dependencies,
+        ImmutableArray<ExtensionContractExport> exports,
+        ImmutableArray<ExtensionContractImport> imports,
         string extensionDirectory,
         string entryAssemblyPath)
     {
@@ -190,6 +284,8 @@ public sealed class ExtensionManifest
         EntryType = entryType;
         RequiredHostApiVersion = requiredHostApiVersion;
         Dependencies = dependencies.IsDefault ? ImmutableArray<ExtensionDependency>.Empty : dependencies;
+        Exports = exports.IsDefault ? ImmutableArray<ExtensionContractExport>.Empty : exports;
+        Imports = imports.IsDefault ? ImmutableArray<ExtensionContractImport>.Empty : imports;
         ExtensionDirectory = extensionDirectory;
         EntryAssemblyPath = entryAssemblyPath;
     }
@@ -214,6 +310,11 @@ public sealed class ExtensionManifest
 
     /// <summary>Gets the immutable dependency declarations.</summary>
     public ImmutableArray<ExtensionDependency> Dependencies { get; }
+    /// <summary>Gets the immutable shared contract exports.</summary>
+    public ImmutableArray<ExtensionContractExport> Exports { get; }
+
+    /// <summary>Gets the immutable shared contract imports.</summary>
+    public ImmutableArray<ExtensionContractImport> Imports { get; }
 
     internal string ExtensionDirectory { get; }
 

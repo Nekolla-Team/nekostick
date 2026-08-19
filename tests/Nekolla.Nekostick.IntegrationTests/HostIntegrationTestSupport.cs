@@ -305,9 +305,9 @@ internal static class HostIntegrationTestSupport
         RouteMatch match)
     {
         var routing = GetRoutingSnapshot(holder);
-        var execute = hostTargetExecutor.GetType().GetMethod(
-            "ExecuteAsync",
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+        var execute = hostTargetExecutor.GetType().GetMethods(
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Single(value => value.Name == "ExecuteAsync" && value.GetParameters().Length == 4);
         var pending = execute.Invoke(
             hostTargetExecutor,
             [context, routing, match, context.RequestAborted])!;

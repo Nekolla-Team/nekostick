@@ -6,6 +6,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>

@@ -145,7 +145,7 @@ internal static class ExtensionHttpAdapter
         }
     }
 }
-/// <summary>Invokes the sole staged extension fallback only for a no-route 404 candidate.</summary>
+/// <summary>Invokes the sole staged extension fallback for safe 404 candidates.</summary>
 internal sealed class ExtensionRouteFallbackDispatcher : ILeasedRouteFallbackDispatcher
 {
     public ValueTask<bool> TryDispatchAsync(HttpContext context, RouteNoMatchReason reason) =>
@@ -156,7 +156,16 @@ internal sealed class ExtensionRouteFallbackDispatcher : ILeasedRouteFallbackDis
         RouteNoMatchReason reason,
         HostRoutingSnapshotLease publicationLease)
     {
-        if (reason != RouteNoMatchReason.NoRoute || publicationLease.DispatchLease is null)
+        var fallbackReason = reason switch
+        {
+            RouteNoMatchReason.NoRoute => ExtensionFallbackReason.NoRoute,
+            RouteNoMatchReason.HostMismatch => ExtensionFallbackReason.HostMismatch,
+            RouteNoMatchReason.MethodMismatch => ExtensionFallbackReason.MethodMismatch,
+            RouteNoMatchReason.StaticNotFound => ExtensionFallbackReason.StaticNotFound,
+            RouteNoMatchReason.StaticIndexMissing => ExtensionFallbackReason.StaticIndexMissing,
+            _ => (ExtensionFallbackReason?)null
+        };
+        if (fallbackReason is null || publicationLease.DispatchLease is null)
         {
             return false;
         }
@@ -171,9 +180,8 @@ internal sealed class ExtensionRouteFallbackDispatcher : ILeasedRouteFallbackDis
             return false;
         }
 
-        var fallbackReason = ExtensionFallbackReason.NoRoute;
         var result = await publicationLease.DispatchLease
-            .HandleFallbackAsync(request, fallbackReason, context.RequestAborted)
+            .HandleFallbackAsync(request, fallbackReason.Value, context.RequestAborted)
             .ConfigureAwait(false);
         if (result.State != ExtensionInvocationState.Handled || result.Response is null)
         {

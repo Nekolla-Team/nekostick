@@ -24,12 +24,11 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     /// <summary>Creates a helper-backed executor using an absolute extracted helper path.</summary>
     /// <param name="helperPath">The absolute helper executable or DLL path, or null to reject starts.</param>
     /// <param name="defaultStopGracePeriod">The helper's bounded graceful-stop period.</param>
-    public PosixProcessExecutor(string? helperPath = null, TimeSpan? defaultStopGracePeriod = null)
-        : this(helperPath, defaultStopGracePeriod, NullProcessOutputSink.Instance)
-    {
-    }
-
-    internal PosixProcessExecutor(string? helperPath, TimeSpan? defaultStopGracePeriod, IProcessOutputSink outputSink)
+    /// <param name="outputSink">The optional bounded child-output sink.</param>
+    public PosixProcessExecutor(
+        string? helperPath = null,
+        TimeSpan? defaultStopGracePeriod = null,
+        IProcessOutputSink? outputSink = null)
     {
         this.helperPath = helperPath is not null && Path.IsPathRooted(helperPath) && File.Exists(helperPath)
             ? helperPath
@@ -38,7 +37,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(helperGracePeriod, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(helperGracePeriod, TimeSpan.FromMinutes(5));
 
-        this.outputSink = outputSink ?? throw new ArgumentNullException(nameof(outputSink));
+        this.outputSink = outputSink ?? NullProcessOutputSink.Instance;
     }
 
     /// <inheritdoc />

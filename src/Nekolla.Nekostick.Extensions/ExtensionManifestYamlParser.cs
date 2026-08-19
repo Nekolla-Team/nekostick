@@ -50,7 +50,8 @@ internal static class YamlManifestParser
                 return Failure(fieldFailure);
             }
 
-            if (fields.Count != ManifestSchema.AllowedFields.Count)
+            var requiredFieldCount = ManifestSchema.AllowedFields.Count - 2;
+            if (fields.Count < requiredFieldCount)
             {
                 return Failure(ExtensionFailureCode.ManifestSchemaInvalid);
             }
@@ -94,6 +95,12 @@ internal static class YamlManifestParser
                 dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange));
             }
 
+            var exportsValid = TryReadExports(fields, out var exports, out var exportFailure);
+            var importsValid = TryReadImports(fields, out var imports, out var importFailure);
+            if (!exportsValid || !importsValid)
+            {
+                return Failure(exportFailure != ExtensionFailureCode.None ? exportFailure : importFailure);
+            }
             return ManifestParserCore.Validate(
                 root,
                 ManifestSourceFormat.Yaml,
@@ -104,7 +111,9 @@ internal static class YamlManifestParser
                     entryAssembly,
                     entryType,
                     dependencies,
-                    hostApiVersion));
+                    hostApiVersion,
+                    exports,
+                    imports));
         }
         catch (YamlException)
         {
@@ -348,12 +357,102 @@ internal static class YamlManifestParser
     {
         value = null;
         if (!TryReadScalar(fields, name, out var text) ||
+
             !int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
         {
             return false;
         }
 
         value = parsed;
+        return true;
+    }
+    private static bool TryReadExports(
+        Dictionary<string, YamlNode> fields,
+        out List<ManifestContractExportValues> exports,
+        out ExtensionFailureCode failure)
+    {
+        exports = new List<ManifestContractExportValues>();
+        failure = ExtensionFailureCode.None;
+        if (!fields.TryGetValue("exports", out var node))
+        {
+            return true;
+        }
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            failure = ExtensionFailureCode.ManifestSchemaInvalid;
+            return false;
+        }
+
+        foreach (var child in sequence.Children)
+        {
+            if (child is not YamlMappingNode mapping ||
+                !TryReadMapping(mapping, ManifestSchema.ExportFields, out var declaration, out failure))
+            {
+                failure = failure == ExtensionFailureCode.None
+                    ? ExtensionFailureCode.ManifestSchemaInvalid
+                    : failure;
+                return false;
+            }
+
+            if (declaration.Count != ManifestSchema.ExportFields.Count ||
+                !TryReadScalar(declaration, "contractId", out var id) ||
+                !TryReadScalar(declaration, "version", out var version) ||
+                !TryReadScalar(declaration, "assemblyIdentity", out var assemblyIdentity) ||
+                !TryReadScalar(declaration, "typeIdentity", out var typeIdentity))
+            {
+                failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                return false;
+            }
+
+            exports.Add(new ManifestContractExportValues(id, version, assemblyIdentity, typeIdentity));
+        }
+
+        return true;
+    }
+
+    private static bool TryReadImports(
+        Dictionary<string, YamlNode> fields,
+        out List<ManifestContractImportValues> imports,
+        out ExtensionFailureCode failure)
+    {
+        imports = new List<ManifestContractImportValues>();
+        failure = ExtensionFailureCode.None;
+        if (!fields.TryGetValue("imports", out var node))
+        {
+            return true;
+        }
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            failure = ExtensionFailureCode.ManifestSchemaInvalid;
+            return false;
+        }
+
+        foreach (var child in sequence.Children)
+        {
+            if (child is not YamlMappingNode mapping ||
+                !TryReadMapping(mapping, ManifestSchema.ImportFields, out var declaration, out failure))
+            {
+                failure = failure == ExtensionFailureCode.None
+                    ? ExtensionFailureCode.ManifestSchemaInvalid
+                    : failure;
+                return false;
+            }
+
+            if (declaration.Count != ManifestSchema.ImportFields.Count ||
+                !TryReadScalar(declaration, "contractId", out var id) ||
+                !TryReadScalar(declaration, "versionRange", out var versionRange) ||
+                !TryReadScalar(declaration, "assemblyIdentity", out var assemblyIdentity) ||
+                !TryReadScalar(declaration, "typeIdentity", out var typeIdentity))
+            {
+                failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                return false;
+            }
+
+            imports.Add(new ManifestContractImportValues(id, versionRange, assemblyIdentity, typeIdentity));
+        }
+
         return true;
     }
 

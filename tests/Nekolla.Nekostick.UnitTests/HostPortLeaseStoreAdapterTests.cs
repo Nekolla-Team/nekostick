@@ -181,6 +181,32 @@ public sealed class HostPortLeaseStoreAdapterTests
         Assert.False(runtime.NewLeasesAllowed);
     }
 
+    [Fact]
+    public async Task UnavailableRuntimeRejectsRenewWithoutCallingPersistence()
+    {
+        var store = new RecordingStore
+        {
+            RenewResult = AppliedPersistenceLease(port: 23456, version: 2)
+        };
+        var runtime = CreateRuntimeState(accepted: false);
+        var adapter = new HostPortLeaseStoreAdapter(store, runtime);
+        var renewal = new PortLeaseRenewal(
+            new NodeIdentifier("node"),
+            ServiceId,
+            23456,
+            leaseVersion: 1,
+            TimeSpan.FromMinutes(1));
+
+        var result = await adapter.ApplyAsync(
+            PortLeaseIntent.Renew(renewal),
+            CancellationToken.None);
+
+        Assert.Equal(PortLeaseOperationStatus.DatabaseUnavailable, result.Status);
+        Assert.Null(result.Lease);
+        Assert.Null(store.RenewRequest);
+        Assert.False(runtime.NewLeasesAllowed);
+    }
+
     private static HostRuntimeState CreateRuntimeState(bool accepted)
     {
         var holder = new HostConfigurationSnapshotHolder();
@@ -216,7 +242,9 @@ public sealed class HostPortLeaseStoreAdapterTests
     private sealed class RecordingStore : IPersistencePortLeaseStore
     {
         public PersistencePortLeaseAcquireRequest? AcquireRequest { get; private set; }
+        public PersistencePortLeaseRenewRequest? RenewRequest { get; private set; }
         public PersistencePortLeaseOperationResult AcquireResult { get; init; } = PersistencePortLeaseOperationResult.Unavailable();
+        public PersistencePortLeaseOperationResult RenewResult { get; init; } = PersistencePortLeaseOperationResult.Unavailable();
         public bool ThrowCancellation { get; init; }
         public bool ThrowError { get; init; }
 
@@ -240,8 +268,11 @@ public sealed class HostPortLeaseStoreAdapterTests
 
         public ValueTask<PersistencePortLeaseOperationResult> RenewAsync(
             PersistencePortLeaseRenewRequest request,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(PersistencePortLeaseOperationResult.Unavailable());
+            CancellationToken cancellationToken = default)
+        {
+            RenewRequest = request;
+            return ValueTask.FromResult(RenewResult);
+        }
 
         public ValueTask<PersistencePortLeaseOperationResult> ReleaseAsync(
             PersistencePortLeaseReleaseRequest request,

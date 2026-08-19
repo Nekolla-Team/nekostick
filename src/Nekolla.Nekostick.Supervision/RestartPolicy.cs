@@ -58,27 +58,27 @@ public sealed record RestartBackoffPolicy
         AttemptWindow = attemptWindow;
     }
 
-    /// <summary>Gets the initial delay. The default is exactly 100 milliseconds.</summary>
+    /// <summary>Gets the initial delay. The default is exactly 1 second.</summary>
     public TimeSpan InitialDelay { get; }
 
-    /// <summary>Gets the pre-jitter delay cap. The default is exactly 1600 milliseconds.</summary>
+    /// <summary>Gets the pre-jitter delay cap. The default is exactly 30 seconds.</summary>
     public TimeSpan MaximumDelay { get; }
 
     /// <summary>Gets the maximum injected jitter.</summary>
     public TimeSpan MaximumJitter { get; }
 
-    /// <summary>Gets the maximum attempts in one window.</summary>
+    /// <summary>Gets the maximum attempts in one window. The default is exactly 10 attempts.</summary>
     public int MaximumAttempts { get; }
 
-    /// <summary>Gets the duration of the attempt window.</summary>
+    /// <summary>Gets the duration of the attempt window. The default is exactly 5 minutes.</summary>
     public TimeSpan AttemptWindow { get; }
 
-    /// <summary>Gets a policy whose first five delays are exactly 100, 200, 400, 800, and 1600 milliseconds.</summary>
+    /// <summary>Gets a policy whose first delays are exactly 1, 2, 4, 8, 16, and 30 seconds, with zero injected jitter and at most 10 attempts per 5-minute window.</summary>
     public static RestartBackoffPolicy Default => new(
-        TimeSpan.FromMilliseconds(100),
-        TimeSpan.FromMilliseconds(1600),
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(30),
         TimeSpan.Zero,
-        5,
+        10,
         TimeSpan.FromMinutes(5));
 
     /// <summary>Calculates a one-based exponential delay before jitter.</summary>

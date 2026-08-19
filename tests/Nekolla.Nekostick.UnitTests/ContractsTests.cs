@@ -91,10 +91,13 @@ public sealed class ContractsTests
         Assert.Equal(0L, defaults.Version);
         Assert.Equal(20000, defaults.AutoPortRangeStart);
         Assert.Equal(29999, defaults.AutoPortRangeEnd);
-        Assert.Equal(30L * 1024 * 1024, defaults.MaxRequestBodyBytes);
+        Assert.Equal(GlobalSettingsConfiguration.HardMaximumRequestBodyBytes, defaults.MaxRequestBodyBytes);
         Assert.Equal(1024, defaults.MaxConcurrentRequests);
         Assert.Equal(TimeSpan.FromSeconds(30), defaults.ConfigurationPollInterval);
         Assert.Empty(defaults.TrustedProxyCidrs);
+        Assert.Equal(32L * 1024, defaults.MaxRequestHeaderBytes);
+        Assert.Equal(TimeSpan.FromSeconds(30), defaults.RequestReadTimeout);
+        Assert.Null(defaults.ClientIpRatePolicy);
         Assert.Equal(3L, custom.Version);
         Assert.Equal(21000, custom.AutoPortRangeStart);
         Assert.Equal(21010, custom.AutoPortRangeEnd);
@@ -114,6 +117,40 @@ public sealed class ContractsTests
             () => new GlobalSettingsConfiguration(maxConcurrentRequests: 0));
         Assert.Throws<ArgumentOutOfRangeException>(
             () => new GlobalSettingsConfiguration(configurationPollInterval: TimeSpan.Zero));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new GlobalSettingsConfiguration(maxRequestHeaderBytes: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new GlobalSettingsConfiguration(requestReadTimeout: TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void RatePolicyRequiresPositiveWholeBoundedValues()
+    {
+        var policy = new ClientIpRatePolicyConfiguration(
+            tokenLimit: 10,
+            tokensPerPeriod: 5,
+            replenishmentPeriod: TimeSpan.FromSeconds(1),
+            queueLimit: 2,
+            rejectionBehavior: RateLimitRejectionBehavior.Queue,
+            retryAfterBehavior: RateLimitRetryAfterBehavior.FromReplenishmentPeriod);
+
+        Assert.Equal(10, policy.TokenLimit);
+        Assert.Equal(5, policy.TokensPerPeriod);
+        Assert.Equal(TimeSpan.FromSeconds(1), policy.ReplenishmentPeriod);
+        Assert.Equal(2, policy.QueueLimit);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ClientIpRatePolicyConfiguration(
+            0, 1, TimeSpan.FromSeconds(1), 0,
+            RateLimitRejectionBehavior.Reject,
+            RateLimitRetryAfterBehavior.None));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ClientIpRatePolicyConfiguration(
+            1, 2, TimeSpan.FromSeconds(1), 0,
+            RateLimitRejectionBehavior.Reject,
+            RateLimitRetryAfterBehavior.None));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ClientIpRatePolicyConfiguration(
+            1, 1, TimeSpan.FromTicks(1), 0,
+            RateLimitRejectionBehavior.Reject,
+            RateLimitRetryAfterBehavior.None));
     }
 
     [Fact]
@@ -258,13 +295,21 @@ public sealed class ContractsTests
             "{}",
             createdAt,
             updatedAt,
-            5);
+            5,
+            maxRequestBodyBytes: 1024 * 1024,
+            maxRequestHeaderBytes: 16 * 1024,
+            maxConcurrentRequests: 8,
+            requestReadTimeout: TimeSpan.FromSeconds(2));
 
         Assert.Equal(TimeSpan.Zero, route.CreatedAt.Offset);
         Assert.Equal(TimeSpan.Zero, route.UpdatedAt.Offset);
         Assert.Empty(route.RequestHeaderRewrites);
         Assert.Empty(route.ResponseHeaderRewrites);
         Assert.Equal(5L, route.Version);
+        Assert.Equal(1024 * 1024, route.MaxRequestBodyBytes);
+        Assert.Equal(16 * 1024, route.MaxRequestHeaderBytes);
+        Assert.Equal(8, route.MaxConcurrentRequests);
+        Assert.Equal(TimeSpan.FromSeconds(2), route.RequestReadTimeout);
         Assert.Throws<ArgumentException>(
             () => new RouteConfiguration(
                 Guid.Empty,

@@ -20,6 +20,7 @@ internal static class HostConfigurationRouteValidator
 
     internal static void Validate(
         RouteConfiguration? value,
+        GlobalSettingsConfiguration globalSettings,
         HashSet<Guid> serviceIds,
         HashSet<string> extensionIds)
     {
@@ -78,6 +79,8 @@ internal static class HostConfigurationRouteValidator
         }
 
         ValidateForwarding(value.Forwarding, matcher);
+        HostConfigurationRatePolicyValidator.Validate(value.ClientIpRatePolicy);
+        ValidateResourceOverrides(value, globalSettings);
         ValidateHeaderRewrites(value.RequestHeaderRewrites, requestSide: true);
         ValidateHeaderRewrites(value.ResponseHeaderRewrites, requestSide: false);
         HostConfigurationValueValidator.EnsureSerializedJson(matcher.HostPatterns, JsonValueKind.Array);
@@ -118,6 +121,49 @@ internal static class HostConfigurationRouteValidator
             default:
                 HostConfigurationValueValidator.Throw();
                 break;
+        }
+    }
+
+    private static void ValidateResourceOverrides(
+        RouteConfiguration value,
+        GlobalSettingsConfiguration globalSettings)
+    {
+        if (value.ProxyRetries is not null &&
+            !ProxyRetryPersistenceDefaults.IsValidRetryPolicy(value.ProxyRetries))
+        {
+            HostConfigurationValueValidator.Throw();
+        }
+
+        if (value.MaxRequestBodyBytes is { } maxRequestBodyBytes &&
+            (maxRequestBodyBytes <= 0 ||
+             maxRequestBodyBytes > GlobalSettingsConfiguration.HardMaximumRequestBodyBytes ||
+             maxRequestBodyBytes > globalSettings.MaxRequestBodyBytes))
+        {
+            HostConfigurationValueValidator.Throw();
+        }
+
+        if (value.MaxRequestHeaderBytes is { } maxRequestHeaderBytes &&
+            (maxRequestHeaderBytes <= 0 ||
+             maxRequestHeaderBytes > GlobalSettingsConfiguration.HardMaximumRequestHeaderBytes ||
+             maxRequestHeaderBytes > globalSettings.MaxRequestHeaderBytes))
+        {
+            HostConfigurationValueValidator.Throw();
+        }
+
+        if (value.MaxConcurrentRequests is { } maxConcurrentRequests &&
+            (maxConcurrentRequests <= 0 ||
+             maxConcurrentRequests > globalSettings.MaxConcurrentRequests))
+        {
+            HostConfigurationValueValidator.Throw();
+        }
+
+        if (value.RequestReadTimeout is { } requestReadTimeout &&
+            (requestReadTimeout <= TimeSpan.Zero ||
+             requestReadTimeout.Ticks % TimeSpan.TicksPerMillisecond != 0 ||
+             requestReadTimeout > TimeSpan.FromDays(1) ||
+             requestReadTimeout > globalSettings.RequestReadTimeout))
+        {
+            HostConfigurationValueValidator.Throw();
         }
     }
 

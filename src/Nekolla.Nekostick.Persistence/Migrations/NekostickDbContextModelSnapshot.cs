@@ -211,6 +211,32 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("auto_port_range_start");
 
+                    b.Property<int?>("ClientIpRateQueueLimit")
+                        .HasColumnType("integer")
+                        .HasColumnName("client_ip_rate_queue_limit");
+
+                    b.Property<string>("ClientIpRateRejectionBehavior")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("client_ip_rate_rejection_behavior");
+
+                    b.Property<int?>("ClientIpRateReplenishmentPeriodMilliseconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("client_ip_rate_replenishment_period_milliseconds");
+
+                    b.Property<string>("ClientIpRateRetryAfterBehavior")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("client_ip_rate_retry_after_behavior");
+
+                    b.Property<long?>("ClientIpRateTokenLimit")
+                        .HasColumnType("bigint")
+                        .HasColumnName("client_ip_rate_token_limit");
+
+                    b.Property<long?>("ClientIpRateTokensPerPeriod")
+                        .HasColumnType("bigint")
+                        .HasColumnName("client_ip_rate_tokens_per_period");
+
                     b.Property<int>("ConfigurationPollIntervalSeconds")
                         .HasColumnType("integer")
                         .HasColumnName("configuration_poll_interval_seconds");
@@ -237,6 +263,35 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasDefaultValue(100000)
                         .HasColumnName("http_total_timeout_milliseconds");
 
+                    b.Property<int>("ProxyMaxRetries")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0)
+                        .HasColumnName("proxy_max_retries");
+
+                    b.Property<int>("ProxyInitialRetryBackoffMilliseconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(200)
+                        .HasColumnName("proxy_initial_retry_backoff_milliseconds");
+
+                    b.Property<int>("ProxyMaximumRetryBackoffMilliseconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(2000)
+                        .HasColumnName("proxy_maximum_retry_backoff_milliseconds");
+
+                    b.Property<bool>("ProxyRetryOnConnectionFailure")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("proxy_retry_on_connection_failure");
+
+                    b.Property<bool>("ProxyRetryOnUpstreamDisconnect")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("proxy_retry_on_upstream_disconnect");
                     b.Property<int>("MaxConcurrentRequests")
                         .HasColumnType("integer")
                         .HasColumnName("max_concurrent_requests");
@@ -244,6 +299,14 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                     b.Property<long>("MaxRequestBodyBytes")
                         .HasColumnType("bigint")
                         .HasColumnName("max_request_body_bytes");
+
+                    b.Property<long>("MaxRequestHeaderBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("max_request_header_bytes");
+
+                    b.Property<int>("RequestReadTimeoutMilliseconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("request_read_timeout_milliseconds");
 
                     b.Property<string>("TrustedProxyCidrsJson")
                         .IsRequired()
@@ -272,13 +335,19 @@ namespace Nekolla.Nekostick.Persistence.Migrations
 
                     b.ToTable("global_settings", "nekostick", t =>
                         {
+                            t.HasCheckConstraint("ck_global_settings_client_ip_rate_policy", "(client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod'))");
+
                             t.HasCheckConstraint("ck_global_settings_id_uuid_v7", "substring(id::text, 15, 1) = '7' AND substring(id::text, 20, 1) IN ('8', '9', 'a', 'b')");
 
-                            t.HasCheckConstraint("ck_global_settings_limits", "max_request_body_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0");
+                            t.HasCheckConstraint("ck_global_settings_limits", "max_request_body_bytes > 0 AND max_request_header_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0 AND request_read_timeout_milliseconds BETWEEN 1 AND 86400000");
+
+                            t.HasCheckConstraint("ck_global_settings_max_request_body_bytes", "max_request_body_bytes <= 31457280");
+
 
                             t.HasCheckConstraint("ck_global_settings_port_range", "auto_port_range_start BETWEEN 1 AND 65535 AND auto_port_range_end BETWEEN 1 AND 65535 AND auto_port_range_start <= auto_port_range_end");
 
                             t.HasCheckConstraint("ck_global_settings_proxy_timeouts", "connect_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_activity_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_total_timeout_milliseconds BETWEEN 1 AND 86400000 AND websocket_idle_timeout_milliseconds BETWEEN 1 AND 86400000");
+                            t.HasCheckConstraint("ck_global_settings_proxy_retries", "proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds");
 
                             t.HasCheckConstraint("ck_global_settings_singleton", "id = '018f0f00-0000-7000-8000-000000000002'::uuid");
 
@@ -298,8 +367,15 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                             HttpTotalTimeoutMilliseconds = 100000,
                             MaxConcurrentRequests = 1024,
                             MaxRequestBodyBytes = 31457280L,
+                            MaxRequestHeaderBytes = 32768L,
+                            RequestReadTimeoutMilliseconds = 30000,
                             TrustedProxyCidrsJson = "[]",
                             UpdatedAt = new DateTimeOffset(new DateTime(2025, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            ProxyInitialRetryBackoffMilliseconds = 200,
+                            ProxyMaximumRetryBackoffMilliseconds = 2000,
+                            ProxyMaxRetries = 0,
+                            ProxyRetryOnConnectionFailure = true,
+                            ProxyRetryOnUpstreamDisconnect = true,
                             Version = 1L,
                             WebSocketIdleTimeoutMilliseconds = 120000
                         });
@@ -441,6 +517,32 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<int?>("ClientIpRateQueueLimit")
+                        .HasColumnType("integer")
+                        .HasColumnName("client_ip_rate_queue_limit");
+
+                    b.Property<string>("ClientIpRateRejectionBehavior")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("client_ip_rate_rejection_behavior");
+
+                    b.Property<int?>("ClientIpRateReplenishmentPeriodMilliseconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("client_ip_rate_replenishment_period_milliseconds");
+
+                    b.Property<string>("ClientIpRateRetryAfterBehavior")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("client_ip_rate_retry_after_behavior");
+
+                    b.Property<long?>("ClientIpRateTokenLimit")
+                        .HasColumnType("bigint")
+                        .HasColumnName("client_ip_rate_token_limit");
+
+                    b.Property<long?>("ClientIpRateTokensPerPeriod")
+                        .HasColumnType("bigint")
+                        .HasColumnName("client_ip_rate_tokens_per_period");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamptz")
                         .HasColumnName("created_at");
@@ -471,6 +573,18 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("character varying(32)")
                         .HasColumnName("matcher_type");
 
+                    b.Property<int?>("MaxConcurrentRequests")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_concurrent_requests");
+
+                    b.Property<long?>("MaxRequestBodyBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("max_request_body_bytes");
+
+                    b.Property<long?>("MaxRequestHeaderBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("max_request_header_bytes");
+
                     b.Property<string>("MetadataJson")
                         .IsRequired()
                         .HasColumnType("jsonb")
@@ -491,6 +605,26 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("priority");
 
+                    b.Property<int?>("ProxyMaxRetries")
+                        .HasColumnType("integer")
+                        .HasColumnName("proxy_max_retries");
+
+                    b.Property<int?>("ProxyInitialRetryBackoffMilliseconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("proxy_initial_retry_backoff_milliseconds");
+
+                    b.Property<int?>("ProxyMaximumRetryBackoffMilliseconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("proxy_maximum_retry_backoff_milliseconds");
+
+                    b.Property<bool?>("ProxyRetryOnConnectionFailure")
+                        .HasColumnType("boolean")
+                        .HasColumnName("proxy_retry_on_connection_failure");
+
+                    b.Property<bool?>("ProxyRetryOnUpstreamDisconnect")
+                        .HasColumnType("boolean")
+                        .HasColumnName("proxy_retry_on_upstream_disconnect");
+
                     b.Property<string>("ReplaceTemplate")
                         .HasMaxLength(4096)
                         .HasColumnType("character varying(4096)")
@@ -500,6 +634,10 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb")
                         .HasColumnName("request_header_rewrites_json");
+
+                    b.Property<int?>("RequestReadTimeoutMilliseconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("request_read_timeout_milliseconds");
 
                     b.Property<string>("ResponseHeaderRewritesJson")
                         .IsRequired()
@@ -549,6 +687,9 @@ namespace Nekolla.Nekostick.Persistence.Migrations
 
                     b.ToTable("routes", "nekostick", t =>
                         {
+                            t.HasCheckConstraint("ck_routes_client_ip_rate_policy", "(client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod'))");
+                            t.HasCheckConstraint("ck_routes_proxy_retries", "(proxy_max_retries IS NULL AND proxy_initial_retry_backoff_milliseconds IS NULL AND proxy_maximum_retry_backoff_milliseconds IS NULL AND proxy_retry_on_connection_failure IS NULL AND proxy_retry_on_upstream_disconnect IS NULL) OR (proxy_max_retries IS NOT NULL AND proxy_initial_retry_backoff_milliseconds IS NOT NULL AND proxy_maximum_retry_backoff_milliseconds IS NOT NULL AND proxy_retry_on_connection_failure IS NOT NULL AND proxy_retry_on_upstream_disconnect IS NOT NULL AND proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds)");
+
                             t.HasCheckConstraint("ck_routes_enum_values", "matcher_type IN ('Exact', 'ExactCaseInsensitive', 'Prefix', 'PrefixCaseInsensitive', 'Regex') AND target_type IN ('Microservice', 'StaticFile', 'ExtensionHandler') AND forwarding_mode IN ('Preserve', 'Strip', 'Replace')");
 
                             t.HasCheckConstraint("ck_routes_forwarding_template", "(forwarding_mode = 'Replace' AND replace_template IS NOT NULL AND length(replace_template) <= 4096) OR (forwarding_mode <> 'Replace' AND replace_template IS NULL)");
@@ -558,6 +699,8 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                             t.HasCheckConstraint("ck_routes_matcher_json", "jsonb_typeof(host_patterns_json) = 'array' AND jsonb_typeof(methods_json) = 'array' AND octet_length(host_patterns_json::text) <= 262144 AND octet_length(methods_json::text) <= 262144");
 
                             t.HasCheckConstraint("ck_routes_pattern_length", "length(pattern) BETWEEN 1 AND 4096");
+
+                            t.HasCheckConstraint("ck_routes_resource_limits", "(max_request_body_bytes IS NULL OR max_request_body_bytes BETWEEN 1 AND 31457280) AND (max_request_header_bytes IS NULL OR max_request_header_bytes BETWEEN 1 AND 32768) AND (max_concurrent_requests IS NULL OR max_concurrent_requests > 0) AND (request_read_timeout_milliseconds IS NULL OR request_read_timeout_milliseconds BETWEEN 1 AND 86400000)");
 
                             t.HasCheckConstraint("ck_routes_rewrite_metadata_json", "jsonb_typeof(request_header_rewrites_json) = 'array' AND jsonb_typeof(response_header_rewrites_json) = 'array' AND jsonb_typeof(metadata_json) = 'object' AND octet_length(request_header_rewrites_json::text) <= 1048576 AND octet_length(response_header_rewrites_json::text) <= 1048576 AND octet_length(metadata_json::text) <= 1048576");
 

@@ -226,6 +226,12 @@ public sealed record RouteConfiguration
     /// <param name="createdAt">The UTC creation timestamp.</param>
     /// <param name="updatedAt">The UTC update timestamp.</param>
     /// <param name="version">The optimistic-concurrency version.</param>
+    /// <param name="clientIpRatePolicy">The optional route client-IP policy; <see langword="null"/> inherits the global policy.</param>
+    /// <param name="maxRequestBodyBytes">The optional route request body limit; <see langword="null"/> inherits the global limit.</param>
+    /// <param name="maxRequestHeaderBytes">The optional route request header limit; <see langword="null"/> inherits the global limit.</param>
+    /// <param name="maxConcurrentRequests">The optional route concurrency limit; <see langword="null"/> inherits the global limit.</param>
+    /// <param name="requestReadTimeout">The optional route request read timeout; <see langword="null"/> inherits the global limit.</param>
+    /// <param name="proxyRetries">The optional route proxy retry settings; <see langword="null"/> inherits the global settings.</param>
     public RouteConfiguration(
         Guid id,
         bool enabled,
@@ -238,7 +244,13 @@ public sealed record RouteConfiguration
         string metadataJson,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        long version)
+        long version,
+        ClientIpRatePolicyConfiguration? clientIpRatePolicy = null,
+        long? maxRequestBodyBytes = null,
+        long? maxRequestHeaderBytes = null,
+        int? maxConcurrentRequests = null,
+        TimeSpan? requestReadTimeout = null,
+        ProxyRetryConfiguration? proxyRetries = null)
     {
         Id = IdentityValidation.RequireUuidV7(id, nameof(id));
         Enabled = enabled;
@@ -256,6 +268,34 @@ public sealed record RouteConfiguration
         CreatedAt = createdAt.ToUniversalTime();
         UpdatedAt = updatedAt.ToUniversalTime();
         Version = version < 0 ? throw new ArgumentOutOfRangeException(nameof(version)) : version;
+        if (maxRequestBodyBytes is <= 0 or > GlobalSettingsConfiguration.HardMaximumRequestBodyBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxRequestBodyBytes));
+        }
+
+        if (maxRequestHeaderBytes is <= 0 or > GlobalSettingsConfiguration.HardMaximumRequestHeaderBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxRequestHeaderBytes));
+        }
+
+        if (maxConcurrentRequests is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxConcurrentRequests));
+        }
+
+        if (requestReadTimeout is { } readTimeout &&
+            (readTimeout <= TimeSpan.Zero ||
+             readTimeout.Ticks % TimeSpan.TicksPerMillisecond != 0 ||
+             readTimeout > TimeSpan.FromDays(1)))
+        {
+            throw new ArgumentOutOfRangeException(nameof(requestReadTimeout));
+        }
+        ClientIpRatePolicy = clientIpRatePolicy;
+        MaxRequestBodyBytes = maxRequestBodyBytes;
+        MaxRequestHeaderBytes = maxRequestHeaderBytes;
+        MaxConcurrentRequests = maxConcurrentRequests;
+        RequestReadTimeout = requestReadTimeout;
+        ProxyRetries = proxyRetries;
     }
 
     /// <summary>Gets the route identifier.</summary>
@@ -270,16 +310,16 @@ public sealed record RouteConfiguration
     /// <summary>Gets the route target.</summary>
     public RouteTargetConfiguration Target { get; }
 
-    /// <summary>Gets the numeric priority.</summary>
+    /// <summary>Gets the numeric route priority.</summary>
     public int Priority { get; }
 
     /// <summary>Gets the forwarding settings.</summary>
     public ForwardingConfiguration Forwarding { get; }
 
-    /// <summary>Gets the request header rewrites.</summary>
+    /// <summary>Gets the request rewrites.</summary>
     public ImmutableArray<HeaderRewriteConfiguration> RequestHeaderRewrites { get; }
 
-    /// <summary>Gets the response header rewrites.</summary>
+    /// <summary>Gets the response rewrites.</summary>
     public ImmutableArray<HeaderRewriteConfiguration> ResponseHeaderRewrites { get; }
 
     /// <summary>Gets extension-owned JSON metadata.</summary>
@@ -293,4 +333,21 @@ public sealed record RouteConfiguration
 
     /// <summary>Gets the optimistic-concurrency version.</summary>
     public long Version { get; }
+
+    /// <summary>Gets the optional route client-IP rate policy; null inherits the global policy.</summary>
+    public ClientIpRatePolicyConfiguration? ClientIpRatePolicy { get; }
+
+    /// <summary>Gets the optional route request body limit; null inherits the global limit.</summary>
+    public long? MaxRequestBodyBytes { get; }
+
+    /// <summary>Gets the optional route request header limit; null inherits the global limit.</summary>
+    public long? MaxRequestHeaderBytes { get; }
+
+    /// <summary>Gets the optional route concurrency limit; null inherits the global limit.</summary>
+    public int? MaxConcurrentRequests { get; }
+
+    /// <summary>Gets the optional route request read timeout; null inherits the global limit.</summary>
+    public TimeSpan? RequestReadTimeout { get; }
+    /// <summary>Gets the optional route proxy retry settings; null inherits the global settings.</summary>
+    public ProxyRetryConfiguration? ProxyRetries { get; }
 }

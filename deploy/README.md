@@ -48,7 +48,9 @@ docker buildx build --platform linux/amd64 -f deploy/Dockerfile -t nekostick:rel
 The image publishes only the Host (including its embedded helper) and starts
 `/app/Nekolla.Nekostick.Host run` directly; it does not invoke `dotnet Host.dll`
 or require a helper file beside the Host. Compose keeps the services on an
-internal network and does not publish a host port:
+internal network and does not publish a host port. It requires
+`NEKOSTICK_CONNECTION_STRING` and `NEKOSTICK_NODE_ID`, supplies the documented
+listen address and port, and mounts the `extensions` directory read-only:
 
 ```sh
 docker compose -f deploy/compose.example.yml up --build
@@ -67,7 +69,7 @@ execute permission before running it; no helper executable is installed under
 
 ## Operations and secrets
 
-- PostgreSQL 16 is the baseline; apply the migration SQL artifact before startup.
+- PostgreSQL 16 is the baseline; apply the EF Core idempotent migration SQL artifact before startup.
 - Supply bootstrap settings, including the connection string, through an
   environment manager, the systemd `EnvironmentFile`, or Compose environment
   interpolation. Never commit, print, or embed secret values or secret files.

@@ -13,12 +13,18 @@ internal static class HostEventIds
     internal static readonly EventId ConfigurationRefreshUnavailable = new(1005, "ConfigurationRefreshUnavailable");
     internal static readonly EventId NodeHeartbeatUnavailable = new(1006, "NodeHeartbeatUnavailable");
     internal static readonly EventId RouteRegexEvaluationTimedOut = new(1007, "RouteRegexEvaluationTimedOut");
+    internal static readonly EventId AdmissionResourceRejected = new(1010, "AdmissionResourceRejected");
+    internal static readonly EventId RouteOutcomeSummary = new(1011, "RouteOutcomeSummary");
+    internal static readonly EventId StaticRejection = new(1012, "StaticRejection");
+    internal static readonly EventId ProxyFailure = new(1013, "ProxyFailure");
+
 }
 
 internal static class HostLoggerCategory
 {
     internal const string Startup = "Nekolla.Nekostick.Host.Startup";
     internal const string Routing = "Nekolla.Nekostick.Host.Routing";
+    internal const string Supervision = "Nekolla.Nekostick.Host.Supervision";
 }
 
 internal static partial class HostLogMessages
@@ -73,6 +79,54 @@ internal static partial class HostLogMessages
         ILogger logger,
         Guid[] routeIds,
         int count);
+
+    [LoggerMessage(
+        EventId = 1010,
+        Level = LogLevel.Warning,
+        Message = "Request admission or resource limit rejected. FailureKind: {FailureKind}. StatusCode: {StatusCode}. RetryAfterPresent: {RetryAfterPresent}. RetryAfterSeconds: {RetryAfterSeconds}. RouteId: {RouteId}. TargetType: {TargetType}.")]
+    internal static partial void AdmissionResourceRejected(
+        ILogger logger,
+        HostRequestAdmissionFailureKind failureKind,
+        int statusCode,
+        bool retryAfterPresent,
+        int? retryAfterSeconds,
+        Guid? routeId,
+        RouteTargetType? targetType);
+
+    [LoggerMessage(
+        EventId = 1011,
+        Level = LogLevel.Warning,
+        Message = "Matched route target completed. RouteId: {RouteId}. TargetType: {TargetType}. Outcome: {Outcome}. StatusCode: {StatusCode}. ServiceId: {ServiceId}.")]
+    internal static partial void RouteOutcomeSummary(
+        ILogger logger,
+        Guid routeId,
+        RouteTargetType targetType,
+        RouteTargetExecutionResult outcome,
+        int statusCode,
+        Guid? serviceId);
+
+    [LoggerMessage(
+        EventId = 1012,
+        Level = LogLevel.Warning,
+        Message = "Static route target rejected. RouteId: {RouteId}. TargetType: {TargetType}. Outcome: {Outcome}. StatusCode: {StatusCode}.")]
+    internal static partial void StaticRejection(
+        ILogger logger,
+        Guid routeId,
+        RouteTargetType targetType,
+        RouteTargetExecutionResult outcome,
+        int statusCode);
+
+    [LoggerMessage(
+        EventId = 1013,
+        Level = LogLevel.Warning,
+        Message = "Proxy route target failed. RouteId: {RouteId}. ServiceId: {ServiceId}. TargetType: {TargetType}. Outcome: {Outcome}. StatusCode: {StatusCode}.")]
+    internal static partial void ProxyFailure(
+        ILogger logger,
+        Guid routeId,
+        Guid serviceId,
+        RouteTargetType targetType,
+        RouteTargetExecutionResult outcome,
+        int statusCode);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
@@ -92,10 +146,10 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull =>
             NullScope.Instance;
-
         public bool IsEnabled(LogLevel logLevel) =>
-            logLevel >= LogLevel.Warning &&
-            (_categoryName is HostLoggerCategory.Startup or HostLoggerCategory.Routing);
+            (_categoryName == HostLoggerCategory.Supervision && logLevel >= LogLevel.Information) ||
+            (logLevel >= LogLevel.Warning &&
+                (_categoryName is HostLoggerCategory.Startup or HostLoggerCategory.Routing));
 
         public void Log<TState>(
             LogLevel logLevel,

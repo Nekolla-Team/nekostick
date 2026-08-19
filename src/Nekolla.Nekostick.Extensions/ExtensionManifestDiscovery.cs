@@ -109,6 +109,57 @@ internal static class CanonicalPath
         }
     }
 
+    internal static bool TryCanonicalExistingFile(string input, out string file)
+    {
+        file = string.Empty;
+        if (string.IsNullOrWhiteSpace(input) || input.Contains('\0'))
+        {
+            return false;
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(input);
+            var parentPath = Path.GetDirectoryName(fullPath);
+            var fileName = Path.GetFileName(fullPath);
+            if (parentPath is null || string.IsNullOrEmpty(fileName) ||
+                !TryCanonicalDirectory(parentPath, out var canonicalParent))
+            {
+                return false;
+            }
+
+            var info = new FileInfo(Path.Combine(canonicalParent, fileName));
+            if (!info.Exists)
+            {
+                return false;
+            }
+
+            var target = info.ResolveLinkTarget(returnFinalTarget: true);
+            var targetPath = Normalize(target?.FullName ?? info.FullName);
+            var targetParent = Path.GetDirectoryName(targetPath);
+            var targetName = Path.GetFileName(targetPath);
+            if (targetParent is null || string.IsNullOrEmpty(targetName) ||
+                !TryCanonicalDirectory(targetParent, out var canonicalTargetParent))
+            {
+                return false;
+            }
+
+            var canonicalPath = Normalize(Path.Combine(canonicalTargetParent, targetName));
+            if (!File.Exists(canonicalPath))
+            {
+                return false;
+            }
+
+            file = canonicalPath;
+            return true;
+        }
+        catch (Exception)
+        {
+            file = string.Empty;
+            return false;
+        }
+    }
+
     internal static bool TryCanonicalFileInRoot(string root, string candidate, out string file)
     {
         file = string.Empty;

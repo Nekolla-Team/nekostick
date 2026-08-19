@@ -20,7 +20,24 @@ public sealed class PostgresMigrationArtifactContractTests
         PersistenceDatabaseDefaults.MigrationHistoryTable,
         PersistenceDatabaseDefaults.SeedConfigurationRevisionId,
         PersistenceDatabaseDefaults.SeedGlobalSettingsId,
-        PersistenceDatabaseDefaults.InitialMigrationName
+        PersistenceDatabaseDefaults.InitialMigrationName,
+        "20260818230804_AddRequestLimitsAndRatePolicies",
+        "20260819015557_AddRouteResourceOverrides",
+        "max_request_body_bytes",
+        "max_concurrent_requests",
+        "max_request_header_bytes",
+        "request_read_timeout_milliseconds",
+        "client_ip_rate_token_limit",
+        "client_ip_rate_tokens_per_period",
+        "client_ip_rate_replenishment_period_milliseconds",
+        "client_ip_rate_queue_limit",
+        "client_ip_rate_rejection_behavior",
+        "client_ip_rate_retry_after_behavior",
+        "ck_global_settings_client_ip_rate_policy",
+        "ck_global_settings_max_request_header_bytes",
+        "ck_routes_client_ip_rate_policy",
+        "ck_global_settings_max_request_body_bytes",
+        "ck_routes_resource_limits",
     ];
 
     private static readonly string[] ForbiddenConnectionMarkers =

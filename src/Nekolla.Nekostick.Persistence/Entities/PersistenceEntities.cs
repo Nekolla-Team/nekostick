@@ -1,4 +1,8 @@
 using Nekolla.Nekostick.Domain;
+using Nekolla.Nekostick.Contracts;
+
+using DomainExtensionLoadState = Nekolla.Nekostick.Domain.ExtensionLoadState;
+using DomainServiceRestartPolicy = Nekolla.Nekostick.Domain.ServiceRestartPolicy;
 
 namespace Nekolla.Nekostick.Persistence.Entities;
 
@@ -71,6 +75,43 @@ public sealed class GlobalSettings
 
     /// <summary>Gets or sets the WebSocket idle timeout in milliseconds.</summary>
     public int WebSocketIdleTimeoutMilliseconds { get; set; }
+    /// <summary>Gets or sets the maximum request header size.</summary>
+    public long MaxRequestHeaderBytes { get; set; }
+
+    /// <summary>Gets or sets the request read timeout in milliseconds.</summary>
+    public int RequestReadTimeoutMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the global client-IP token limit, or null when unlimited.</summary>
+    public long? ClientIpRateTokenLimit { get; set; }
+
+    /// <summary>Gets or sets the global client-IP tokens per replenishment period.</summary>
+    public long? ClientIpRateTokensPerPeriod { get; set; }
+
+    /// <summary>Gets or sets the global client-IP replenishment period in milliseconds.</summary>
+    public int? ClientIpRateReplenishmentPeriodMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the global client-IP queue limit.</summary>
+    public int? ClientIpRateQueueLimit { get; set; }
+
+    /// <summary>Gets or sets the global client-IP rejection behavior.</summary>
+    public RateLimitRejectionBehavior? ClientIpRateRejectionBehavior { get; set; }
+
+    /// <summary>Gets or sets the global client-IP Retry-After behavior.</summary>
+    public RateLimitRetryAfterBehavior? ClientIpRateRetryAfterBehavior { get; set; }
+    /// <summary>Gets or sets the global proxy retry count.</summary>
+    public int ProxyMaxRetries { get; set; }
+
+    /// <summary>Gets or sets the initial global proxy retry backoff in milliseconds.</summary>
+    public int ProxyInitialRetryBackoffMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the maximum global proxy retry backoff in milliseconds.</summary>
+    public int ProxyMaximumRetryBackoffMilliseconds { get; set; }
+
+    /// <summary>Gets or sets whether connection failures may be retried.</summary>
+    public bool ProxyRetryOnConnectionFailure { get; set; }
+
+    /// <summary>Gets or sets whether pre-response upstream disconnects may be retried.</summary>
+    public bool ProxyRetryOnUpstreamDisconnect { get; set; }
 }
 
 /// <summary>Stores a route and its validated polymorphic target boundary.</summary>
@@ -127,6 +168,50 @@ public sealed class Route
     /// <summary>Gets or sets extension metadata as JSONB.</summary>
     public string MetadataJson { get; set; } = "{}";
 
+    /// <summary>Gets or sets the optional route client-IP token limit.</summary>
+    public long? ClientIpRateTokenLimit { get; set; }
+
+    /// <summary>Gets or sets the optional route client-IP tokens per replenishment period.</summary>
+    public long? ClientIpRateTokensPerPeriod { get; set; }
+
+    /// <summary>Gets or sets the optional route client-IP replenishment period in milliseconds.</summary>
+    public int? ClientIpRateReplenishmentPeriodMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the optional route client-IP queue limit.</summary>
+    public int? ClientIpRateQueueLimit { get; set; }
+
+    /// <summary>Gets or sets the optional route client-IP rejection behavior.</summary>
+    public RateLimitRejectionBehavior? ClientIpRateRejectionBehavior { get; set; }
+
+    /// <summary>Gets or sets the optional route client-IP Retry-After behavior.</summary>
+    public RateLimitRetryAfterBehavior? ClientIpRateRetryAfterBehavior { get; set; }
+
+    /// <summary>Gets or sets the optional route request body limit.</summary>
+    public long? MaxRequestBodyBytes { get; set; }
+
+    /// <summary>Gets or sets the optional route request header limit.</summary>
+    public long? MaxRequestHeaderBytes { get; set; }
+
+    /// <summary>Gets or sets the optional route concurrency limit.</summary>
+    public int? MaxConcurrentRequests { get; set; }
+
+    /// <summary>Gets or sets the optional route request read timeout in milliseconds.</summary>
+    public int? RequestReadTimeoutMilliseconds { get; set; }
+    /// <summary>Gets or sets the optional route proxy retry count.</summary>
+    public int? ProxyMaxRetries { get; set; }
+
+    /// <summary>Gets or sets the optional route initial proxy retry backoff in milliseconds.</summary>
+    public int? ProxyInitialRetryBackoffMilliseconds { get; set; }
+
+    /// <summary>Gets or sets the optional route maximum proxy retry backoff in milliseconds.</summary>
+    public int? ProxyMaximumRetryBackoffMilliseconds { get; set; }
+
+    /// <summary>Gets or sets whether connection failures may be retried for this route.</summary>
+    public bool? ProxyRetryOnConnectionFailure { get; set; }
+
+    /// <summary>Gets or sets whether pre-response upstream disconnects may be retried for this route.</summary>
+    public bool? ProxyRetryOnUpstreamDisconnect { get; set; }
+
     /// <summary>Gets or sets the UTC creation timestamp.</summary>
     public DateTimeOffset CreatedAt { get; set; }
 
@@ -165,7 +250,7 @@ public sealed class Service
     public ServiceStartPolicy StartMode { get; set; }
 
     /// <summary>Gets or sets the restart policy.</summary>
-    public ServiceRestartPolicy RestartPolicy { get; set; }
+    public DomainServiceRestartPolicy RestartPolicy { get; set; }
 
     /// <summary>Gets or sets the health-check kind.</summary>
     public ServiceHealthCheckKind HealthCheckType { get; set; }
@@ -205,7 +290,7 @@ public sealed class ExtensionRecord
     public string InstalledVersion { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the public extension load state.</summary>
-    public ExtensionLoadState LoadState { get; set; }
+    public DomainExtensionLoadState LoadState { get; set; }
 
     /// <summary>Gets or sets the UTC creation timestamp.</summary>
     public DateTimeOffset CreatedAt { get; set; }

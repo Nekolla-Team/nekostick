@@ -53,6 +53,49 @@ public sealed class HostPostgresAcceptanceTests
         Assert.Same(initial.Value, published.Current);
     }
 
+    /// <summary>Verifies the host snapshot reader preserves route resource overrides from persistence.</summary>
+    [Fact]
+    public async Task HostSnapshotReaderPreservesRouteResourceOverrides()
+    {
+        var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        await using var migrationContext = database.CreateContext();
+        await MigrateAsync(database, migrationContext);
+
+        var serviceId = Guid.CreateVersion7();
+        var routeId = Guid.CreateVersion7();
+        await using (var apiContext = database.CreateContext())
+        await using (var api = new EfHostConfigApi(apiContext))
+        {
+            var initial = await api.ReadSnapshotAsync(TestContext.Current.CancellationToken);
+            Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(initial.Value);
+
+            var write = await api.WriteSnapshotAsync(
+                initial.Value!.Version,
+                CreateRouteChangeSet(
+                    initial.Value!,
+                    serviceId,
+                    routeId,
+                    maxRequestBodyBytes: 1024 * 1024,
+                    maxRequestHeaderBytes: 16 * 1024,
+                    maxConcurrentRequests: 16,
+                    requestReadTimeout: TimeSpan.FromSeconds(5)),
+                TestContext.Current.CancellationToken);
+            Assert.True(write.IsSuccess, write.Errors.FirstOrDefault()?.Message);
+        }
+
+        var reader = new EfHostConfigurationSnapshotReader(new TestDbContextFactory(database));
+        var snapshot = await reader.ReadCompleteAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(snapshot.IsSuccess, snapshot.Errors.FirstOrDefault()?.Message);
+        var route = Assert.Single(snapshot.Value!.Routes);
+        Assert.Equal(1024 * 1024, route.MaxRequestBodyBytes);
+        Assert.Equal(16 * 1024, route.MaxRequestHeaderBytes);
+        Assert.Equal(16, route.MaxConcurrentRequests);
+        Assert.Equal(TimeSpan.FromSeconds(5), route.RequestReadTimeout);
+    }
+
     /// <summary>Verifies invalid persisted route matchers are rejected before publication.</summary>
     [Fact]
     public async Task HostSnapshotReaderRejectsInvalidPersistedMatcherWithoutPublishingIt()
@@ -231,7 +274,11 @@ public sealed class HostPostgresAcceptanceTests
     private static ConfigurationChangeSet CreateRouteChangeSet(
         HostConfigurationSnapshot snapshot,
         Guid serviceId,
-        Guid routeId)
+        Guid routeId,
+        long? maxRequestBodyBytes = null,
+        long? maxRequestHeaderBytes = null,
+        int? maxConcurrentRequests = null,
+        TimeSpan? requestReadTimeout = null)
     {
         var now = DateTimeOffset.UtcNow;
         var service = new ServiceConfiguration(
@@ -266,7 +313,11 @@ public sealed class HostPostgresAcceptanceTests
             metadataJson: "{}",
             createdAt: now,
             updatedAt: now,
-            version: 0);
+            version: 0,
+            maxRequestBodyBytes: maxRequestBodyBytes,
+            maxRequestHeaderBytes: maxRequestHeaderBytes,
+            maxConcurrentRequests: maxConcurrentRequests,
+            requestReadTimeout: requestReadTimeout);
 
         return new ConfigurationChangeSet(
             snapshot.GlobalSettings,

@@ -269,6 +269,25 @@ public sealed class RoutingMatchingTests
     }
 
     [Fact]
+    public void HostConditionsAcceptDnsAndIpv4HostPortValues()
+    {
+        var snapshot = RoutingTestData.Build(
+            RoutingTestData.CreateRoute(
+                RoutingTestData.Id(154),
+                RouteMatcherType.Exact,
+                "/port",
+                hostPatterns: ImmutableArray.Create("api.example.test", "192.0.2.42")));
+
+        foreach (var host in new[] { "api.example.test:443", "192.0.2.42:8080" })
+        {
+            var result = snapshot.Match(new RouteMatchInput("/port", host, "GET"));
+
+            Assert.Equal(RouteMatchStatus.Matched, result.Status);
+            Assert.Equal(RoutingTestData.Id(154), result.Match!.RouteId);
+        }
+    }
+
+    [Fact]
     public void HostConstrainedRouteWithAbsentHostIsNoMatch()
     {
         var snapshot = RoutingTestData.Build(
@@ -305,6 +324,57 @@ public sealed class RoutingMatchingTests
         Assert.Equal(RouteMatchStatus.Matched, subdomain.Status);
         Assert.Equal(RouteMatchStatus.NoMatch, baseDomain.Status);
         Assert.Equal(RouteNoMatchReason.HostMismatch, baseDomain.NoMatchReason);
+    }
+
+    [Fact]
+    public void HostConditionsNormalizeIdnPunycodeIpv6AndAbsentHttp10Hosts()
+    {
+        var idnId = RoutingTestData.Id(155);
+        var ipv6Id = RoutingTestData.Id(156);
+        var hostlessId = RoutingTestData.Id(157);
+        var constrainedId = RoutingTestData.Id(158);
+        var snapshot = RoutingTestData.Build(
+            RoutingTestData.CreateRoute(
+                idnId,
+                RouteMatcherType.Exact,
+                "/idn",
+                hostPatterns: ImmutableArray.Create("bücher.example")),
+            RoutingTestData.CreateRoute(
+                ipv6Id,
+                RouteMatcherType.Exact,
+                "/ipv6",
+                hostPatterns: ImmutableArray.Create("[2001:db8::1]")),
+            RoutingTestData.CreateRoute(hostlessId, RouteMatcherType.Exact, "/http10"),
+            RoutingTestData.CreateRoute(
+                constrainedId,
+                RouteMatcherType.Exact,
+                "/http10",
+                hostPatterns: ImmutableArray.Create("required.example")));
+
+        var idn = snapshot.Match(
+            new RouteMatchInput("/idn", "XN--BCHER-KVA.EXAMPLE:443", "GET"));
+        var ipv6 = snapshot.Match(
+            new RouteMatchInput("/ipv6", "[2001:DB8::1]:8443", "GET"));
+        var http10WithoutHost = snapshot.Match(
+            new RouteMatchInput("/http10", null, "GET"));
+
+        Assert.Equal(RouteMatchStatus.Matched, idn.Status);
+        Assert.Equal(idnId, idn.Match!.RouteId);
+        Assert.Equal(RouteMatchStatus.Matched, ipv6.Status);
+        Assert.Equal(ipv6Id, ipv6.Match!.RouteId);
+        Assert.Equal(RouteMatchStatus.Matched, http10WithoutHost.Status);
+        Assert.Equal(hostlessId, http10WithoutHost.Match!.RouteId);
+
+        var constrainedOnly = RoutingTestData.Build(
+            RoutingTestData.CreateRoute(
+                constrainedId,
+                RouteMatcherType.Exact,
+                "/http10",
+                hostPatterns: ImmutableArray.Create("required.example")));
+        var constrainedWithoutHost = constrainedOnly.Match(
+            new RouteMatchInput("/http10", null, "GET"));
+        Assert.Equal(RouteMatchStatus.NoMatch, constrainedWithoutHost.Status);
+        Assert.Equal(RouteNoMatchReason.HostMismatch, constrainedWithoutHost.NoMatchReason);
     }
 
     [Fact]

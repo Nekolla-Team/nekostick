@@ -119,6 +119,10 @@ public sealed partial class HostServiceLifecycleManager
 
             generation.Ready = false;
         }
+        PublishServiceState(
+            generation.Configuration.Id,
+            generation.SnapshotVersion,
+            "unavailable");
 
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
         if (IsStopping)
@@ -141,6 +145,10 @@ public sealed partial class HostServiceLifecycleManager
         if (result.Restart is not { ShouldRestart: true, NotBefore: { } notBefore })
         {
             await StopGenerationAsync(slot, generation, CancellationToken.None).ConfigureAwait(false);
+            PublishServiceState(
+                generation.Configuration.Id,
+                generation.SnapshotVersion,
+                "stopped");
             lock (slot.Gate)
             {
                 if (ReferenceEquals(slot.Active, generation))
@@ -155,7 +163,11 @@ public sealed partial class HostServiceLifecycleManager
 
         if (!IsStopping)
         {
-            _ = RestartAfterAsync(slot, generation, notBefore, CancellationToken.None);
+            PublishServiceState(
+                generation.Configuration.Id,
+                generation.SnapshotVersion,
+                "restarting");
+            await RestartAfterAsync(slot, generation, notBefore, CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -229,6 +241,10 @@ public sealed partial class HostServiceLifecycleManager
 
             if (withdraw)
             {
+                PublishServiceState(
+                    generation.Configuration.Id,
+                    generation.SnapshotVersion,
+                    "unavailable");
                 await PublishReadyEndpointsAsync().ConfigureAwait(false);
             }
 
@@ -255,6 +271,10 @@ public sealed partial class HostServiceLifecycleManager
 
             generation.Ready = false;
         }
+        PublishServiceState(
+            generation.Configuration.Id,
+            generation.SnapshotVersion,
+            "unavailable");
 
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
         if (IsStopping)
@@ -286,10 +306,18 @@ public sealed partial class HostServiceLifecycleManager
         if (result.Restart is { ShouldRestart: true, NotBefore: { } notBefore } && !IsStopping)
         {
             _ = RestartAfterAsync(slot, generation, notBefore, CancellationToken.None);
+            PublishServiceState(
+                generation.Configuration.Id,
+                generation.SnapshotVersion,
+                "restarting");
         }
         else
         {
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
+            PublishServiceState(
+                generation.Configuration.Id,
+                generation.SnapshotVersion,
+                "stopped");
         }
     }
 
@@ -324,6 +352,11 @@ public sealed partial class HostServiceLifecycleManager
         {
             return;
         }
+        if (!_runtimeState.NewServicesAllowed)
+        {
+            return;
+        }
+
 
         Task<SupervisorOperationResult>? startTask = null;
         lock (_lifecycleGate)
@@ -378,6 +411,10 @@ public sealed partial class HostServiceLifecycleManager
                 if (!IsStopping)
                 {
                     await PublishReadyEndpointsAsync().ConfigureAwait(false);
+                    PublishServiceState(
+                        generation.Configuration.Id,
+                        generation.SnapshotVersion,
+                        "ready");
                 }
 
                 return;
@@ -423,6 +460,10 @@ public sealed partial class HostServiceLifecycleManager
         if (generation is not null)
         {
             await StopGenerationAsync(slot, generation, cancellationToken).ConfigureAwait(false);
+            PublishServiceState(
+                generation.Configuration.Id,
+                generation.SnapshotVersion,
+                "stopped");
         }
 
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
@@ -451,7 +492,7 @@ public sealed partial class HostServiceLifecycleManager
         await _publicationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            if (IsStopping || !_runtimeState.Status.DatabaseAvailable)
+            if (IsStopping)
             {
                 _endpointPublisher.Publish(Array.Empty<HostServiceEndpointLease>());
                 return;
