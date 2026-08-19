@@ -308,6 +308,47 @@ public sealed class StaticHttpExecutorTests
     }
 
     [Fact]
+    public async Task DirectoryIndexHtmlIsServedWithoutDirectoryListing()
+    {
+        using var fixture = new StaticFileFixture();
+        var indexPath = Path.Combine(fixture.RootPath, "directory", "index.html");
+        var indexBytes = Encoding.UTF8.GetBytes("index content");
+        File.WriteAllBytes(indexPath, indexBytes);
+
+        using var execution = StaticHttpExecutor.Execute(
+            fixture.Target,
+            "GET",
+            "/directory");
+
+        var response = AssertResponse(execution, 200);
+        using var destination = new MemoryStream();
+        await response.CopyBodyToAsync(destination, TestContext.Current.CancellationToken);
+        Assert.Equal(indexBytes, destination.ToArray());
+    }
+
+    [Fact]
+    public async Task PrecompressedSiblingsDoNotChangeIdentityOnlyServing()
+    {
+        using var fixture = new StaticFileFixture();
+        File.WriteAllBytes(
+            Path.Combine(fixture.RootPath, "document.txt.gz"),
+            Encoding.UTF8.GetBytes("compressed payload"));
+
+        using var execution = StaticHttpExecutor.Execute(
+            fixture.Target,
+            "GET",
+            StaticFileFixture.RequestPath);
+
+        var response = AssertResponse(execution, 200);
+        using var destination = new MemoryStream();
+        await response.CopyBodyToAsync(destination, TestContext.Current.CancellationToken);
+        Assert.Equal(StaticFileFixture.PayloadBytes, destination.ToArray());
+        Assert.DoesNotContain(
+            response.Headers.Values,
+            header => header.Name.Equals("Content-Encoding", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void OutsideRootSymlinkIsRejectedByThePublicSafetyBoundary()
     {
         using var fixture = new StaticFileFixture();

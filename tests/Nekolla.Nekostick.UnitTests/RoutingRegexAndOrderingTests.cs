@@ -111,6 +111,33 @@ public sealed class RoutingRegexAndOrderingTests
         Assert.Equal(lowerLexicalId, lexicalResult.Match!.RouteId);
     }
 
+    [Fact]
+    public void RegexCompilationAnd4096CharacterBoundaryAreValidatedAtSnapshotBuild()
+    {
+        var validId = RoutingTestData.Id(309);
+        var tooLongId = RoutingTestData.Id(310);
+        var invalidId = RoutingTestData.Id(311);
+        var validPattern = "/a(?#" + new string('x', 4090) + ")";
+        var tooLongPattern = "/" + new string('a', 4096);
+        Assert.Equal(4096, validPattern.Length);
+        var result = RouteMatchSnapshotBuilder.Build(
+            new[]
+            {
+                RoutingTestData.CreateRoute(validId, RouteMatcherType.Regex, validPattern),
+                RoutingTestData.CreateRoute(tooLongId, RouteMatcherType.Regex, tooLongPattern),
+                RoutingTestData.CreateRoute(invalidId, RouteMatcherType.Regex, "[")
+            });
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains(result.Errors, error =>
+            error.RouteId == tooLongId &&
+            error.Code == RouteConfigurationErrorCode.RegexTooLong);
+        Assert.Contains(result.Errors, error =>
+            error.RouteId == invalidId &&
+            error.Code == RouteConfigurationErrorCode.InvalidRegex);
+        Assert.DoesNotContain(result.Errors, error => error.RouteId == validId);
+    }
+
     private static RouteMatchSnapshot Build(params RouteConfiguration[] routes)
     {
         var result = RouteMatchSnapshotBuilder.Build(

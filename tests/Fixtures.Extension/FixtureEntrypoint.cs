@@ -33,6 +33,20 @@ public sealed class FixtureEntrypoint : IExtensionEntry
         }
 
         var state = new FixtureState(options);
+        if (options.TypedContractExchange)
+        {
+            const string contractId = "fixture.logger";
+            if (!context.Contracts.TryExport<IExtensionLogger>(
+                    contractId,
+                    new FixtureContractLogger()) ||
+                !context.Contracts.TryImport<IExtensionLogger>(contractId, out var imported) ||
+                imported is null)
+            {
+                throw new InvalidOperationException("Fixture typed contract exchange failed.");
+            }
+
+            state.TypedContractExchangeSucceeded = true;
+        }
         _state = state;
 
         if (!context.Registration.TryRegisterHandler(
@@ -70,15 +84,19 @@ public sealed class FixtureEntrypoint : IExtensionEntry
                 }).ConfigureAwait(false);
         }
 
-        if (options.PublishOrderedEvents)
+        if (options.PublishOrderedEvents || options.PublishCoreEvents)
         {
             var expected = options.EventCount;
             if (!context.Host.Events.TrySubscribe((@event, _) =>
                 {
-                    state.EventPayloads.Enqueue(@event.PayloadJson);
-                    if (state.EventPayloads.Count >= expected)
+                    if (options.PublishCoreEvents ||
+                        string.Equals(@event.Type, "fixture.ordered", StringComparison.Ordinal))
                     {
-                        state.EventsComplete.TrySetResult(true);
+                        state.EventPayloads.Enqueue(@event.PayloadJson);
+                        if (state.EventPayloads.Count >= expected)
+                        {
+                            state.EventsComplete.TrySetResult(true);
+                        }
                     }
 
                     return ValueTask.CompletedTask;
@@ -87,15 +105,15 @@ public sealed class FixtureEntrypoint : IExtensionEntry
                 throw new InvalidOperationException("Fixture event subscription failed.");
             }
 
-            for (var index = 0; index < expected; index++)
+            if (options.PublishOrderedEvents)
             {
-                if (!context.Host.Events.TryPublish(
-                        new ExtensionEvent(
-                            "fixture.ordered",
-                            1,
-                            $"event-{index}")))
+                for (var index = 0; index < expected; index++)
                 {
-                    throw new InvalidOperationException("Fixture ordered event was dropped unexpectedly.");
+                    if (!context.Host.Events.TryPublish(
+                            new ExtensionEvent("fixture.ordered", 1, $"event-{index}")))
+                    {
+                        throw new InvalidOperationException("Fixture ordered event was dropped unexpectedly.");
+                    }
                 }
             }
         }
@@ -169,6 +187,8 @@ public sealed class FixtureEntrypoint : IExtensionEntry
 public sealed class FixtureHandler : IExtensionHandler
 {
     private readonly FixtureState _state;
+    /// <inheritdoc />
+    public string HandlerId { get; }
 
     /// <summary>Creates a handler over one private fixture state.</summary>
     public FixtureHandler(FixtureState state, string handlerId)
@@ -176,10 +196,6 @@ public sealed class FixtureHandler : IExtensionHandler
         _state = state ?? throw new ArgumentNullException(nameof(state));
         HandlerId = handlerId;
     }
-
-    /// <inheritdoc />
-    public string HandlerId { get; }
-
     /// <inheritdoc />
     public async ValueTask<ExtensionHandlerResponse> HandleAsync(
         ExtensionHandlerRequest request,
@@ -190,7 +206,7 @@ public sealed class FixtureHandler : IExtensionHandler
             throw new InvalidOperationException(FixtureSignals.HandlerFailure);
         }
 
-        if (_state.Options.PublishOrderedEvents)
+        if (_state.Options.PublishOrderedEvents || _state.Options.PublishCoreEvents)
         {
             await _state.EventsComplete.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -231,6 +247,13 @@ public sealed class FixtureFallback : IExtensionFallback
     }
 }
 
+internal sealed class FixtureContractLogger : IExtensionLogger
+{
+    public void Report(ExtensionLogLevel level, string code)
+    {
+    }
+}
+
 /// <summary>Stores only instance-local deterministic observations for one fixture load.</summary>
 public sealed class FixtureState
 {
@@ -244,23 +267,24 @@ public sealed class FixtureState
     internal bool PreviousStopped { get; set; }
 
     internal int FallbackInvocationCount;
-
     internal ConcurrentQueue<string> EventPayloads { get; } = new();
+
+    internal bool TypedContractExchangeSucceeded { get; set; }
 
     internal TaskCompletionSource<bool> EventsComplete { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal string RenderPayload()
     {
-        if (!Options.PublishOrderedEvents)
+        if (!Options.PublishOrderedEvents && !Options.PublishCoreEvents)
         {
             return $"{Options.Label}:{(PreviousStopped ? "previous-stopped" : "started")}";
         }
 
         return string.Join(',', EventPayloads);
     }
-}
 
+}
 /// <summary>Defines deterministic fixture behavior selected by extension-owned JSON settings.</summary>
 public sealed record FixtureMode(
     string Label,
@@ -275,6 +299,8 @@ public sealed record FixtureMode(
     bool StartTask,
     bool PublishOrderedEvents,
     bool PublishBoundedEvents,
+    bool PublishCoreEvents,
+    bool TypedContractExchange,
     bool IncludeFallbackCount,
     int EventCount)
 {
@@ -301,6 +327,8 @@ public sealed record FixtureMode(
             ReadBool(root, "startTask"),
             ReadBool(root, "publishOrderedEvents"),
             ReadBool(root, "publishBoundedEvents"),
+            ReadBool(root, "publishCoreEvents"),
+            ReadBool(root, "typedContractExchange"),
             ReadBool(root, "includeFallbackCount"),
             ReadInt(root, "eventCount", 3));
     }
@@ -324,6 +352,8 @@ public sealed record FixtureMode(
     private static FixtureMode Default { get; } = new(
         "fixture",
         "fixture.handler",
+        false,
+        false,
         false,
         false,
         false,

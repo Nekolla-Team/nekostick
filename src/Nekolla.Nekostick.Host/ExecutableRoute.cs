@@ -17,7 +17,8 @@ internal sealed class ExecutableRoute
         ImmutableArray<ProxyHeaderRewrite> requestHeaderRewrites,
         ImmutableArray<ProxyHeaderRewrite> responseHeaderRewrites,
         TrustedProxyPolicy trustedProxyPolicy,
-        MicroserviceTimeoutPolicy timeoutPolicy)
+        MicroserviceTimeoutPolicy timeoutPolicy,
+        ProxyRetryConfiguration retryPolicy)
     {
         Configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         StaticTarget = staticTarget;
@@ -29,6 +30,7 @@ internal sealed class ExecutableRoute
             : responseHeaderRewrites;
         TrustedProxyPolicy = trustedProxyPolicy ?? throw new ArgumentNullException(nameof(trustedProxyPolicy));
         TimeoutPolicy = timeoutPolicy ?? throw new ArgumentNullException(nameof(timeoutPolicy));
+        RetryPolicy = retryPolicy ?? throw new ArgumentNullException(nameof(retryPolicy));
     }
 
     /// <summary>Gets the complete immutable route configuration.</summary>
@@ -48,9 +50,11 @@ internal sealed class ExecutableRoute
 
     /// <summary>Gets the precompiled trusted peer policy for this route.</summary>
     internal TrustedProxyPolicy TrustedProxyPolicy { get; }
-
-    /// <summary>Gets the immutable global timeout policy compiled for this publication.</summary>
+    /// <summary>Gets the immutable timeout policy compiled for this route.</summary>
     internal MicroserviceTimeoutPolicy TimeoutPolicy { get; }
+
+    /// <summary>Gets the immutable retry policy compiled for this route.</summary>
+    internal ProxyRetryConfiguration RetryPolicy { get; }
 }
 
 /// <summary>Builds all route execution metadata without touching the filesystem.</summary>
@@ -66,11 +70,12 @@ internal static class ExecutableRouteBuilder
             ArgumentNullException.ThrowIfNull(snapshot);
             var trustedProxyPolicy = new TrustedProxyPolicy(snapshot.GlobalSettings.TrustedProxyCidrs);
             var timeoutPolicy = CreateTimeoutPolicy(snapshot.GlobalSettings.ProxyTimeouts);
+            var retryPolicy = snapshot.GlobalSettings.ProxyRetries;
             var builder = ImmutableDictionary.CreateBuilder<Guid, ExecutableRoute>();
 
             foreach (var route in snapshot.Routes)
             {
-                if (route is null || !builder.TryAdd(route.Id, Create(route, trustedProxyPolicy, timeoutPolicy)))
+                if (route is null || !builder.TryAdd(route.Id, Create(route, trustedProxyPolicy, timeoutPolicy, retryPolicy)))
                 {
                     return false;
                 }
@@ -89,8 +94,10 @@ internal static class ExecutableRouteBuilder
     private static ExecutableRoute Create(
         RouteConfiguration route,
         TrustedProxyPolicy trustedProxyPolicy,
-        MicroserviceTimeoutPolicy timeoutPolicy)
+        MicroserviceTimeoutPolicy timeoutPolicy,
+        ProxyRetryConfiguration retryPolicy)
     {
+        var resolvedRetryPolicy = route.ProxyRetries ?? retryPolicy;
         var staticTarget = route.Target switch
         {
             StaticFileRouteTargetConfiguration staticConfiguration =>
@@ -106,7 +113,8 @@ internal static class ExecutableRouteBuilder
             ConvertRewrites(route.RequestHeaderRewrites, requestSide: true),
             ConvertRewrites(route.ResponseHeaderRewrites, requestSide: false),
             trustedProxyPolicy,
-            timeoutPolicy);
+            timeoutPolicy,
+            resolvedRetryPolicy);
     }
 
     private static MicroserviceTimeoutPolicy CreateTimeoutPolicy(ProxyTimeoutConfiguration configuration)

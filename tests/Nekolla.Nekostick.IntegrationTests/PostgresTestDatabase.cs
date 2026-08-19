@@ -66,7 +66,11 @@ internal sealed class PostgresTestDatabase : IAsyncDisposable
         {
             SearchPath = Schema
         }.ConnectionString;
-        optionsBuilder.UseNekostickPostgres(isolatedConnectionString);
+        optionsBuilder.UseNpgsql(
+            isolatedConnectionString,
+            npgsql => npgsql.MigrationsHistoryTable(
+                PersistenceDatabaseDefaults.MigrationHistoryTable,
+                Schema));
         optionsBuilder.ReplaceService<ISqlGenerationHelper, TestSchemaSqlGenerationHelper>();
         optionsBuilder.ReplaceService<IMigrationsSqlGenerator, TestSchemaMigrationsSqlGenerator>();
         return new NekostickDbContext(optionsBuilder.Options);

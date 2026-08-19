@@ -262,7 +262,7 @@ service 启动模式为 `Eager` 或 `Lazy`。Eager 在节点加载配置后启�
 
 health check 类型为 `Process`、`Tcp` 和 `Http`，全局默认可由 service 覆盖。默认使用 `Tcp` 检查 service loopback 地址与端口；`Process` 只确认主进程仍存活；`Http` 使用 GET，并可为每个 service 配置 URL、headers、成功状态范围和 timeout，默认成功范围为 `200-399`。
 
-stdout 和 stderr 采用 UTF-8 按行读取，输出为含 service ID、stream、timestamp 的结构化日志。无效 UTF-8 以 replacement character 表示；stdout 默认 `Information`，stderr 默认 `Warning`。
+stdout 和 stderr 采用 UTF-8 按行读取，supervision 捕获契约保留有界的原始文本；Host 结构化日志只记录 service ID、stream、timestamp、日志级别、截断和丢弃聚合元数据，任意子进程输出文本绝不进入 Host 日志。无效 UTF-8 以 replacement character 表示；stdout 默认 `Information`，stderr 默认 `Warning`。
 
 **计划默认值，可配置：** 单行最大 16 KiB；每 service 每秒最多 200 行且最多 1 MiB。超额行截断或丢弃，并以聚合计数日志报告；进程退出码、终止信号、启动失败和进程树清理失败始终记录。
 
@@ -386,7 +386,7 @@ handler、后台任务和事件订阅回调的异常必须在宿主边界捕获�
 
 **计划默认值，可配置：** body 最大 30 MiB、header 总大小 32 KiB、每节点并发请求 1024、request read timeout 30 秒。生产环境应结合前置反代的限制统一配置，避免两层策略相互矛盾。
 
-核心只输出基本结构化日志：启动/停止、migration、快照切换、route 结果摘要、代理失败、静态文件拒绝、端口租约、进程状态、extension 生命周期、失败阈值和限流/资源拒绝。不得记录 secrets、完整请求 body、Cookie 或 Authorization。指标以 host events 的形式提供给扩展；核心不绑定 Prometheus、日志存储或健康 HTTP endpoint。
+核心只输出基本结构化日志：启动/停止、migration、快照切换、route 结果摘要、代理失败、静态文件拒绝、端口租约、进程状态、extension 生命周期、失败阈值和限流/资源拒绝。不得记录 secrets、完整请求 body、Cookie、Authorization 或任意子进程输出文本。指标以 host events 的形式提供给扩展；核心不绑定 Prometheus、日志存储或健康 HTTP endpoint。
 
 ## 9. 测试与验收
 

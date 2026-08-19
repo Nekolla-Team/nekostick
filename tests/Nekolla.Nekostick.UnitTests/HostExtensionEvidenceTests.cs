@@ -47,6 +47,66 @@ public sealed class HostExtensionEvidenceTests
     }
 
     [Fact]
+    public async Task AcceptedSnapshotAndRouteChangesReachServingExtensionCoreEventQueue()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var settings = Settings(
+            FixtureExtensionId,
+            "core-events",
+            publishCoreEvents: true,
+            eventCount: 3);
+        var holder = new HostConfigurationSnapshotHolder();
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            manager,
+            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+            NullLogger<HostConfigurationPublisher>.Instance);
+        var routeId = RoutingTestData.Id(805);
+        var first = CreateExtensionSnapshot(
+            1,
+            CreateRoute(
+                routeId,
+                "/core-events",
+                new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId)),
+            FixtureExtensionId,
+            settings);
+        var second = CreateExtensionSnapshot(
+            2,
+            CreateRoute(
+                routeId,
+                "/core-events-v2",
+                new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId),
+                routeVersion: 2),
+            FixtureExtensionId,
+            settings);
+
+        var generation = await PrepareAndPublishGenerationAsync(
+            manager,
+            manifest,
+            settings,
+            previous: null);
+        Assert.True(holder.TryReplace(first, generation));
+        Assert.True(await publisher.PublishAsync(second, TestContext.Current.CancellationToken));
+        var status = manager.GetStatus(FixtureExtensionId);
+        Assert.NotNull(status);
+        Assert.Equal(1, status!.HandlerCount);
+        Assert.Equal(ExtensionLoadState.Loaded, status.State);
+
+        using var services = CreateProxyServices();
+        var targetExecutor = new HostRouteTargetExecutor(
+            services.GetRequiredService<MicroserviceHttpExecutor>());
+        var dispatch = await DispatchAsync(holder, targetExecutor, "/core-events-v2");
+        Assert.Equal(StatusCodes.Status200OK, dispatch.StatusCode);
+        var body = dispatch.Body;
+        Assert.Contains("\"state\":\"Loaded\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"applied\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"changed\"", body, StringComparison.Ordinal);
+    }
+
+
+    [Fact]
     public async Task ReadyHandoffRetainsNewGenerationAsManagerOwner()
     {
         using var fixture = TestExtensionDirectory.CreateJson();
@@ -340,8 +400,13 @@ public sealed class HostExtensionEvidenceTests
         var generation = await PrepareAndPublishGenerationAsync(
             manager,
             manifest,
-            Settings(FixtureExtensionId, "failed", handlerFails: true),
-            previous: null);
+            Settings(
+                FixtureExtensionId,
+                "failed",
+                handlerFails: true,
+                registerFallback: true),
+            previous: null,
+            includeFallback: true);
         var holder = CreatePublishedHolder(generation);
         using var services = CreateProxyServices();
         var targetExecutor = new HostRouteTargetExecutor(
@@ -427,6 +492,83 @@ public sealed class HostExtensionEvidenceTests
         await holder.DisposeAsync();
     }
 
+    [Fact]
+    public async Task FallbackReceivesHostMethodAndStatic404Reasons()
+    {
+        var staticRoot = Path.Combine(
+            Path.GetTempPath(),
+            "nekostick-fallback-taxonomy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(staticRoot, "empty-directory"));
+        try
+        {
+            using var fixture = TestExtensionDirectory.CreateJson();
+            var manifest = Discover(fixture.RootPath);
+            await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+            var generation = await PrepareAndPublishGenerationAsync(
+                manager,
+                manifest,
+                Settings(FixtureExtensionId, "fallback-taxonomy", registerFallback: true),
+                previous: null,
+                includeFallback: true);
+            var holder = new HostConfigurationSnapshotHolder();
+            Assert.True(holder.TryReplace(
+                CreateSnapshot(
+                    1,
+                    CreateRoute(
+                        RoutingTestData.Id(820),
+                        "/host-only",
+                        new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId),
+                        ImmutableArray.Create("other.test"),
+                        ImmutableArray<string>.Empty),
+                    CreateRoute(
+                        RoutingTestData.Id(821),
+                        "/method-only",
+                        new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId),
+                        ImmutableArray<string>.Empty,
+                        ImmutableArray.Create("POST")),
+                    CreateRoute(
+                        RoutingTestData.Id(822),
+                        "/missing-file",
+                        new StaticFileRouteTargetConfiguration(staticRoot)),
+                    CreateRoute(
+                        RoutingTestData.Id(823),
+                        "/empty-directory",
+                        new StaticFileRouteTargetConfiguration(staticRoot)),
+                    FixtureExtensionId),
+                generation));
+
+            using var services = CreateProxyServices();
+            var targetExecutor = new HostRouteTargetExecutor(
+                services.GetRequiredService<MicroserviceHttpExecutor>());
+
+            var noRoute = await DispatchAsync(holder, targetExecutor, "/not-configured");
+            var hostMismatch = await DispatchAsync(holder, targetExecutor, "/host-only");
+            var methodMismatch = await DispatchAsync(holder, targetExecutor, "/method-only");
+            var staticNotFound = await DispatchAsync(holder, targetExecutor, "/missing-file");
+            var staticIndexMissing = await DispatchAsync(holder, targetExecutor, "/empty-directory");
+
+            Assert.Equal((StatusCodes.Status404NotFound, "fallback-taxonomy:NoRoute"),
+                (noRoute.StatusCode, noRoute.Body));
+            Assert.Equal((StatusCodes.Status404NotFound, "fallback-taxonomy:HostMismatch"),
+                (hostMismatch.StatusCode, hostMismatch.Body));
+            Assert.Equal((StatusCodes.Status404NotFound, "fallback-taxonomy:MethodMismatch"),
+                (methodMismatch.StatusCode, methodMismatch.Body));
+            Assert.Equal((StatusCodes.Status404NotFound, "fallback-taxonomy:StaticNotFound"),
+                (staticNotFound.StatusCode, staticNotFound.Body));
+            Assert.Equal((StatusCodes.Status404NotFound, "fallback-taxonomy:StaticIndexMissing"),
+                (staticIndexMissing.StatusCode, staticIndexMissing.Body));
+
+            await holder.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(staticRoot))
+            {
+                Directory.Delete(staticRoot, recursive: true);
+            }
+        }
+    }
+
     private static async Task<ExtensionDispatchGeneration> PrepareAndPublishGenerationAsync(
         ExtensionRuntimeManager manager,
         ExtensionManifest? manifest,
@@ -475,9 +617,11 @@ public sealed class HostExtensionEvidenceTests
     private static async Task<DispatchResult> DispatchAsync(
         HostConfigurationSnapshotHolder holder,
         HostRouteTargetExecutor targetExecutor,
-        string path)
+        string path,
+        string method = "GET",
+        string host = "integration.test")
     {
-        var context = CreateContext(path);
+        var context = CreateContext(path, method, host);
         var dispatcher = new HostRouteDispatcher(
             new HostRoutingSnapshotAccessor(holder),
             new ExtensionRouteFallbackDispatcher(),
@@ -493,18 +637,22 @@ public sealed class HostExtensionEvidenceTests
         return new DispatchResult(context.Response.StatusCode, await reader.ReadToEndAsync());
     }
 
-    private static DefaultHttpContext CreateContext(string path)
+    private static DefaultHttpContext CreateContext(
+        string path,
+        string method = "GET",
+        string host = "integration.test")
     {
         var context = new DefaultHttpContext();
-        context.Request.Method = "GET";
+        context.Request.Method = method;
         context.Request.Protocol = "HTTP/1.1";
         context.Request.Scheme = "http";
-        context.Request.Host = new HostString("integration.test");
+        context.Request.Host = new HostString(host);
         context.Request.Path = path;
         context.Request.Body = new MemoryStream();
         context.Response.Body = new MemoryStream();
         return context;
     }
+
 
     private static ServiceProvider CreateProxyServices()
     {
@@ -525,6 +673,8 @@ public sealed class HostExtensionEvidenceTests
         string label,
         bool handlerFails = false,
         bool registerFallback = false,
+        bool publishCoreEvents = false,
+        int eventCount = 3,
         int schemaVersion = 1,
         long settingsVersion = 1) =>
         new(
@@ -535,7 +685,9 @@ public sealed class HostExtensionEvidenceTests
                 label,
                 handlerId = extensionId,
                 handlerFails,
-                registerFallback
+                registerFallback,
+                publishCoreEvents,
+                eventCount
             }),
             version: settingsVersion);
 
@@ -588,18 +740,23 @@ public sealed class HostExtensionEvidenceTests
             settings);
     }
 
+
+    private readonly record struct DispatchResult(int StatusCode, string Body);
     private static RouteConfiguration CreateRoute(
         Guid id,
         string pattern,
-        RouteTargetConfiguration target) =>
+        RouteTargetConfiguration target,
+        ImmutableArray<string>? hostPatterns = null,
+        ImmutableArray<string>? methods = null,
+        long routeVersion = 1) =>
         new(
             id,
             enabled: true,
             new RouteMatcherConfiguration(
                 RouteMatcherType.Exact,
                 pattern,
-                ImmutableArray<string>.Empty,
-                ImmutableArray<string>.Empty),
+                hostPatterns ?? ImmutableArray<string>.Empty,
+                methods ?? ImmutableArray<string>.Empty),
             target,
             priority: 0,
             new ForwardingConfiguration(ForwardingMode.Preserve, null),
@@ -608,30 +765,22 @@ public sealed class HostExtensionEvidenceTests
             "{}",
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
-            version: 1);
-
-    private readonly record struct DispatchResult(int StatusCode, string Body);
-
-    private sealed class ThrowingResponseStream : Stream
+            version: routeVersion);
+    private sealed class ThrowingResponseStream : MemoryStream
     {
-        public override bool CanRead => false;
-        public override bool CanSeek => false;
-        public override bool CanWrite => true;
-        public override long Length => 0;
-        public override long Position { get; set; }
-        public override void Flush() => throw new IOException("response write failure");
-        public override Task FlushAsync(CancellationToken cancellationToken) =>
-            Task.FromException(new IOException("response write failure"));
-        public override int Read(byte[] buffer, int offset, int count) =>
-            throw new NotSupportedException();
-        public override long Seek(long offset, SeekOrigin origin) =>
-            throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) =>
-            throw new IOException("response write failure");
+            throw new IOException("Response write deliberately failed.");
+
+        public override Task WriteAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) =>
+            Task.FromException(new IOException("Response write deliberately failed."));
+
         public override ValueTask WriteAsync(
             ReadOnlyMemory<byte> buffer,
             CancellationToken cancellationToken = default) =>
-            ValueTask.FromException(new IOException("response write failure"));
+            ValueTask.FromException(new IOException("Response write deliberately failed."));
     }
 }

@@ -137,7 +137,22 @@ internal static class HostConfigurationSnapshotMapper
                 connectTimeout: TimeSpan.FromMilliseconds(globalSettings.ConnectTimeoutMilliseconds),
                 httpActivityTimeout: TimeSpan.FromMilliseconds(globalSettings.HttpActivityTimeoutMilliseconds),
                 httpTotalTimeout: TimeSpan.FromMilliseconds(globalSettings.HttpTotalTimeoutMilliseconds),
-                webSocketIdleTimeout: TimeSpan.FromMilliseconds(globalSettings.WebSocketIdleTimeoutMilliseconds)));
+                webSocketIdleTimeout: TimeSpan.FromMilliseconds(globalSettings.WebSocketIdleTimeoutMilliseconds)),
+            globalSettings.MaxRequestHeaderBytes,
+            TimeSpan.FromMilliseconds(globalSettings.RequestReadTimeoutMilliseconds),
+            RatePolicyPersistenceMapper.ToContract(
+                globalSettings.ClientIpRateTokenLimit,
+                globalSettings.ClientIpRateTokensPerPeriod,
+                globalSettings.ClientIpRateReplenishmentPeriodMilliseconds,
+                globalSettings.ClientIpRateQueueLimit,
+                globalSettings.ClientIpRateRejectionBehavior,
+                globalSettings.ClientIpRateRetryAfterBehavior),
+            ProxyRetryPersistenceMapper.ToContract(
+                globalSettings.ProxyMaxRetries,
+                globalSettings.ProxyInitialRetryBackoffMilliseconds,
+                globalSettings.ProxyMaximumRetryBackoffMilliseconds,
+                globalSettings.ProxyRetryOnConnectionFailure,
+                globalSettings.ProxyRetryOnUpstreamDisconnect));
 
         return new HostConfigurationSnapshot(
             revision.Version,
@@ -209,7 +224,26 @@ internal static class HostConfigurationSnapshotMapper
             RequireJsonObject(value.MetadataJson),
             value.CreatedAt,
             value.UpdatedAt,
-            value.Version);
+            value.Version,
+            RatePolicyPersistenceMapper.ToContract(
+                value.ClientIpRateTokenLimit,
+                value.ClientIpRateTokensPerPeriod,
+                value.ClientIpRateReplenishmentPeriodMilliseconds,
+                value.ClientIpRateQueueLimit,
+                value.ClientIpRateRejectionBehavior,
+                value.ClientIpRateRetryAfterBehavior),
+            value.MaxRequestBodyBytes,
+            value.MaxRequestHeaderBytes,
+            value.MaxConcurrentRequests,
+            value.RequestReadTimeoutMilliseconds is { } requestReadTimeoutMilliseconds
+                ? TimeSpan.FromMilliseconds(requestReadTimeoutMilliseconds)
+                : null,
+            ProxyRetryPersistenceMapper.ToNullableContract(
+                value.ProxyMaxRetries,
+                value.ProxyInitialRetryBackoffMilliseconds,
+                value.ProxyMaximumRetryBackoffMilliseconds,
+                value.ProxyRetryOnConnectionFailure,
+                value.ProxyRetryOnUpstreamDisconnect));
     }
 
     private static ImmutableArray<string> ReadStringArray(string json)

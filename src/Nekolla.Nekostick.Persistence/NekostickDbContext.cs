@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence.Entities;
 
@@ -141,10 +142,22 @@ public sealed class NekostickDbContext : DbContext
                 "auto_port_range_start BETWEEN 1 AND 65535 AND auto_port_range_end BETWEEN 1 AND 65535 AND auto_port_range_start <= auto_port_range_end");
             table.HasCheckConstraint(
                 "ck_global_settings_limits",
-                "max_request_body_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0");
+                "max_request_body_bytes > 0 AND max_request_header_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0 AND request_read_timeout_milliseconds BETWEEN 1 AND 86400000");
+            table.HasCheckConstraint(
+                "ck_global_settings_max_request_header_bytes",
+                $"max_request_header_bytes <= {GlobalSettingsConfiguration.HardMaximumRequestHeaderBytes}");
+            table.HasCheckConstraint(
+                "ck_global_settings_max_request_body_bytes",
+                $"max_request_body_bytes <= {GlobalSettingsConfiguration.HardMaximumRequestBodyBytes}");
             table.HasCheckConstraint(
                 "ck_global_settings_proxy_timeouts",
                 ProxyTimeoutPersistenceDefaults.CheckConstraintSql);
+            table.HasCheckConstraint(
+                "ck_global_settings_proxy_retries",
+                ProxyRetryPersistenceDefaults.CheckConstraintSql);
+            table.HasCheckConstraint(
+                "ck_global_settings_client_ip_rate_policy",
+                "(client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod'))");
             table.HasCheckConstraint(
                 "ck_global_settings_trusted_proxy_cidrs_json",
                 "jsonb_typeof(trusted_proxy_cidrs_json) = 'array' AND octet_length(trusted_proxy_cidrs_json::text) <= 262144");
@@ -152,62 +165,43 @@ public sealed class NekostickDbContext : DbContext
 
         builder.HasKey(value => value.Id).HasName("pk_global_settings");
         builder.Property(value => value.Id).HasColumnName("id").HasColumnType("uuid");
-        builder.Property(value => value.AutoPortRangeStart)
-            .HasColumnName("auto_port_range_start")
-            .HasColumnType("integer")
-            .IsRequired();
-        builder.Property(value => value.AutoPortRangeEnd)
-            .HasColumnName("auto_port_range_end")
-            .HasColumnType("integer")
-            .IsRequired();
-        builder.Property(value => value.MaxRequestBodyBytes)
-            .HasColumnName("max_request_body_bytes")
-            .HasColumnType("bigint")
-            .IsRequired();
-        builder.Property(value => value.MaxConcurrentRequests)
-            .HasColumnName("max_concurrent_requests")
-            .HasColumnType("integer")
-            .IsRequired();
-        builder.Property(value => value.ConfigurationPollIntervalSeconds)
-            .HasColumnName("configuration_poll_interval_seconds")
-            .HasColumnType("integer")
-            .IsRequired();
-        builder.Property(value => value.TrustedProxyCidrsJson)
-            .HasColumnName("trusted_proxy_cidrs_json")
-            .HasColumnType("jsonb")
-            .IsRequired();
+        builder.Property(value => value.AutoPortRangeStart).HasColumnName("auto_port_range_start").HasColumnType("integer").IsRequired();
+        builder.Property(value => value.AutoPortRangeEnd).HasColumnName("auto_port_range_end").HasColumnType("integer").IsRequired();
+        builder.Property(value => value.MaxRequestBodyBytes).HasColumnName("max_request_body_bytes").HasColumnType("bigint").IsRequired();
+        builder.Property(value => value.MaxRequestHeaderBytes).HasColumnName("max_request_header_bytes").HasColumnType("bigint").IsRequired();
+        builder.Property(value => value.MaxConcurrentRequests).HasColumnName("max_concurrent_requests").HasColumnType("integer").IsRequired();
+        builder.Property(value => value.ConfigurationPollIntervalSeconds).HasColumnName("configuration_poll_interval_seconds").HasColumnType("integer").IsRequired();
+        builder.Property(value => value.RequestReadTimeoutMilliseconds).HasColumnName("request_read_timeout_milliseconds").HasColumnType("integer").IsRequired();
+        builder.Property(value => value.TrustedProxyCidrsJson).HasColumnName("trusted_proxy_cidrs_json").HasColumnType("jsonb").IsRequired();
         ConfigureUtcTimestamp(builder.Property(value => value.CreatedAt).HasColumnName("created_at"));
         ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
         ConfigureVersion(builder.Property(value => value.Version));
-        builder.Property(value => value.ConnectTimeoutMilliseconds)
-            .HasColumnName("connect_timeout_milliseconds")
-            .HasColumnType("integer")
-            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultConnectTimeoutMilliseconds)
-            .IsRequired();
-        builder.Property(value => value.HttpActivityTimeoutMilliseconds)
-            .HasColumnName("http_activity_timeout_milliseconds")
-            .HasColumnType("integer")
-            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultHttpActivityTimeoutMilliseconds)
-            .IsRequired();
-        builder.Property(value => value.HttpTotalTimeoutMilliseconds)
-            .HasColumnName("http_total_timeout_milliseconds")
-            .HasColumnType("integer")
-            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultHttpTotalTimeoutMilliseconds)
-            .IsRequired();
-        builder.Property(value => value.WebSocketIdleTimeoutMilliseconds)
-            .HasColumnName("websocket_idle_timeout_milliseconds")
-            .HasColumnType("integer")
-            .HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultWebSocketIdleTimeoutMilliseconds)
-            .IsRequired();
+        builder.Property(value => value.ConnectTimeoutMilliseconds).HasColumnName("connect_timeout_milliseconds").HasColumnType("integer").HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultConnectTimeoutMilliseconds).IsRequired();
+        builder.Property(value => value.HttpActivityTimeoutMilliseconds).HasColumnName("http_activity_timeout_milliseconds").HasColumnType("integer").HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultHttpActivityTimeoutMilliseconds).IsRequired();
+        builder.Property(value => value.HttpTotalTimeoutMilliseconds).HasColumnName("http_total_timeout_milliseconds").HasColumnType("integer").HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultHttpTotalTimeoutMilliseconds).IsRequired();
+        builder.Property(value => value.WebSocketIdleTimeoutMilliseconds).HasColumnName("websocket_idle_timeout_milliseconds").HasColumnType("integer").HasDefaultValue(ProxyTimeoutPersistenceDefaults.DefaultWebSocketIdleTimeoutMilliseconds).IsRequired();
+        builder.Property(value => value.ClientIpRateTokenLimit).HasColumnName("client_ip_rate_token_limit").HasColumnType("bigint");
+        builder.Property(value => value.ClientIpRateTokensPerPeriod).HasColumnName("client_ip_rate_tokens_per_period").HasColumnType("bigint");
+        builder.Property(value => value.ClientIpRateReplenishmentPeriodMilliseconds).HasColumnName("client_ip_rate_replenishment_period_milliseconds").HasColumnType("integer");
+        builder.Property(value => value.ClientIpRateQueueLimit).HasColumnName("client_ip_rate_queue_limit").HasColumnType("integer");
+        builder.Property(value => value.ClientIpRateRejectionBehavior).HasColumnName("client_ip_rate_rejection_behavior").HasConversion<string>().HasMaxLength(16);
+        builder.Property(value => value.ClientIpRateRetryAfterBehavior).HasColumnName("client_ip_rate_retry_after_behavior").HasConversion<string>().HasMaxLength(32);
+        builder.Property(value => value.ProxyMaxRetries).HasColumnName("proxy_max_retries").HasColumnType("integer").HasDefaultValue(ProxyRetryPersistenceDefaults.DefaultMaxRetries).IsRequired();
+        builder.Property(value => value.ProxyInitialRetryBackoffMilliseconds).HasColumnName("proxy_initial_retry_backoff_milliseconds").HasColumnType("integer").HasDefaultValue(ProxyRetryPersistenceDefaults.DefaultInitialBackoffMilliseconds).IsRequired();
+        builder.Property(value => value.ProxyMaximumRetryBackoffMilliseconds).HasColumnName("proxy_maximum_retry_backoff_milliseconds").HasColumnType("integer").HasDefaultValue(ProxyRetryPersistenceDefaults.DefaultMaximumRetryBackoffMilliseconds).IsRequired();
+        builder.Property(value => value.ProxyRetryOnConnectionFailure).HasColumnName("proxy_retry_on_connection_failure").HasColumnType("boolean").HasDefaultValue(ProxyRetryPersistenceDefaults.DefaultRetryOnConnectionFailure).IsRequired();
+        builder.Property(value => value.ProxyRetryOnUpstreamDisconnect).HasColumnName("proxy_retry_on_upstream_disconnect").HasColumnType("boolean").HasDefaultValue(ProxyRetryPersistenceDefaults.DefaultRetryOnUpstreamDisconnect).IsRequired();
 
         builder.HasData(new GlobalSettings
         {
             Id = Guid.Parse(PersistenceDatabaseDefaults.SeedGlobalSettingsId),
             AutoPortRangeStart = 20000,
             AutoPortRangeEnd = 29999,
-            MaxRequestBodyBytes = 30 * 1024 * 1024,
+            MaxRequestBodyBytes = GlobalSettingsConfiguration.HardMaximumRequestBodyBytes,
+            MaxRequestHeaderBytes = GlobalSettingsConfiguration.HardMaximumRequestHeaderBytes,
             MaxConcurrentRequests = 1024,
             ConfigurationPollIntervalSeconds = 30,
+            RequestReadTimeoutMilliseconds = 30000,
             TrustedProxyCidrsJson = "[]",
             CreatedAt = SeedTimestamp,
             UpdatedAt = SeedTimestamp,
@@ -215,7 +209,12 @@ public sealed class NekostickDbContext : DbContext
             ConnectTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultConnectTimeoutMilliseconds,
             HttpActivityTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultHttpActivityTimeoutMilliseconds,
             HttpTotalTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultHttpTotalTimeoutMilliseconds,
-            WebSocketIdleTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultWebSocketIdleTimeoutMilliseconds
+            WebSocketIdleTimeoutMilliseconds = ProxyTimeoutPersistenceDefaults.DefaultWebSocketIdleTimeoutMilliseconds,
+            ProxyMaxRetries = ProxyRetryPersistenceDefaults.DefaultMaxRetries,
+            ProxyInitialRetryBackoffMilliseconds = ProxyRetryPersistenceDefaults.DefaultInitialBackoffMilliseconds,
+            ProxyMaximumRetryBackoffMilliseconds = ProxyRetryPersistenceDefaults.DefaultMaximumRetryBackoffMilliseconds,
+            ProxyRetryOnConnectionFailure = ProxyRetryPersistenceDefaults.DefaultRetryOnConnectionFailure,
+            ProxyRetryOnUpstreamDisconnect = ProxyRetryPersistenceDefaults.DefaultRetryOnUpstreamDisconnect
         });
     }
 
@@ -244,6 +243,18 @@ public sealed class NekostickDbContext : DbContext
             table.HasCheckConstraint(
                 "ck_routes_rewrite_metadata_json",
                 "jsonb_typeof(request_header_rewrites_json) = 'array' AND jsonb_typeof(response_header_rewrites_json) = 'array' AND jsonb_typeof(metadata_json) = 'object' AND octet_length(request_header_rewrites_json::text) <= 1048576 AND octet_length(response_header_rewrites_json::text) <= 1048576 AND octet_length(metadata_json::text) <= 1048576");
+            table.HasCheckConstraint(
+                "ck_routes_resource_limits",
+                $"(max_request_body_bytes IS NULL OR max_request_body_bytes BETWEEN 1 AND {GlobalSettingsConfiguration.HardMaximumRequestBodyBytes}) " +
+                $"AND (max_request_header_bytes IS NULL OR max_request_header_bytes BETWEEN 1 AND {GlobalSettingsConfiguration.HardMaximumRequestHeaderBytes}) " +
+                "AND (max_concurrent_requests IS NULL OR max_concurrent_requests > 0) " +
+                "AND (request_read_timeout_milliseconds IS NULL OR request_read_timeout_milliseconds BETWEEN 1 AND 86400000)");
+            table.HasCheckConstraint(
+                "ck_routes_client_ip_rate_policy",
+                "(client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod'))");
+            table.HasCheckConstraint(
+                "ck_routes_proxy_retries",
+                "(proxy_max_retries IS NULL AND proxy_initial_retry_backoff_milliseconds IS NULL AND proxy_maximum_retry_backoff_milliseconds IS NULL AND proxy_retry_on_connection_failure IS NULL AND proxy_retry_on_upstream_disconnect IS NULL) OR (proxy_max_retries IS NOT NULL AND proxy_initial_retry_backoff_milliseconds IS NOT NULL AND proxy_maximum_retry_backoff_milliseconds IS NOT NULL AND proxy_retry_on_connection_failure IS NOT NULL AND proxy_retry_on_upstream_disconnect IS NOT NULL AND " + ProxyRetryPersistenceDefaults.CheckConstraintSql + ")");
         });
 
         builder.HasKey(value => value.Id).HasName("pk_routes");
@@ -264,6 +275,21 @@ public sealed class NekostickDbContext : DbContext
         builder.Property(value => value.Priority).HasColumnName("priority").HasColumnType("integer").IsRequired();
         ConfigureEnum(builder.Property(value => value.ForwardingMode).HasColumnName("forwarding_mode"), 16);
         builder.Property(value => value.ReplaceTemplate).HasColumnName("replace_template").HasMaxLength(4096);
+        builder.Property(value => value.ClientIpRateTokenLimit).HasColumnName("client_ip_rate_token_limit").HasColumnType("bigint");
+        builder.Property(value => value.ClientIpRateTokensPerPeriod).HasColumnName("client_ip_rate_tokens_per_period").HasColumnType("bigint");
+        builder.Property(value => value.ClientIpRateReplenishmentPeriodMilliseconds).HasColumnName("client_ip_rate_replenishment_period_milliseconds").HasColumnType("integer");
+        builder.Property(value => value.ClientIpRateQueueLimit).HasColumnName("client_ip_rate_queue_limit").HasColumnType("integer");
+        builder.Property(value => value.ClientIpRateRejectionBehavior).HasColumnName("client_ip_rate_rejection_behavior").HasConversion<string>().HasMaxLength(16);
+        builder.Property(value => value.ClientIpRateRetryAfterBehavior).HasColumnName("client_ip_rate_retry_after_behavior").HasConversion<string>().HasMaxLength(32);
+        builder.Property(value => value.MaxRequestBodyBytes).HasColumnName("max_request_body_bytes").HasColumnType("bigint");
+        builder.Property(value => value.MaxRequestHeaderBytes).HasColumnName("max_request_header_bytes").HasColumnType("bigint");
+        builder.Property(value => value.MaxConcurrentRequests).HasColumnName("max_concurrent_requests").HasColumnType("integer");
+        builder.Property(value => value.RequestReadTimeoutMilliseconds).HasColumnName("request_read_timeout_milliseconds").HasColumnType("integer");
+        builder.Property(value => value.ProxyMaxRetries).HasColumnName("proxy_max_retries").HasColumnType("integer");
+        builder.Property(value => value.ProxyInitialRetryBackoffMilliseconds).HasColumnName("proxy_initial_retry_backoff_milliseconds").HasColumnType("integer");
+        builder.Property(value => value.ProxyMaximumRetryBackoffMilliseconds).HasColumnName("proxy_maximum_retry_backoff_milliseconds").HasColumnType("integer");
+        builder.Property(value => value.ProxyRetryOnConnectionFailure).HasColumnName("proxy_retry_on_connection_failure").HasColumnType("boolean");
+        builder.Property(value => value.ProxyRetryOnUpstreamDisconnect).HasColumnName("proxy_retry_on_upstream_disconnect").HasColumnType("boolean");
         builder.Property(value => value.RequestHeaderRewritesJson).HasColumnName("request_header_rewrites_json").HasColumnType("jsonb").IsRequired();
         builder.Property(value => value.ResponseHeaderRewritesJson).HasColumnName("response_header_rewrites_json").HasColumnType("jsonb").IsRequired();
         builder.Property(value => value.MetadataJson).HasColumnName("metadata_json").HasColumnType("jsonb").IsRequired();

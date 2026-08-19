@@ -102,6 +102,11 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
         PortLeaseRenewal request,
         CancellationToken cancellationToken)
     {
+        if (!_runtimeState.NewLeasesAllowed)
+        {
+            return new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable);
+        }
+
         var result = await store.RenewAsync(
             new PersistencePortLeaseRenewRequest(
                 request.NodeId.Value,

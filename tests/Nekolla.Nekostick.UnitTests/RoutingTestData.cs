@@ -15,7 +15,8 @@ internal static class RoutingTestData
         ImmutableArray<string> hostPatterns = default,
         ImmutableArray<string> methods = default,
         ForwardingConfiguration? forwarding = null,
-        long version = 1) =>
+        long version = 1,
+        ProxyRetryConfiguration? proxyRetries = null) =>
         new(
             id,
             true,
@@ -28,7 +29,8 @@ internal static class RoutingTestData
             "{}",
             createdAt ?? DateTimeOffset.UnixEpoch,
             createdAt ?? DateTimeOffset.UnixEpoch,
-            version);
+            version,
+            proxyRetries: proxyRetries);
 
     internal static RouteMatchSnapshot Build(params RouteConfiguration[] routes)
     {

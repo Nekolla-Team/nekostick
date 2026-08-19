@@ -265,12 +265,17 @@ public sealed class ExtensionLoadHandle : IDisposable
 public sealed class CollectibleExtensionLoader
 {
     private readonly SemVersion _hostApiVersion;
+    private readonly ExtensionContractCatalog _contractCatalog;
 
-    /// <summary>Creates a loader for one host API version.</summary>
+    /// <summary>Creates a loader for one host API version and approved contract catalog.</summary>
     /// <param name="hostApiVersion">The host API version used for compatibility validation.</param>
-    public CollectibleExtensionLoader(SemVersion hostApiVersion)
+    /// <param name="contractCatalog">The host-owned shared contract catalog.</param>
+    public CollectibleExtensionLoader(
+        SemVersion hostApiVersion,
+        ExtensionContractCatalog? contractCatalog = null)
     {
         _hostApiVersion = hostApiVersion;
+        _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault();
     }
 
     /// <summary>Loads an entry assembly from the manifest's approved extension root.</summary>
@@ -294,11 +299,32 @@ public sealed class CollectibleExtensionLoader
         {
             return ExtensionLoadResult.Failure(ExtensionFailureCode.UnsafePath);
         }
+        foreach (var export in manifest.Exports)
+        {
+            if (_contractCatalog.ValidateDeclaration(
+                    manifest.ExtensionDirectory,
+                    export.AssemblyIdentity,
+                    export.TypeIdentity) != ExtensionFailureCode.None)
+            {
+                return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractCatalogUnavailable);
+            }
+        }
+
+        foreach (var import in manifest.Imports)
+        {
+            if (_contractCatalog.ValidateDeclaration(
+                    manifest.ExtensionDirectory,
+                    import.AssemblyIdentity,
+                    import.TypeIdentity) != ExtensionFailureCode.None)
+            {
+                return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractCatalogUnavailable);
+            }
+        }
 
         ExtensionLoadContext? loadContext = null;
         try
         {
-            loadContext = new ExtensionLoadContext(entryPath, root);
+            loadContext = new ExtensionLoadContext(entryPath, root, _contractCatalog);
             var entryAssembly = loadContext.LoadFromAssemblyPath(entryPath);
             var entryType = entryAssembly.GetType(manifest.EntryType, throwOnError: false, ignoreCase: false);
             if (entryType is null)
@@ -335,18 +361,30 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
 {
     private readonly AssemblyDependencyResolver _resolver;
     private readonly string _root;
+    private readonly ExtensionContractCatalog _contractCatalog;
     private readonly Assembly _contractsAssembly = typeof(HostApiVersion).Assembly;
     private readonly AssemblyName _contractsIdentity = typeof(HostApiVersion).Assembly.GetName();
 
-    internal ExtensionLoadContext(string entryAssemblyPath, string root)
+    internal ExtensionLoadContext(
+        string entryAssemblyPath,
+        string root,
+        ExtensionContractCatalog contractCatalog)
         : base(isCollectible: true)
     {
         _resolver = new AssemblyDependencyResolver(entryAssemblyPath);
         _root = root;
+        _contractCatalog = contractCatalog;
     }
 
     protected override Assembly? Load(AssemblyName assemblyName)
     {
+        if (_contractCatalog.TryResolveAssembly(assemblyName, _root, out var approvedPath))
+        {
+            return AssemblyIdentityMatches(assemblyName, _contractsIdentity)
+                ? _contractsAssembly
+                : LoadFromAssemblyPath(approvedPath);
+        }
+
         if (string.Equals(assemblyName.Name, _contractsIdentity.Name, StringComparison.Ordinal))
         {
             if (!AssemblyIdentityMatches(assemblyName, _contractsIdentity))

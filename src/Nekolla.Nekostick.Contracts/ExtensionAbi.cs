@@ -285,6 +285,76 @@ public readonly record struct ExtensionStatus
     /// <summary>Gets the safe status code.</summary>
     public string Code { get; }
 }
+/// <summary>Identifies one node-local core event published by the Host.</summary>
+public enum ExtensionCoreEventKind
+{
+    /// <summary>An immutable configuration snapshot was applied.</summary>
+    ConfigurationSnapshotApplied,
+
+    /// <summary>A route changed in the active snapshot.</summary>
+    RouteChanged,
+
+    /// <summary>A supervised service changed state.</summary>
+    ServiceStateChanged,
+
+    /// <summary>A durable port lease changed state.</summary>
+    PortLeaseChanged,
+
+    /// <summary>An extension changed lifecycle state.</summary>
+    ExtensionStateChanged
+}
+
+/// <summary>Contains one immutable node-local core event.</summary>
+public sealed record ExtensionCoreEvent
+{
+    /// <summary>Creates a versioned core event.</summary>
+    /// <param name="kind">The stable core event kind.</param>
+    /// <param name="version">The event schema version.</param>
+    /// <param name="payloadJson">The bounded JSON payload.</param>
+    public ExtensionCoreEvent(ExtensionCoreEventKind kind, int version, string payloadJson)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(version, 1);
+
+        if (payloadJson is null || payloadJson.Length > 1024 * 1024)
+        {
+            throw new ArgumentException("An event payload is invalid.", nameof(payloadJson));
+        }
+
+        Kind = kind;
+        Version = version;
+        PayloadJson = payloadJson;
+    }
+
+    /// <summary>Gets the stable event kind.</summary>
+    public ExtensionCoreEventKind Kind { get; }
+
+    /// <summary>Gets the event schema version.</summary>
+    public int Version { get; }
+
+    /// <summary>Gets the immutable JSON payload.</summary>
+    public string PayloadJson { get; }
+}
+
+/// <summary>Exposes startup-only typed exchange over approved shared contract types.</summary>
+public interface IExtensionContractRegistry
+{
+    /// <summary>Exports one strongly typed implementation for a manifest declaration.</summary>
+    /// <typeparam name="TContract">The approved shared contract type.</typeparam>
+    /// <param name="contractId">The declared stable contract ID.</param>
+    /// <param name="implementation">The implementation instance.</param>
+    /// <returns><see langword="true" /> when the declaration and type identity match.</returns>
+    bool TryExport<TContract>(string contractId, TContract implementation)
+        where TContract : class;
+
+    /// <summary>Imports one strongly typed implementation for a manifest declaration.</summary>
+    /// <typeparam name="TContract">The approved shared contract type.</typeparam>
+    /// <param name="contractId">The declared stable contract ID.</param>
+    /// <param name="contract">The resolved implementation when available.</param>
+    /// <returns><see langword="true" /> when a compatible provider was available during startup.</returns>
+    bool TryImport<TContract>(string contractId, out TContract? contract)
+        where TContract : class;
+}
+
 /// <summary>Reads the immutable settings supplied by the Host snapshot.</summary>
 public interface IExtensionSettingsReader
 {
@@ -345,11 +415,14 @@ public interface IExtensionRegistration
     bool TryRegisterFallback(IExtensionFallback fallback);
 }
 
-/// <summary>Provides lifecycle state and registration to an extension entrypoint.</summary>
+/// <summary>Provides lifecycle state, typed contracts, and registration to an extension entrypoint.</summary>
 public interface IExtensionStartContext
 {
     /// <summary>Gets whether this start is part of replacement reload.</summary>
     bool Reloading { get; }
+
+    /// <summary>Gets the startup-only typed shared-contract registry.</summary>
+    IExtensionContractRegistry Contracts { get; }
 
     /// <summary>Gets the narrow host bridge.</summary>
     IExtensionHostBridge Host { get; }
@@ -366,6 +439,9 @@ public interface IExtensionHostBridge
 
     /// <summary>Gets read-only versioned extension settings.</summary>
     IExtensionSettingsReader Configuration { get; }
+
+    /// <summary>Gets the startup-only typed shared-contract registry.</summary>
+    IExtensionContractRegistry Contracts { get; }
 
     /// <summary>Gets the bounded extension task scheduler.</summary>
     IExtensionTaskScheduler Tasks { get; }

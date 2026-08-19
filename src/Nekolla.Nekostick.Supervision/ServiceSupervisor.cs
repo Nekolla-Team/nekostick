@@ -100,7 +100,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     /// <param name="restartBackoff">The restart backoff policy, or the default policy when omitted.</param>
     /// <param name="restartJitter">The restart jitter provider, or a deterministic no-jitter provider when omitted.</param>
     /// <param name="restartPolicy">The policy governing process restarts.</param>
-    /// <param name="stopGracePeriod">The maximum graceful stop duration, or five seconds when omitted.</param>
+    /// <param name="stopGracePeriod">The maximum graceful stop duration, or 15 seconds when omitted.</param>
     /// <param name="now">The construction time used to validate the optional initial lease.</param>
     /// <param name="initialLease">The optional validated lease acquired by the Host before construction.</param>
     public ServiceSupervisor(
@@ -158,7 +158,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         this.restartBackoff = restartBackoff;
         this.restartJitter = restartJitter;
         this.restartPolicy = restartPolicy;
-        this.stopGracePeriod = stopGracePeriod ?? TimeSpan.FromSeconds(5);
+        this.stopGracePeriod = stopGracePeriod ?? TimeSpan.FromSeconds(15);
         snapshot = ServiceStateTransition.CreateInitial(
             launchSpecification.ServiceId,
             DesiredServiceState.Stopped,
@@ -389,31 +389,27 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, requested);
         }
         catch
         {
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.StopRequested, requested);
         }
 
         if (result.Status is ProcessOperationStatus.Cancelled)
         {
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, requested);
         }
 
+        var stopped = result.Status is ProcessOperationStatus.Completed or ProcessOperationStatus.Accepted;
+        if (!stopped)
+        {
+            return Result(SupervisorOperationStatus.Failed, result.Reason, requested);
+        }
+
         await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
-        var stopped = Exchange(ServiceStateTransition.RecordStopped(Snapshot, now));
-        return Result(
-            result.Status is ProcessOperationStatus.Completed or ProcessOperationStatus.Accepted
-                ? SupervisorOperationStatus.Applied
-                : SupervisorOperationStatus.Failed,
-            result.Status is ProcessOperationStatus.Completed or ProcessOperationStatus.Accepted
-                ? ServiceStateReasonCode.StopCompleted
-                : result.Reason,
-            stopped);
+        var next = Exchange(ServiceStateTransition.RecordStopped(Snapshot, now));
+        return Result(SupervisorOperationStatus.Applied, ServiceStateReasonCode.StopCompleted, next);
     }
 
     /// <summary>Runs one bounded health observation and applies the immutable transition.</summary>

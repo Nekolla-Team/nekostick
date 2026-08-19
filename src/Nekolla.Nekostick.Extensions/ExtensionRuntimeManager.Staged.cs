@@ -93,6 +93,28 @@ public sealed partial class ExtensionRuntimeManager
             var descriptors = desired.IsDefault
                 ? ImmutableArray<ExtensionRuntimeDescriptor>.Empty
                 : desired;
+            var graphManifests = descriptors
+                .Where(static descriptor => descriptor?.Manifest is not null)
+                .Select(static descriptor => descriptor.Manifest!)
+                .ToImmutableArray();
+            var graph = ExtensionManifestGraph.ValidateAndOrder(
+                graphManifests,
+                new SemVersion(_hostApiVersion.Major, _hostApiVersion.Minor, _hostApiVersion.Patch),
+                _contractCatalog);
+            if (!graph.Succeeded)
+            {
+                return ExtensionGenerationPreparationResult.Failure(graph.FailureCode);
+            }
+            if (graph.OrderedManifests.Length == descriptors.Length)
+            {
+                var descriptorsById = descriptors.ToDictionary(
+                    static descriptor => descriptor.Manifest!.Id,
+                    StringComparer.Ordinal);
+                descriptors = graph.OrderedManifests
+                    .Select(manifest => descriptorsById[manifest.Id])
+                    .ToImmutableArray();
+            }
+
             var previousById = baseGeneration.Contexts
                 .GroupBy(static context => context.Instance.Manifest.Id, StringComparer.Ordinal)
                 .ToDictionary(static group => group.Key, static group => group.First(), StringComparer.Ordinal);
@@ -367,6 +389,7 @@ public sealed partial class ExtensionRuntimeManager
                 {
                     operationToken.ThrowIfCancellationRequested();
                     previous.MarkDraining();
+                    PublishExtensionState(previous, ExtensionLoadState.Unloading);
                 }
 
                 foreach (var previous in preparation.ChangedPrevious)
@@ -514,6 +537,28 @@ public sealed partial class ExtensionRuntimeManager
 
             detached.MarkStopped();
         }
+        foreach (var candidate in preparation.Candidates)
+        {
+            PublishExtensionState(candidate, ExtensionLoadState.Loaded);
+        }
+
+        var stoppedInstances = new HashSet<ExtensionInstance>();
+        foreach (var previous in preparation.ChangedPrevious)
+        {
+            if (stoppedInstances.Add(previous))
+            {
+                previous.MarkStopped();
+                PublishExtensionState(previous, ExtensionLoadState.Stopped);
+            }
+        }
+
+        foreach (var detached in preparation.DetachedPrevious)
+        {
+            if (stoppedInstances.Add(detached))
+            {
+                PublishExtensionState(detached, ExtensionLoadState.Stopped);
+            }
+        }
 
         return true;
     }
@@ -574,6 +619,7 @@ public sealed partial class ExtensionRuntimeManager
             foreach (var previous in preparation.ChangedPrevious)
             {
                 previous.ResumeServing();
+                PublishExtensionState(previous, ExtensionLoadState.Loaded);
             }
         }
 

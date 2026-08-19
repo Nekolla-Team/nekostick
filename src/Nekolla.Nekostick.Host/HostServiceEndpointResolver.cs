@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Net;
+using Nekolla.Nekostick.Contracts;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Proxy;
 
 namespace Nekolla.Nekostick.Host;
@@ -27,8 +29,18 @@ public sealed record HostServiceEndpointLease(Guid ServiceId, int Port, DateTime
 /// <summary>Atomically publishes a complete endpoint lease snapshot.</summary>
 public sealed class HostServiceEndpointSnapshotPublisher : IHostServiceEndpointSnapshotAccessor
 {
+    private readonly object _gate = new();
+    private readonly ExtensionRuntimeManager? _runtimeManager;
     private ImmutableDictionary<Guid, HostServiceEndpointLease> _current =
         ImmutableDictionary<Guid, HostServiceEndpointLease>.Empty;
+    private long _publicationVersion;
+
+    /// <summary>Creates an endpoint publisher with optional core-event fan-out.</summary>
+    /// <param name="runtimeManager">The extension runtime manager, when core events are enabled.</param>
+    public HostServiceEndpointSnapshotPublisher(ExtensionRuntimeManager? runtimeManager = null)
+    {
+        _runtimeManager = runtimeManager;
+    }
 
     /// <summary>Gets the current immutable endpoint lease view.</summary>
     public ImmutableDictionary<Guid, HostServiceEndpointLease> Current =>
@@ -47,7 +59,68 @@ public sealed class HostServiceEndpointSnapshotPublisher : IHostServiceEndpointS
                 builder[lease.ServiceId] = lease;
             }
         }
-        Interlocked.Exchange(ref _current, builder.ToImmutable());
+
+        var next = builder.ToImmutable();
+        lock (_gate)
+        {
+            var previous = _current;
+            if (SnapshotsEqual(previous, next))
+            {
+                return;
+            }
+
+            Volatile.Write(ref _current, next);
+            var version = checked(++_publicationVersion);
+            PublishChanges(previous, next, version);
+        }
+    }
+
+    private void PublishChanges(
+        ImmutableDictionary<Guid, HostServiceEndpointLease> previous,
+        ImmutableDictionary<Guid, HostServiceEndpointLease> next,
+        long version)
+    {
+        var serviceIds = previous.Keys.Concat(next.Keys).ToHashSet();
+        foreach (var serviceId in serviceIds)
+        {
+            var hasPrevious = previous.TryGetValue(serviceId, out var oldLease);
+            var hasNext = next.TryGetValue(serviceId, out var newLease);
+            if (hasPrevious && hasNext && oldLease == newLease)
+            {
+                continue;
+            }
+
+            HostCoreEventPublisher.Publish(
+                _runtimeManager,
+                ExtensionCoreEventKind.PortLeaseChanged,
+                new
+                {
+                    serviceId,
+                    version,
+                    state = hasNext ? hasPrevious ? "changed" : "published" : "withdrawn",
+                    port = hasNext ? newLease!.Port : (int?)null
+                });
+        }
+    }
+
+    private static bool SnapshotsEqual(
+        ImmutableDictionary<Guid, HostServiceEndpointLease> left,
+        ImmutableDictionary<Guid, HostServiceEndpointLease> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        foreach (var pair in left)
+        {
+            if (!right.TryGetValue(pair.Key, out var lease) || lease != pair.Value)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 

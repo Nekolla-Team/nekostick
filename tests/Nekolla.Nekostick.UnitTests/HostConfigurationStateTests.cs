@@ -78,6 +78,49 @@ public sealed class HostConfigurationStateTests
     }
 
     [Fact]
+    public void SemanticValidatorRequiresRouteResourceOverridesToTightenGlobalLimits()
+    {
+        var globalSettings = new GlobalSettingsConfiguration(
+            version: 1,
+            maxRequestBodyBytes: 1024 * 1024,
+            maxRequestHeaderBytes: 4096,
+            maxConcurrentRequests: 4,
+            requestReadTimeout: TimeSpan.FromSeconds(2));
+        var matcher = new RouteMatcherConfiguration(RouteMatcherType.Exact, "/resource", default, default);
+        var forwarding = new ForwardingConfiguration(ForwardingMode.Preserve, null);
+        var inherited = CreateSnapshot(
+            globalSettings: globalSettings,
+            routes: ImmutableArray.Create(CreateRoute(matcher, forwarding)));
+        var tightened = CreateSnapshot(
+            globalSettings: globalSettings,
+            routes: ImmutableArray.Create(CreateRoute(
+                matcher,
+                forwarding,
+                maxRequestBodyBytes: 512 * 1024,
+                maxRequestHeaderBytes: 2048,
+                maxConcurrentRequests: 2,
+                requestReadTimeout: TimeSpan.FromSeconds(1))));
+        var invalidOverrides = new[]
+        {
+            CreateRoute(matcher, forwarding, maxRequestBodyBytes: 1024 * 1024 + 1),
+            CreateRoute(matcher, forwarding, maxRequestHeaderBytes: 4097),
+            CreateRoute(matcher, forwarding, maxConcurrentRequests: 5),
+            CreateRoute(matcher, forwarding, requestReadTimeout: TimeSpan.FromSeconds(3))
+        };
+
+        Assert.True(HostConfigurationSemanticValidator.TryValidateSnapshot(inherited));
+        Assert.True(HostConfigurationSemanticValidator.TryValidateSnapshot(tightened));
+        foreach (var route in invalidOverrides)
+        {
+            var snapshot = CreateSnapshot(
+                globalSettings: globalSettings,
+                routes: ImmutableArray.Create(route));
+
+            Assert.False(HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot));
+        }
+    }
+
+    [Fact]
     public void HolderDoesNotPublishSemanticallyInvalidCandidateAndPreservesPriorSnapshot()
     {
         var prior = CreateSnapshot(4);
@@ -184,7 +227,11 @@ public sealed class HostConfigurationStateTests
 
     private static RouteConfiguration CreateRoute(
         RouteMatcherConfiguration matcher,
-        ForwardingConfiguration forwarding) =>
+        ForwardingConfiguration forwarding,
+        long? maxRequestBodyBytes = null,
+        long? maxRequestHeaderBytes = null,
+        int? maxConcurrentRequests = null,
+        TimeSpan? requestReadTimeout = null) =>
         new(
             RouteId,
             true,
@@ -197,7 +244,11 @@ public sealed class HostConfigurationStateTests
             "{}",
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
-            1);
+            1,
+            maxRequestBodyBytes: maxRequestBodyBytes,
+            maxRequestHeaderBytes: maxRequestHeaderBytes,
+            maxConcurrentRequests: maxConcurrentRequests,
+            requestReadTimeout: requestReadTimeout);
 
     private sealed class UnavailableRevisionReader : IConfigurationRevisionReader
     {

@@ -53,6 +53,23 @@ internal sealed class TestSchemaMigrationsSqlGenerator : NpgsqlMigrationsSqlGene
 
     /// <inheritdoc />
     protected override void Generate(
+        SqlOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder)
+    {
+        var routedOperation = new SqlOperation
+        {
+            Sql = operation.Sql.Replace(
+                "\"nekostick\".",
+                string.Empty,
+                StringComparison.Ordinal),
+            SuppressTransaction = operation.SuppressTransaction
+        };
+        base.Generate(routedOperation, model, builder);
+    }
+
+    /// <inheritdoc />
+    protected override void Generate(
         EnsureSchemaOperation operation,
         IModel? model,
         MigrationCommandListBuilder builder)

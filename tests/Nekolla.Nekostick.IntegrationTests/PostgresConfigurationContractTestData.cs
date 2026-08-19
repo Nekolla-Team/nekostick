@@ -196,7 +196,18 @@ internal static class PostgresConfigurationContractTestData
             metadataJson: "{}",
             createdAt: DateTimeOffset.UtcNow,
             updatedAt: DateTimeOffset.UtcNow,
-            version: version);
+            version: version,
+            clientIpRatePolicy: new ClientIpRatePolicyConfiguration(
+                tokenLimit: 20,
+                tokensPerPeriod: 5,
+                replenishmentPeriod: TimeSpan.FromSeconds(1),
+                queueLimit: 3,
+                rejectionBehavior: RateLimitRejectionBehavior.Queue,
+                retryAfterBehavior: RateLimitRetryAfterBehavior.FromReplenishmentPeriod),
+            maxRequestBodyBytes: 2 * 1024 * 1024,
+            maxRequestHeaderBytes: 16 * 1024,
+            maxConcurrentRequests: 128,
+            requestReadTimeout: TimeSpan.FromSeconds(5));
 
     internal static GlobalSettingsConfiguration CreateGlobalSettings(
         long version,
@@ -205,8 +216,15 @@ internal static class PostgresConfigurationContractTestData
             version,
             autoPortRangeStart: 21000,
             autoPortRangeEnd: 22000,
-            maxRequestBodyBytes: 30 * 1024 * 1024,
+            maxRequestBodyBytes: GlobalSettingsConfiguration.HardMaximumRequestBodyBytes,
             maxConcurrentRequests: maxConcurrentRequests,
             configurationPollInterval: TimeSpan.FromSeconds(30),
-            trustedProxyCidrs: ImmutableArray.Create("127.0.0.1/32"));
+            trustedProxyCidrs: ImmutableArray.Create("127.0.0.1/32"),
+            clientIpRatePolicy: new ClientIpRatePolicyConfiguration(
+                tokenLimit: 20,
+                tokensPerPeriod: 5,
+                replenishmentPeriod: TimeSpan.FromSeconds(1),
+                queueLimit: 3,
+                rejectionBehavior: RateLimitRejectionBehavior.Queue,
+                retryAfterBehavior: RateLimitRetryAfterBehavior.FromReplenishmentPeriod));
 }

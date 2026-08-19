@@ -77,6 +77,8 @@ internal sealed class HostRouteTargetExecutor : ILeasedRouteTargetExecutor
                         context,
                         snapshot,
                         extension.HandlerId,
+                        executable.Configuration.MaxRequestBodyBytes ??
+                            snapshot.Configuration.GlobalSettings.MaxRequestBodyBytes,
                         publicationLease,
                         cancellationToken),
                 _ => RouteTargetExecutionResult.SafeFailure
@@ -106,6 +108,7 @@ internal sealed class HostRouteTargetExecutor : ILeasedRouteTargetExecutor
         HttpContext context,
         HostRoutingSnapshot snapshot,
         string handlerId,
+        long maxBodyBytes,
         HostRoutingSnapshotLease? publicationLease,
         CancellationToken cancellationToken)
     {
@@ -126,7 +129,7 @@ internal sealed class HostRouteTargetExecutor : ILeasedRouteTargetExecutor
         {
             var request = await ExtensionHttpAdapter.CreateRequestAsync(
                     context,
-                    snapshot.Configuration.GlobalSettings.MaxRequestBodyBytes,
+                    maxBodyBytes,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (request is null)
@@ -312,7 +315,9 @@ internal sealed class HostRouteTargetExecutor : ILeasedRouteTargetExecutor
                 requestHeaderRewrites: executable.RequestHeaderRewrites,
                 responseHeaderRewrites: executable.ResponseHeaderRewrites,
                 trustedProxyPolicy: executable.TrustedProxyPolicy,
-                headerExpansionContext: expansionContext);
+                headerExpansionContext: expansionContext,
+                retryPolicy: executable.RetryPolicy,
+                routeId: match.RouteId);
             var result = await _microserviceExecutor
                 .ExecuteAsync(context, request, cancellationToken)
                 .ConfigureAwait(false);
@@ -344,8 +349,8 @@ internal sealed class HostRouteTargetExecutor : ILeasedRouteTargetExecutor
             or StaticHttpExecutionKind.UnsupportedMethod
             or StaticHttpExecutionKind.MultipleRangesNotSupported
             or StaticHttpExecutionKind.InvalidRange => RouteTargetExecutionResult.BadRequest,
-        StaticHttpExecutionKind.NotFound
-            or StaticHttpExecutionKind.DirectoryListingDisabled => RouteTargetExecutionResult.NotFound,
+        StaticHttpExecutionKind.NotFound => RouteTargetExecutionResult.StaticNotFound,
+        StaticHttpExecutionKind.DirectoryListingDisabled => RouteTargetExecutionResult.StaticIndexMissing,
         StaticHttpExecutionKind.Forbidden
             or StaticHttpExecutionKind.AccessDenied => RouteTargetExecutionResult.Forbidden,
         StaticHttpExecutionKind.InvalidMapping

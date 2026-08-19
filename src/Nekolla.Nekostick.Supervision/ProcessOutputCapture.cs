@@ -9,13 +9,28 @@ internal interface IProcessLiveness
     bool IsRunning(Guid serviceId);
 }
 
-internal interface IProcessOutputSink
+/// <summary>Receives bounded structured output from a supervised child process.</summary>
+public interface IProcessOutputSink
 {
+    /// <summary>Receives one accepted child-output line.</summary>
+    /// <param name="record">The bounded output record.</param>
     void OnLine(ProcessOutputRecord record);
+
+    /// <summary>Receives an aggregate count of child-output lines dropped by the limiter.</summary>
+    /// <param name="serviceId">The service that emitted the dropped output.</param>
+    /// <param name="stream">The child-output stream subject to the limit.</param>
+    /// <param name="count">The positive aggregate number of dropped lines.</param>
     void OnDropped(Guid serviceId, ProcessOutputStream stream, long count);
 }
 
-internal sealed record ProcessOutputRecord(
+/// <summary>Represents one bounded line of supervised child output.</summary>
+/// <param name="ServiceId">The service that emitted the output.</param>
+/// <param name="Stream">The child-output stream that emitted the line.</param>
+/// <param name="Timestamp">The UTC time at which the line was captured.</param>
+/// <param name="Level">The capture-assigned log severity name.</param>
+/// <param name="Text">The UTF-8 decoded, bounded output text.</param>
+/// <param name="Truncated">Whether text beyond the line limit was discarded.</param>
+public sealed record ProcessOutputRecord(
     Guid ServiceId,
     ProcessOutputStream Stream,
     DateTimeOffset Timestamp,
@@ -23,9 +38,14 @@ internal sealed record ProcessOutputRecord(
     string Text,
     bool Truncated);
 
-internal enum ProcessOutputStream
+/// <summary>Identifies the captured child-output stream.</summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Naming", "CA1711", Justification = "This public enum intentionally identifies a process output stream.")]
+public enum ProcessOutputStream
 {
+    /// <summary>The standard-output stream.</summary>
     Stdout,
+
+    /// <summary>The standard-error stream.</summary>
     Stderr
 }
 

@@ -81,6 +81,18 @@ public sealed class HostStaticTargetExecutionTests
             Assert.True(get.Response.Headers.LastModified.ToString().AsSpan().SequenceEqual(
                 head.Response.Headers.LastModified.ToString().AsSpan()));
 
+
+            var directory = HostIntegrationTestSupport.CreateContext(
+                "/assets",
+                cancellationToken: cancellationToken);
+            var directoryDisposition = await HostIntegrationTestSupport.ExecuteMatchedTargetAsync(
+                holder,
+                targetExecutor,
+                directory);
+
+            Assert.Equal(HostTargetExecutionDisposition.Handled, directoryDisposition.TargetDisposition);
+            Assert.Equal(StatusCodes.Status200OK, directory.Response.StatusCode);
+            Assert.True(content.AsSpan().SequenceEqual(HostIntegrationTestSupport.ResponseBody(directory)));
             var dispatched = HostIntegrationTestSupport.CreateContext(
                 "/assets/index.html",
                 cancellationToken: cancellationToken);
@@ -108,8 +120,14 @@ public sealed class HostStaticTargetExecutionTests
             await File.WriteAllTextAsync(
                 Path.Combine(root, "known.txt"),
                 "known",
+                new UTF8Encoding(false),
+                cancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "known.txt.gz"),
+                "compressed",
                 Encoding.UTF8,
                 cancellationToken);
+            Directory.CreateDirectory(Path.Combine(root, "empty-directory"));
             var route = HostIntegrationTestSupport.CreateRoute(
                 HostIntegrationTestSupport.NewId(),
                 "/assets",
@@ -132,7 +150,52 @@ public sealed class HostStaticTargetExecutionTests
                 holder,
                 targetExecutor,
                 missing);
-            Assert.Equal(HostTargetExecutionDisposition.NotFound, missingDisposition.TargetDisposition);
+            Assert.Equal(HostTargetExecutionDisposition.Unknown, missingDisposition.TargetDisposition);
+
+            var missingDispatched = HostIntegrationTestSupport.CreateContext(
+                "/assets/missing.txt",
+                cancellationToken: cancellationToken);
+            await HostIntegrationTestSupport.DispatchWithRealHostDispatcherAsync(
+                holder,
+                targetExecutor,
+                missingDispatched);
+            Assert.Equal(StatusCodes.Status404NotFound, missingDispatched.Response.StatusCode);
+            Assert.True("Not found.".AsSpan().SequenceEqual(
+                Encoding.UTF8.GetString(HostIntegrationTestSupport.ResponseBody(missingDispatched)).AsSpan()));
+
+            var emptyDirectory = HostIntegrationTestSupport.CreateContext(
+                "/assets/empty-directory",
+                cancellationToken: cancellationToken);
+            var emptyDirectoryDisposition = await HostIntegrationTestSupport.ExecuteMatchedTargetAsync(
+                holder,
+                targetExecutor,
+                emptyDirectory);
+            Assert.Equal(
+                HostTargetExecutionDisposition.Unknown,
+                emptyDirectoryDisposition.TargetDisposition);
+
+            var emptyDirectoryDispatched = HostIntegrationTestSupport.CreateContext(
+                "/assets/empty-directory",
+                cancellationToken: cancellationToken);
+            await HostIntegrationTestSupport.DispatchWithRealHostDispatcherAsync(
+                holder,
+                targetExecutor,
+                emptyDirectoryDispatched);
+            Assert.Equal(StatusCodes.Status404NotFound, emptyDirectoryDispatched.Response.StatusCode);
+            Assert.True("Not found.".AsSpan().SequenceEqual(
+                Encoding.UTF8.GetString(HostIntegrationTestSupport.ResponseBody(emptyDirectoryDispatched)).AsSpan()));
+
+            var identity = HostIntegrationTestSupport.CreateContext(
+                "/assets/known.txt",
+                cancellationToken: cancellationToken);
+            await HostIntegrationTestSupport.DispatchWithRealHostDispatcherAsync(
+                holder,
+                targetExecutor,
+                identity);
+            Assert.Equal(StatusCodes.Status200OK, identity.Response.StatusCode);
+            Assert.True("known".AsSpan().SequenceEqual(
+                Encoding.UTF8.GetString(HostIntegrationTestSupport.ResponseBody(identity)).AsSpan()));
+            Assert.False(identity.Response.Headers.ContainsKey("Content-Encoding"));
 
             var unsupported = HostIntegrationTestSupport.CreateContext(
                 "/assets/known.txt",

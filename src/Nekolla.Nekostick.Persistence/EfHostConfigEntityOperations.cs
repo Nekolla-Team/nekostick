@@ -245,6 +245,25 @@ internal sealed class EfHostConfigEntityOperations
         entity.RequestHeaderRewritesJson = HostConfigurationSemanticValidator.SerializeJson(value.RequestHeaderRewrites);
         entity.ResponseHeaderRewritesJson = HostConfigurationSemanticValidator.SerializeJson(value.ResponseHeaderRewrites);
         entity.MetadataJson = HostConfigurationSemanticValidator.NormalizeJson(value.MetadataJson, JsonValueKind.Object);
+        var ratePolicy = RatePolicyPersistenceMapper.ToPersistence(value.ClientIpRatePolicy);
+        entity.ClientIpRateTokenLimit = ratePolicy.TokenLimit;
+        entity.ClientIpRateTokensPerPeriod = ratePolicy.TokensPerPeriod;
+        entity.ClientIpRateReplenishmentPeriodMilliseconds = ratePolicy.ReplenishmentPeriodMilliseconds;
+        entity.ClientIpRateQueueLimit = ratePolicy.QueueLimit;
+        entity.ClientIpRateRejectionBehavior = ratePolicy.RejectionBehavior;
+        entity.ClientIpRateRetryAfterBehavior = ratePolicy.RetryAfterBehavior;
+        entity.MaxRequestBodyBytes = value.MaxRequestBodyBytes;
+        entity.MaxRequestHeaderBytes = value.MaxRequestHeaderBytes;
+        entity.MaxConcurrentRequests = value.MaxConcurrentRequests;
+        entity.RequestReadTimeoutMilliseconds = value.RequestReadTimeout is { } requestReadTimeout
+            ? checked((int)requestReadTimeout.TotalMilliseconds)
+            : null;
+        var retryPolicy = ProxyRetryPersistenceMapper.ToNullablePersistence(value.ProxyRetries);
+        entity.ProxyMaxRetries = retryPolicy.MaxRetries;
+        entity.ProxyInitialRetryBackoffMilliseconds = retryPolicy.InitialBackoffMilliseconds;
+        entity.ProxyMaximumRetryBackoffMilliseconds = retryPolicy.MaximumBackoffMilliseconds;
+        entity.ProxyRetryOnConnectionFailure = retryPolicy.RetryOnConnectionFailure;
+        entity.ProxyRetryOnUpstreamDisconnect = retryPolicy.RetryOnUpstreamDisconnect;
         switch (value.Target)
         {
             case MicroserviceRouteTargetConfiguration microservice:
@@ -362,13 +381,28 @@ internal sealed class EfHostConfigEntityOperations
         entity.AutoPortRangeStart = value.AutoPortRangeStart;
         entity.AutoPortRangeEnd = value.AutoPortRangeEnd;
         entity.MaxRequestBodyBytes = value.MaxRequestBodyBytes;
+        entity.MaxRequestHeaderBytes = value.MaxRequestHeaderBytes;
         entity.MaxConcurrentRequests = value.MaxConcurrentRequests;
         entity.ConfigurationPollIntervalSeconds = checked((int)value.ConfigurationPollInterval.TotalSeconds);
+        entity.RequestReadTimeoutMilliseconds = checked((int)value.RequestReadTimeout.TotalMilliseconds);
         entity.TrustedProxyCidrsJson = HostConfigurationSemanticValidator.SerializeJson(value.TrustedProxyCidrs);
         entity.ConnectTimeoutMilliseconds = checked((int)value.ProxyTimeouts.ConnectTimeout.TotalMilliseconds);
         entity.HttpActivityTimeoutMilliseconds = checked((int)value.ProxyTimeouts.HttpActivityTimeout.TotalMilliseconds);
         entity.HttpTotalTimeoutMilliseconds = checked((int)value.ProxyTimeouts.HttpTotalTimeout.TotalMilliseconds);
         entity.WebSocketIdleTimeoutMilliseconds = checked((int)value.ProxyTimeouts.WebSocketIdleTimeout.TotalMilliseconds);
+        var ratePolicy = RatePolicyPersistenceMapper.ToPersistence(value.ClientIpRatePolicy);
+        entity.ClientIpRateTokenLimit = ratePolicy.TokenLimit;
+        entity.ClientIpRateTokensPerPeriod = ratePolicy.TokensPerPeriod;
+        entity.ClientIpRateReplenishmentPeriodMilliseconds = ratePolicy.ReplenishmentPeriodMilliseconds;
+        entity.ClientIpRateQueueLimit = ratePolicy.QueueLimit;
+        entity.ClientIpRateRejectionBehavior = ratePolicy.RejectionBehavior;
+        entity.ClientIpRateRetryAfterBehavior = ratePolicy.RetryAfterBehavior;
+        var retryPolicy = ProxyRetryPersistenceMapper.ToPersistence(value.ProxyRetries);
+        entity.ProxyMaxRetries = retryPolicy.MaxRetries;
+        entity.ProxyInitialRetryBackoffMilliseconds = retryPolicy.InitialBackoffMilliseconds;
+        entity.ProxyMaximumRetryBackoffMilliseconds = retryPolicy.MaximumBackoffMilliseconds;
+        entity.ProxyRetryOnConnectionFailure = retryPolicy.RetryOnConnectionFailure;
+        entity.ProxyRetryOnUpstreamDisconnect = retryPolicy.RetryOnUpstreamDisconnect;
         entity.UpdatedAt = now;
         entity.Version = EfHostConfigRevisionHelper.IncrementVersion(entity.Version);
     }

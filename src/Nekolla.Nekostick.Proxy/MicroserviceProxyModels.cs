@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Net;
 using System.Net.Sockets;
 using System.Globalization;
+using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -307,6 +308,8 @@ public sealed class MicroserviceProxyRequest
     /// <param name="requestHeaderRewrites">The immutable request rewrites.</param>
     /// <param name="responseHeaderRewrites">The immutable response rewrites.</param>
     /// <param name="headerExpansionContext">The immutable request-local expansion context.</param>
+    /// <param name="retryPolicy">The immutable retry policy.</param>
+    /// <param name="routeId">The stable route identifier used for safe telemetry.</param>
     public MicroserviceProxyRequest(
         Guid serviceId,
         string forwardedPath,
@@ -314,7 +317,9 @@ public sealed class MicroserviceProxyRequest
         ImmutableArray<HeaderRewriteConfiguration> requestHeaderRewrites = default,
         ImmutableArray<HeaderRewriteConfiguration> responseHeaderRewrites = default,
         TrustedProxyPolicy? trustedProxyPolicy = null,
-        RequestHeaderExpansionContext? headerExpansionContext = null)
+        RequestHeaderExpansionContext? headerExpansionContext = null,
+        ProxyRetryConfiguration? retryPolicy = null,
+        Guid? routeId = null)
     {
         if (serviceId == Guid.Empty)
         {
@@ -326,18 +331,28 @@ public sealed class MicroserviceProxyRequest
             throw new ArgumentException("ForwardedPath must be an absolute path without a query string.", nameof(forwardedPath));
         }
 
+        if (routeId == Guid.Empty)
+        {
+            throw new ArgumentException("A route identifier cannot be empty.", nameof(routeId));
+        }
+
         ServiceId = serviceId;
+        RouteId = routeId;
         ForwardedPath = forwardedPath;
         RequestHeaderRewrites = CopyRewrites(requestHeaderRewrites, nameof(requestHeaderRewrites));
         ResponseHeaderRewrites = CopyRewrites(responseHeaderRewrites, nameof(responseHeaderRewrites));
         TrustedProxyPolicy = trustedProxyPolicy ?? TrustedProxyPolicy.Empty;
         TimeoutPolicy = timeoutPolicy ?? throw new ArgumentNullException(nameof(timeoutPolicy));
+        RetryPolicy = retryPolicy ?? ProxyRetryConfiguration.Default;
         HeaderExpansionContext = headerExpansionContext
             ?? new RequestHeaderExpansionContext(string.Empty, string.Empty, string.Empty, string.Empty);
     }
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+
+    /// <summary>Gets the stable route identifier used for safe telemetry.</summary>
+    public Guid? RouteId { get; }
 
     /// <summary>Gets the path to use while YARP builds the destination URI.</summary>
     public string ForwardedPath { get; }
@@ -353,6 +368,9 @@ public sealed class MicroserviceProxyRequest
 
     /// <summary>Gets the required immutable timeout policy.</summary>
     public MicroserviceTimeoutPolicy TimeoutPolicy { get; }
+
+    /// <summary>Gets the immutable retry policy.</summary>
+    public ProxyRetryConfiguration RetryPolicy { get; }
 
     /// <summary>Gets the immutable request-local template expansion context.</summary>
     public RequestHeaderExpansionContext HeaderExpansionContext { get; }

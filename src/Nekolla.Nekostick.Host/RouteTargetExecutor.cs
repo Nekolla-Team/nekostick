@@ -24,7 +24,13 @@ internal enum RouteTargetExecutionResult
     /// <summary>The request could not be executed safely and maps to a generic 400.</summary>
     BadRequest,
 
-    /// <summary>The selected static target was not found.</summary>
+    /// <summary>The selected static target was not found and is a fallback candidate.</summary>
+    StaticNotFound,
+
+    /// <summary>The selected static directory had no configured index and is a fallback candidate.</summary>
+    StaticIndexMissing,
+
+    /// <summary>A generic selected target 404 outcome.</summary>
     NotFound,
 
     /// <summary>The selected target was rejected by an access boundary.</summary>

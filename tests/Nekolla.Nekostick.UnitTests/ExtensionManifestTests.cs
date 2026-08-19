@@ -40,6 +40,117 @@ public sealed class ExtensionManifestTests
             jsonResult.Manifest.Dependencies[0].VersionRange.Expression,
             yamlResult.Manifest.Dependencies[0].VersionRange.Expression);
     }
+    [Fact]
+    public void OptionalContractDeclarationsDefaultAndStrictlyNormalizeAcrossJsonAndYaml()
+    {
+        using var defaultJson = TestExtensionDirectory.CreateJson(ManifestJsonFor("valid"));
+        using var defaultYaml = TestExtensionDirectory.CreateYaml(ManifestYamlFor("valid"));
+        var jsonDefaults = ExtensionManifestDiscovery.Discover(defaultJson.RootPath);
+        var yamlDefaults = ExtensionManifestDiscovery.Discover(defaultYaml.RootPath);
+
+        Assert.Empty(jsonDefaults.Manifest!.Exports);
+        Assert.Empty(jsonDefaults.Manifest.Imports);
+        Assert.Empty(yamlDefaults.Manifest!.Exports);
+        Assert.Empty(yamlDefaults.Manifest.Imports);
+
+        const string assembly = "Shared.Contracts, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string type = "Shared.Contracts.ILogger";
+        var json = ManifestJson(extra:
+            ",\n  \"exports\": [{\"contractId\": \"fixture.logger\", \"version\": \"1.0.0\", \"assemblyIdentity\": \"" +
+            assembly + "\", \"typeIdentity\": \"" + type + "\"}],\n" +
+            "  \"imports\": [{\"contractId\": \"fixture.logger\", \"versionRange\": \">=1.0.0\", \"assemblyIdentity\": \"" +
+            assembly + "\", \"typeIdentity\": \"" + type + "\"}]");
+        var yaml = ManifestYamlFor("valid") +
+            "exports:\n  - contractId: fixture.logger\n    version: 1.0.0\n    assemblyIdentity: \"" + assembly + "\"\n    typeIdentity: " + type + "\n" +
+            "imports:\n  - contractId: fixture.logger\n    versionRange: \">=1.0.0\"\n    assemblyIdentity: \"" + assembly + "\"\n    typeIdentity: " + type + "\n";
+        using var contractJson = TestExtensionDirectory.CreateJson(json);
+        using var contractYaml = TestExtensionDirectory.CreateYaml(yaml);
+        var jsonContracts = ExtensionManifestDiscovery.Discover(contractJson.RootPath);
+        var yamlContracts = ExtensionManifestDiscovery.Discover(contractYaml.RootPath);
+
+        Assert.True(jsonContracts.Succeeded, jsonContracts.FailureCode.ToString());
+        Assert.True(yamlContracts.Succeeded, yamlContracts.FailureCode.ToString());
+        Assert.Equal("fixture.logger", jsonContracts.Manifest!.Exports.Single().ContractId);
+        Assert.Equal(">=1.0.0", yamlContracts.Manifest!.Imports.Single().VersionRange.Expression);
+
+        using var malformed = TestExtensionDirectory.CreateJson(
+            ManifestJson(extra: ",\n  \"exports\": {\"contractId\": \"fixture.logger\"}"));
+        var malformedResult = ExtensionManifestDiscovery.Discover(malformed.RootPath);
+        Assert.False(malformedResult.Succeeded);
+        Assert.Equal(ExtensionFailureCode.ManifestSchemaInvalid, malformedResult.FailureCode);
+    }
+    [Fact]
+    public void ContractGraphRejectsMissingVersionAndIdentityProviders()
+    {
+        const string assembly = "Shared.Contracts, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string type = "Shared.Contracts.ILogger";
+        var assemblyJson = JsonSerializer.Serialize(assembly);
+        var typeJson = JsonSerializer.Serialize(type);
+        var export = $",\n  \"exports\": [{{\"contractId\": \"shared.logger\", \"version\": \"1.0.0\", \"assemblyIdentity\": {assemblyJson}, \"typeIdentity\": {typeJson}}}]";
+        var import = $",\n  \"imports\": [{{\"contractId\": \"shared.logger\", \"versionRange\": \">=1.0.0\", \"assemblyIdentity\": {assemblyJson}, \"typeIdentity\": {typeJson}}}]";
+        using var providerDirectory = TestExtensionDirectory.CreateJson(ManifestJson(id: "\"provider.extension\"", extra: export));
+        using var consumerDirectory = TestExtensionDirectory.CreateJson(ManifestJson(id: "\"consumer.extension\"", extra: import));
+        var providerResult = ExtensionManifestDiscovery.Discover(providerDirectory.RootPath);
+        var consumerResult = ExtensionManifestDiscovery.Discover(consumerDirectory.RootPath);
+        Assert.True(providerResult.Succeeded, providerResult.FailureCode.ToString());
+        Assert.True(consumerResult.Succeeded, consumerResult.FailureCode.ToString());
+        var provider = providerResult.Manifest!;
+        var consumer = consumerResult.Manifest!;
+
+        var valid = ExtensionManifestGraph.ValidateAndOrder(
+            [consumer, provider],
+            new SemVersion(1, 0, 0));
+        Assert.True(valid.Succeeded, valid.FailureCode.ToString());
+        Assert.Equal(["provider.extension", "consumer.extension"], valid.OrderedManifests.Select(item => item.Id));
+
+        var missing = ExtensionManifestGraph.ValidateAndOrder([consumer], new SemVersion(1, 0, 0));
+        Assert.Equal(ExtensionFailureCode.MissingContractProvider, missing.FailureCode);
+
+        using var incompatibleDirectory = TestExtensionDirectory.CreateJson(
+            ManifestJson(id: "\"incompatible.extension\"", extra: import.Replace(">=1.0.0", ">=2.0.0", StringComparison.Ordinal)));
+        var incompatibleResult = ExtensionManifestDiscovery.Discover(incompatibleDirectory.RootPath);
+        Assert.True(incompatibleResult.Succeeded, incompatibleResult.FailureCode.ToString());
+        var incompatible = incompatibleResult.Manifest!;
+        Assert.Equal(
+            ExtensionFailureCode.ContractVersionIncompatible,
+            ExtensionManifestGraph.ValidateAndOrder([provider, incompatible], new SemVersion(1, 0, 0)).FailureCode);
+
+        using var identityDirectory = TestExtensionDirectory.CreateJson(
+            ManifestJson(id: "\"identity.extension\"", extra: import.Replace(type, "Shared.Contracts.IOther", StringComparison.Ordinal)));
+        var identityResult = ExtensionManifestDiscovery.Discover(identityDirectory.RootPath);
+        Assert.True(identityResult.Succeeded, identityResult.FailureCode.ToString());
+        var identity = identityResult.Manifest!;
+        Assert.Equal(
+            ExtensionFailureCode.ContractIdentityMismatch,
+            ExtensionManifestGraph.ValidateAndOrder([provider, identity], new SemVersion(1, 0, 0)).FailureCode);
+    }
+
+    [Fact]
+    public void ContractGraphRejectsContractInducedCycle()
+    {
+        const string assembly = "Shared.Contracts, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null";
+        const string type = "Shared.Contracts.ILogger";
+        var assemblyJson = JsonSerializer.Serialize(assembly);
+        var typeJson = JsonSerializer.Serialize(type);
+        var alphaExtra = $",\n  \"exports\": [{{\"contractId\": \"alpha.contract\", \"version\": \"1.0.0\", \"assemblyIdentity\": {assemblyJson}, \"typeIdentity\": {typeJson}}}],\n  \"imports\": [{{\"contractId\": \"beta.contract\", \"versionRange\": \">=1.0.0\", \"assemblyIdentity\": {assemblyJson}, \"typeIdentity\": {typeJson}}}]";
+        var betaExtra = $",\n  \"exports\": [{{\"contractId\": \"beta.contract\", \"version\": \"1.0.0\", \"assemblyIdentity\": {assemblyJson}, \"typeIdentity\": {typeJson}}}],\n  \"imports\": [{{\"contractId\": \"alpha.contract\", \"versionRange\": \">=1.0.0\", \"assemblyIdentity\": {assemblyJson}, \"typeIdentity\": {typeJson}}}]";
+        using var alphaDirectory = TestExtensionDirectory.CreateJson(
+            ManifestJson(id: "\"alpha.extension\"", extra: alphaExtra));
+        using var betaDirectory = TestExtensionDirectory.CreateJson(
+            ManifestJson(id: "\"beta.extension\"", extra: betaExtra));
+
+        var alphaResult = ExtensionManifestDiscovery.Discover(alphaDirectory.RootPath);
+        var betaResult = ExtensionManifestDiscovery.Discover(betaDirectory.RootPath);
+        Assert.True(alphaResult.Succeeded, alphaResult.FailureCode.ToString());
+        Assert.True(betaResult.Succeeded, betaResult.FailureCode.ToString());
+
+        var result = ExtensionManifestGraph.ValidateAndOrder(
+            [alphaResult.Manifest!, betaResult.Manifest!],
+            new SemVersion(1, 0, 0));
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(ExtensionFailureCode.DependencyCycle, result.FailureCode);
+    }
 
     [Theory]
     [InlineData("unknown-field", ExtensionFailureCode.UnknownManifestField)]
@@ -197,13 +308,13 @@ public sealed class ExtensionManifestTests
             contractsReference.GetPublicKeyToken());
         Assert.True(typeof(IExtensionEntrypoint).IsAssignableFrom(typeof(FixtureEntrypoint)));
         Assert.Equal(
-            ["ApiVersion", "Configuration", "Events", "Logger", "Status", "Tasks"],
+            ["ApiVersion", "Configuration", "Contracts", "Events", "Logger", "Status", "Tasks"],
             typeof(IExtensionHostBridge).GetProperties()
                 .Select(property => property.Name)
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToArray());
         Assert.Equal(
-            ["Host", "Registration", "Reloading"],
+            ["Contracts", "Host", "Registration", "Reloading"],
             typeof(IExtensionStartContext).GetProperties()
                 .Select(property => property.Name)
                 .OrderBy(name => name, StringComparer.Ordinal)

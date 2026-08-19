@@ -1,8 +1,12 @@
 using System.Collections.Immutable;
+using System.Text;
+using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Host;
 using Nekolla.Nekostick.Supervision;
+using Nekolla.Nekostick.Tests.Fixtures.Extension;
 using Xunit;
 
 namespace Nekolla.Nekostick.UnitTests;
@@ -80,6 +84,60 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.Equal(HostServiceReadinessStatus.Ready, result.Status);
         Assert.True(publisher.Current.ContainsKey(service.Id));
     }
+    [Fact]
+    public async Task ServiceAndEndpointTransitionsReachServingExtensionCoreEventQueue()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifestResult = ExtensionManifestDiscovery.Discover(fixture.RootPath);
+        Assert.True(manifestResult.Succeeded, manifestResult.FailureCode.ToString());
+        var manifest = manifestResult.Manifest!;
+        await using var extensions = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var settings = new ExtensionSettingsConfiguration(
+            manifest.Id,
+            1,
+            JsonSerializer.Serialize(new { publishCoreEvents = true, eventCount = 5 }),
+            1);
+        Assert.True((await extensions.LoadAsync(
+            manifest,
+            settings,
+            TestContext.Current.CancellationToken)).Succeeded);
+
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(snapshot));
+        var runtimeState = CreateRuntimeState(snapshot, holder);
+        var endpointPublisher = new HostServiceEndpointSnapshotPublisher(extensions);
+        var manager = new HostServiceLifecycleManager(
+            new RecordingExecutor(),
+            new RecordingProbe(),
+            new RecordingLeaseStore(),
+            holder,
+            endpointPublisher,
+            runtimeState,
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            extensions);
+
+        var ready = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Ready, ready.Status);
+        await manager.StopAsync(CancellationToken.None);
+
+        var result = await extensions.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/lifecycle-events"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, result.State);
+        var body = Encoding.UTF8.GetString(result.Response!.Body.AsSpan());
+        Assert.Contains("\"state\":\"Loaded\"", body, StringComparison.Ordinal);
+        Assert.Contains($"\"serviceId\":\"{service.Id}\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"ready\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"stopped\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"withdrawn\"", body, StringComparison.Ordinal);
+    }
+
 
     [Fact]
     public async Task FailedRenewalWithdrawsEndpointAndDisablesNewServices()

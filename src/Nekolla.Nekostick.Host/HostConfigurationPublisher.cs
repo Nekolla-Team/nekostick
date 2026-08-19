@@ -57,7 +57,13 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
                 previousGeneration is not null &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
             {
-                return _snapshotHolder.TryReplace(snapshot, previousGeneration);
+                if (!_snapshotHolder.TryReplace(snapshot, previousGeneration))
+                {
+                    return false;
+                }
+
+                PublishSnapshotEvents(snapshot, previousSnapshot!.Configuration);
+                return true;
             }
 
             var desired = desiredSet.Descriptors;
@@ -103,6 +109,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
+            PublishSnapshotEvents(snapshot, previousSnapshot?.Configuration);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -125,9 +132,16 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
         ExtensionDispatchGeneration? previousGeneration,
         CancellationToken cancellationToken)
     {
+        var previousSnapshot = _snapshotHolder.Current;
         if (previousGeneration is not null)
         {
-            return _snapshotHolder.TryReplace(snapshot, previousGeneration);
+            if (!_snapshotHolder.TryReplace(snapshot, previousGeneration))
+            {
+                return false;
+            }
+
+            PublishSnapshotEvents(snapshot, previousSnapshot);
+            return true;
         }
 
         var emptyResult = await _runtimeManager
@@ -147,7 +161,76 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
             return false;
         }
 
-        return await emptyPreparation.CompletePublicationAsync().ConfigureAwait(false);
+        if (!await emptyPreparation.CompletePublicationAsync().ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        PublishSnapshotEvents(snapshot, previousSnapshot);
+        return true;
+    }
+
+    private void PublishSnapshotEvents(
+        HostConfigurationSnapshot snapshot,
+        HostConfigurationSnapshot? previous)
+    {
+        HostCoreEventPublisher.Publish(
+            _runtimeManager,
+            ExtensionCoreEventKind.ConfigurationSnapshotApplied,
+            new
+            {
+                version = snapshot.Version,
+                state = "applied"
+            });
+
+        var previousRoutes = previous?.Routes
+            .ToDictionary(static route => route.Id);
+        var currentIds = new HashSet<Guid>();
+        foreach (var route in snapshot.Routes)
+        {
+            currentIds.Add(route.Id);
+            var state = previousRoutes is null ||
+                !previousRoutes.TryGetValue(route.Id, out var prior)
+                ? "added"
+                : route.Version == prior.Version ? null : "changed";
+            if (state is null)
+            {
+                continue;
+            }
+
+            HostCoreEventPublisher.Publish(
+                _runtimeManager,
+                ExtensionCoreEventKind.RouteChanged,
+                new
+                {
+                    routeId = route.Id,
+                    version = snapshot.Version,
+                    state
+                });
+        }
+
+        if (previousRoutes is null)
+        {
+            return;
+        }
+
+        foreach (var routeId in previousRoutes.Keys)
+        {
+            if (currentIds.Contains(routeId))
+            {
+                continue;
+            }
+
+            HostCoreEventPublisher.Publish(
+                _runtimeManager,
+                ExtensionCoreEventKind.RouteChanged,
+                new
+                {
+                    routeId,
+                    version = snapshot.Version,
+                    state = "removed"
+                });
+        }
     }
 
     private readonly record struct DesiredExtensionSet(

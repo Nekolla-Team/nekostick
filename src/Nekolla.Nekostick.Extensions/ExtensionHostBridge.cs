@@ -9,11 +9,13 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
         ExtensionSettingsConfiguration? settings,
         ExtensionTaskTracker tasks,
         ExtensionEventQueue events,
+        ExtensionContractRegistry contracts,
         Action<ExtensionStatus> reportStatus,
         Action<ExtensionLogLevel, string> reportLog)
     {
         ApiVersion = apiVersion;
         Configuration = new ExtensionSettingsReader(settings);
+        Contracts = contracts;
         Tasks = tasks;
         Events = events;
         Status = new ExtensionStatusSink(reportStatus);
@@ -27,6 +29,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
     public IExtensionTaskScheduler Tasks { get; }
 
     public IExtensionEventPublisher Events { get; }
+    public IExtensionContractRegistry Contracts { get; }
 
     public IExtensionStatusSink Status { get; }
 
@@ -38,16 +41,19 @@ internal sealed class ExtensionStartContext : IExtensionStartContext
     internal ExtensionStartContext(
         bool reloading,
         IExtensionHostBridge host,
+        ExtensionContractRegistry contracts,
         ExtensionHandlerRegistry registration)
     {
         Reloading = reloading;
         Host = host;
+        Contracts = contracts;
         Registration = registration;
     }
 
     public bool Reloading { get; }
 
     public IExtensionHostBridge Host { get; }
+    public IExtensionContractRegistry Contracts { get; }
 
     public IExtensionRegistration Registration { get; }
 }

@@ -8,10 +8,12 @@ public static class ExtensionManifestGraph
     /// <summary>Validates an explicitly supplied manifest set.</summary>
     /// <param name="manifests">The manifests already discovered by the caller.</param>
     /// <param name="hostApiVersion">The host API version used for compatibility checks.</param>
+    /// <param name="contractCatalog">The immutable host-owned shared contract catalog.</param>
     /// <returns>A graph result whose layers are ordinal ID sorted.</returns>
     public static ExtensionGraphResult ValidateAndOrder(
         IEnumerable<ExtensionManifest>? manifests,
-        SemVersion hostApiVersion)
+        SemVersion hostApiVersion,
+        ExtensionContractCatalog? contractCatalog = null)
     {
         if (manifests is null)
         {
@@ -46,14 +48,22 @@ public static class ExtensionManifestGraph
                 return ExtensionGraphResult.Failure(ExtensionFailureCode.HostApiIncompatible);
             }
         }
+        var contractProviders = new Dictionary<string, string>(StringComparer.Ordinal);
+        var contractFailure = ValidateContracts(items, contractCatalog, contractProviders);
+        if (contractFailure != ExtensionFailureCode.None)
+        {
+            return ExtensionGraphResult.Failure(contractFailure);
+        }
 
         var indegrees = new Dictionary<string, int>(StringComparer.Ordinal);
         var dependents = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var manifest in items)
         {
+            var edgeTargets = new HashSet<string>(StringComparer.Ordinal);
+            indegrees[manifest.Id] = 0;
+
             var dependencies = manifest.Dependencies;
             var uniqueDependencies = new HashSet<string>(StringComparer.Ordinal);
-            indegrees[manifest.Id] = dependencies.Length;
             foreach (var dependency in dependencies)
             {
                 if (!uniqueDependencies.Add(dependency.Id))
@@ -71,10 +81,35 @@ public static class ExtensionManifestGraph
                     return ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyVersionIncompatible);
                 }
 
+                if (!edgeTargets.Add(dependency.Id))
+                {
+                    continue;
+                }
+
+                indegrees[manifest.Id]++;
                 if (!dependents.TryGetValue(dependency.Id, out var dependentList))
                 {
                     dependentList = new List<string>();
                     dependents.Add(dependency.Id, dependentList);
+                }
+
+                dependentList.Add(manifest.Id);
+            }
+
+            foreach (var import in manifest.Imports)
+            {
+                var providerId = contractProviders[import.ContractId];
+                if (string.Equals(providerId, manifest.Id, StringComparison.Ordinal) ||
+                    !edgeTargets.Add(providerId))
+                {
+                    continue;
+                }
+
+                indegrees[manifest.Id]++;
+                if (!dependents.TryGetValue(providerId, out var dependentList))
+                {
+                    dependentList = new List<string>();
+                    dependents.Add(providerId, dependentList);
                 }
 
                 dependentList.Add(manifest.Id);
@@ -121,5 +156,75 @@ public static class ExtensionManifestGraph
         return ordered.Count == items.Length
             ? ExtensionGraphResult.Success(ordered.ToImmutable())
             : ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyCycle);
+    }
+    private static ExtensionFailureCode ValidateContracts(
+        ImmutableArray<ExtensionManifest> manifests,
+        ExtensionContractCatalog? contractCatalog,
+        Dictionary<string, string> providerIds)
+    {
+        var providers = new Dictionary<string, ExtensionContractExport>(StringComparer.Ordinal);
+        foreach (var manifest in manifests)
+        {
+            var exportIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var export in manifest.Exports)
+            {
+                if (!exportIds.Add(export.ContractId) || !providers.TryAdd(export.ContractId, export))
+                {
+                    return ExtensionFailureCode.DuplicateContractDeclaration;
+                }
+                providerIds.Add(export.ContractId, manifest.Id);
+
+                if (contractCatalog is not null &&
+                    contractCatalog.ValidateDeclaration(
+                        manifest.ExtensionDirectory,
+                        export.AssemblyIdentity,
+                        export.TypeIdentity) != ExtensionFailureCode.None)
+                {
+                    return ExtensionFailureCode.ContractCatalogUnavailable;
+                }
+            }
+
+            var importIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var import in manifest.Imports)
+            {
+                if (!importIds.Add(import.ContractId))
+                {
+                    return ExtensionFailureCode.DuplicateContractDeclaration;
+                }
+
+                if (contractCatalog is not null &&
+                    contractCatalog.ValidateDeclaration(
+                        manifest.ExtensionDirectory,
+                        import.AssemblyIdentity,
+                        import.TypeIdentity) != ExtensionFailureCode.None)
+                {
+                    return ExtensionFailureCode.ContractCatalogUnavailable;
+                }
+            }
+        }
+
+        foreach (var manifest in manifests)
+        {
+            foreach (var import in manifest.Imports)
+            {
+                if (!providers.TryGetValue(import.ContractId, out var provider))
+                {
+                    return ExtensionFailureCode.MissingContractProvider;
+                }
+
+                if (!import.VersionRange.IsSatisfiedBy(provider.Version))
+                {
+                    return ExtensionFailureCode.ContractVersionIncompatible;
+                }
+
+                if (!string.Equals(import.AssemblyIdentity, provider.AssemblyIdentity, StringComparison.Ordinal) ||
+                    !string.Equals(import.TypeIdentity, provider.TypeIdentity, StringComparison.Ordinal))
+                {
+                    return ExtensionFailureCode.ContractIdentityMismatch;
+                }
+            }
+        }
+
+        return ExtensionFailureCode.None;
     }
 }

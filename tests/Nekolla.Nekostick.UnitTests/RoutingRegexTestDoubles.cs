@@ -21,6 +21,25 @@ internal sealed class DeterministicRegexEvaluator : IRouteRegexEvaluator
         _outcomes.TryGetValue(routeId, out var outcome)
             ? outcome
             : _productionDefault(routeId, regex, normalizedPath);
+    public RouteRegexEvaluation EvaluateMatch(Guid routeId, Regex regex, string normalizedPath)
+    {
+        if (_outcomes.TryGetValue(routeId, out var outcome))
+        {
+            return RouteRegexEvaluation.FromOutcome(outcome);
+        }
+
+        try
+        {
+            var match = regex.Match(normalizedPath);
+            return match.Success
+                ? RouteRegexEvaluation.Matched(match)
+                : RouteRegexEvaluation.NotMatched();
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return RouteRegexEvaluation.TimedOut();
+        }
+    }
 
     private static RouteRegexEvaluationOutcome EvaluateWithProductionDefault(
         Guid _,

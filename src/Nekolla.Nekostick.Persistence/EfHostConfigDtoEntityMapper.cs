@@ -66,7 +66,22 @@ internal static class EfHostConfigDtoEntityMapper
                 connectTimeout: TimeSpan.FromMilliseconds(value.ConnectTimeoutMilliseconds),
                 httpActivityTimeout: TimeSpan.FromMilliseconds(value.HttpActivityTimeoutMilliseconds),
                 httpTotalTimeout: TimeSpan.FromMilliseconds(value.HttpTotalTimeoutMilliseconds),
-                webSocketIdleTimeout: TimeSpan.FromMilliseconds(value.WebSocketIdleTimeoutMilliseconds)));
+                webSocketIdleTimeout: TimeSpan.FromMilliseconds(value.WebSocketIdleTimeoutMilliseconds)),
+            value.MaxRequestHeaderBytes,
+            TimeSpan.FromMilliseconds(value.RequestReadTimeoutMilliseconds),
+            RatePolicyPersistenceMapper.ToContract(
+                value.ClientIpRateTokenLimit,
+                value.ClientIpRateTokensPerPeriod,
+                value.ClientIpRateReplenishmentPeriodMilliseconds,
+                value.ClientIpRateQueueLimit,
+                value.ClientIpRateRejectionBehavior,
+                value.ClientIpRateRetryAfterBehavior),
+            ProxyRetryPersistenceMapper.ToContract(
+                value.ProxyMaxRetries,
+                value.ProxyInitialRetryBackoffMilliseconds,
+                value.ProxyMaximumRetryBackoffMilliseconds,
+                value.ProxyRetryOnConnectionFailure,
+                value.ProxyRetryOnUpstreamDisconnect));
 
     private static RouteConfiguration MapRoute(Route value)
     {
@@ -97,7 +112,26 @@ internal static class EfHostConfigDtoEntityMapper
             HostConfigurationSemanticValidator.NormalizeJson(value.MetadataJson, JsonValueKind.Object),
             value.CreatedAt,
             value.UpdatedAt,
-            value.Version);
+            value.Version,
+            RatePolicyPersistenceMapper.ToContract(
+                value.ClientIpRateTokenLimit,
+                value.ClientIpRateTokensPerPeriod,
+                value.ClientIpRateReplenishmentPeriodMilliseconds,
+                value.ClientIpRateQueueLimit,
+                value.ClientIpRateRejectionBehavior,
+                value.ClientIpRateRetryAfterBehavior),
+            value.MaxRequestBodyBytes,
+            value.MaxRequestHeaderBytes,
+            value.MaxConcurrentRequests,
+            value.RequestReadTimeoutMilliseconds is { } requestReadTimeoutMilliseconds
+                ? TimeSpan.FromMilliseconds(requestReadTimeoutMilliseconds)
+                : null,
+            ProxyRetryPersistenceMapper.ToNullableContract(
+                value.ProxyMaxRetries,
+                value.ProxyInitialRetryBackoffMilliseconds,
+                value.ProxyMaximumRetryBackoffMilliseconds,
+                value.ProxyRetryOnConnectionFailure,
+                value.ProxyRetryOnUpstreamDisconnect));
     }
 
     private static void ValidatePersistedTarget(Route value)

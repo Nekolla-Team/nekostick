@@ -119,6 +119,49 @@ public sealed class ForwardedPathContractTests
     }
 
     [Fact]
+    public void ReplaceExpandsPathMatchAndAllRegexCaptureGroups()
+    {
+        var routeId = RoutingTestData.Id(410);
+        var snapshot = RoutingTestData.Build(
+            RoutingTestData.CreateRoute(
+                routeId,
+                RouteMatcherType.Regex,
+                "(/items)/(alpha)",
+                forwarding: new ForwardingConfiguration(
+                    ForwardingMode.Replace,
+                    "/forward/{path}/{match}/$0/$1/$2")));
+
+        var result = snapshot.Match(
+            new RouteMatchInput("/items/alpha", "example.test", "GET"));
+
+        Assert.Equal(RouteMatchStatus.Matched, result.Status);
+        Assert.Equal(routeId, result.Match!.RouteId);
+        Assert.Equal(
+            "/forward//items/alpha//items/alpha//items/alpha//items/alpha",
+            result.Match.ForwardedPath);
+    }
+
+    [Fact]
+    public void ReplaceEncodesGeneratedPathCharactersWhilePreservingExistingEscapes()
+    {
+        var routeId = RoutingTestData.Id(411);
+        var snapshot = RoutingTestData.Build(
+            RoutingTestData.CreateRoute(
+                routeId,
+                RouteMatcherType.Regex,
+                "/items/hello world/%2F",
+                forwarding: new ForwardingConfiguration(
+                    ForwardingMode.Replace,
+                    "/safe/{path}")));
+
+        var result = snapshot.Match(
+            new RouteMatchInput("/items/hello world/%2F", "example.test", "GET"));
+
+        Assert.Equal(RouteMatchStatus.Matched, result.Status);
+        Assert.Equal("/safe//items/hello%20world/%2F", result.Match!.ForwardedPath);
+    }
+
+    [Fact]
     public void InvalidReplacementTemplatesAreRejectedDuringSnapshotBuild()
     {
         var missingGroup = RoutingTestData.CreateRoute(
@@ -142,12 +185,31 @@ public sealed class ForwardedPathContractTests
             "/query-template",
             forwarding: new ForwardingConfiguration(ForwardingMode.Replace, "/out?next"));
 
+        var nonAbsoluteCapture = RoutingTestData.CreateRoute(
+            RoutingTestData.Id(410),
+            RouteMatcherType.Regex,
+            "(/capture-output)",
+            forwarding: new ForwardingConfiguration(ForwardingMode.Replace, "$1"));
+        var controlTemplate = RoutingTestData.CreateRoute(
+            RoutingTestData.Id(411),
+            RouteMatcherType.Exact,
+            "/control-template",
+            forwarding: new ForwardingConfiguration(ForwardingMode.Replace, "/out/\r\n"));
+
         var result = RouteMatchSnapshotBuilder.Build(
-            new[] { missingGroup, nonRegexGroup, unknownToken, queryTemplate });
+            new[]
+            {
+                missingGroup,
+                nonRegexGroup,
+                unknownToken,
+                queryTemplate,
+                nonAbsoluteCapture,
+                controlTemplate
+            });
 
         Assert.False(result.IsSuccess);
         Assert.Null(result.Snapshot);
-        Assert.Equal(4, result.Errors.Length);
+        Assert.Equal(6, result.Errors.Length);
         Assert.All(result.Errors, error =>
             Assert.Equal(RouteConfigurationErrorCode.InvalidReplacementTemplate, error.Code));
     }

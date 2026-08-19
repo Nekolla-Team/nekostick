@@ -253,6 +253,51 @@ public sealed class ExtensionRuntimeTests
     }
 
     [Fact]
+    public async Task FailureThresholdPublishesFailedStateToOtherServingExtension()
+    {
+        using var observerFixture = TestExtensionDirectory.CreateJson(
+            RuntimeManifestJson(id: "fixture.extension.observer"));
+        using var failingFixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var observerManifest = Discover(observerFixture.RootPath);
+        var failingManifest = Discover(failingFixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        Assert.True((await manager.LoadAsync(
+            observerManifest,
+            Settings(
+                observerManifest.Id,
+                handlerId: "observer.handler",
+                publishCoreEvents: true,
+                eventCount: 3),
+            TestContext.Current.CancellationToken)).Succeeded);
+        Assert.True((await manager.LoadAsync(
+            failingManifest,
+            Settings(
+                failingManifest.Id,
+                handlerId: "failing.handler",
+                handlerFails: true),
+            TestContext.Current.CancellationToken)).Succeeded);
+
+        for (var failure = 0; failure < 10; failure++)
+        {
+            var result = await manager.HandleAsync(
+                "failing.handler",
+                new ExtensionHandlerRequest("GET", "/failure"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(ExtensionInvocationState.Failed, result.State);
+        }
+
+        var observerResult = await manager.HandleAsync(
+            "observer.handler",
+            new ExtensionHandlerRequest("GET", "/events"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, observerResult.State);
+        var body = Body(observerResult);
+        Assert.Contains("\"state\":\"Failed\"", body, StringComparison.Ordinal);
+        Assert.Contains($"\"extensionId\":\"{failingManifest.Id}\"", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task BoundedTaskStopCancelsTheTrackedFixtureTask()
     {
         using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
@@ -291,7 +336,7 @@ public sealed class ExtensionRuntimeTests
     }
 
     [Fact]
-    public async Task BoundedEventQueueDropsExactlyTheNewestEventAtCapacity1024()
+    public async Task BoundedEventQueueTracksNewestDropsIncludingLifecycleEvent()
     {
         using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         var manifest = Discover(fixture.RootPath);
@@ -303,8 +348,113 @@ public sealed class ExtensionRuntimeTests
             TestContext.Current.CancellationToken)).Succeeded);
 
         var status = manager.GetStatus(manifest.Id)!;
-        Assert.Equal(1, status.DroppedEvents);
+        Assert.Equal(2, status.DroppedEvents);
+        Assert.Equal(ExtensionFailureCode.EventQueueFull, status.LastFailure);
         Assert.Equal(0, status.ActiveRequests);
+    }
+
+    [Fact]
+    public async Task StartupTypedContractExchangeSucceedsAndUnloadsWithTheGeneration()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(TypedContractManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var load = await manager.LoadAsync(
+            manifest,
+            Settings(manifest.Id, typedContractExchange: true),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(load.Succeeded, load.FailureCode.ToString());
+        Assert.True((await manager.UnloadAsync(manifest.Id, TestContext.Current.CancellationToken)).Succeeded);
+    }
+
+    [Fact]
+    public async Task CoreEventsFanOutInOrderOnlyWhileTheExtensionIsServing()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        Assert.True((await manager.LoadAsync(
+            manifest,
+            Settings(manifest.Id, publishCoreEvents: true, eventCount: 1),
+            TestContext.Current.CancellationToken)).Succeeded);
+
+        var kinds = Enum.GetValues<ExtensionCoreEventKind>();
+        foreach (var kind in kinds)
+        {
+            Assert.Equal(
+                1,
+                manager.PublishCoreEvent(new ExtensionCoreEvent(kind, 1, $"payload-{kind}")));
+        }
+
+        var result = await manager.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/core-events"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, result.State);
+        var loadedPayload = JsonSerializer.Serialize(new
+        {
+            extensionId = manifest.Id,
+            version = manifest.Version.ToString(),
+            state = ExtensionLoadState.Loaded.ToString()
+        });
+        Assert.Equal(
+            string.Join(',', new[] { loadedPayload }.Concat(kinds.Select(kind => $"payload-{kind}"))),
+            Body(result));
+
+        Assert.True((await manager.UnloadAsync(manifest.Id, TestContext.Current.CancellationToken)).Succeeded);
+        Assert.Equal(
+            0,
+            manager.PublishCoreEvent(new ExtensionCoreEvent(
+                ExtensionCoreEventKind.ExtensionStateChanged,
+                1,
+                "after-unload")));
+    }
+
+
+    [Fact]
+    public async Task ReloadPublishesExtensionStateEventsThroughServingCandidateQueue()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        Assert.True((await manager.LoadAsync(
+            manifest,
+            Settings(manifest.Id, label: "old", publishCoreEvents: true, eventCount: 1),
+            TestContext.Current.CancellationToken)).Succeeded);
+
+        var replacement = await manager.ReloadAsync(
+            manifest,
+            Settings(manifest.Id, label: "replacement", publishCoreEvents: true, eventCount: 1),
+            TestContext.Current.CancellationToken);
+        Assert.True(replacement.Succeeded, replacement.FailureCode.ToString());
+
+        var result = await manager.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/reload-events"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, result.State);
+        var body = Body(result);
+        Assert.Contains("\"state\":\"Loaded\"", body, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"Stopped\"", body, StringComparison.Ordinal);
+    }
+    [Fact]
+    public void LoaderRejectsContractCatalogEntriesInsideExtensionRoots()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(TypedContractManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var contractsAssembly = typeof(IExtensionLogger).Assembly;
+        var catalog = new ExtensionContractCatalog(
+            [new ExtensionContractCatalogEntry(
+                contractsAssembly.GetName().FullName!,
+                Path.Combine(fixture.RootPath, "Nekolla.Nekostick.Contracts.dll"))]);
+        var loader = new CollectibleExtensionLoader(new SemVersion(1, 0, 0), catalog);
+
+        var result = loader.Load(manifest);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(ExtensionFailureCode.ContractCatalogUnavailable, result.FailureCode);
     }
 
     [Fact]
@@ -343,17 +493,14 @@ public sealed class ExtensionRuntimeTests
         return loaded.Handle!.Unload();
     }
 
+    private static string Body(ExtensionInvocationResult result) =>
+        Encoding.UTF8.GetString(result.Response!.Body.AsSpan());
+
     private static ExtensionManifest Discover(string rootPath)
     {
         var result = ExtensionManifestDiscovery.Discover(rootPath);
         Assert.True(result.Succeeded, result.FailureCode.ToString());
         return result.Manifest!;
-    }
-
-    private static string Body(ExtensionInvocationResult result)
-    {
-        Assert.NotNull(result.Response);
-        return Encoding.UTF8.GetString(result.Response!.Body.ToArray());
     }
 
     private static ExtensionSettingsConfiguration Settings(
@@ -368,7 +515,10 @@ public sealed class ExtensionRuntimeTests
         string? duplicateOption = null,
         bool startTask = false,
         bool publishOrderedEvents = false,
-        bool publishBoundedEvents = false)
+        bool publishBoundedEvents = false,
+        bool publishCoreEvents = false,
+        bool typedContractExchange = false,
+        int eventCount = 3)
     {
         var json = JsonSerializer.Serialize(new
         {
@@ -384,9 +534,23 @@ public sealed class ExtensionRuntimeTests
             startTask,
             publishOrderedEvents,
             publishBoundedEvents,
-            eventCount = 3
+            publishCoreEvents,
+            typedContractExchange,
+            eventCount
         });
         return new ExtensionSettingsConfiguration(extensionId, 1, json, 0);
+    }
+
+    private static string TypedContractManifestJson()
+    {
+        var assemblyIdentity = JsonSerializer.Serialize(typeof(IExtensionLogger).Assembly.GetName().FullName);
+        var typeIdentity = JsonSerializer.Serialize(typeof(IExtensionLogger).FullName);
+        var baseManifest = RuntimeManifestJson();
+        return baseManifest[..^1] +
+            ",\n  \"exports\": [{\"contractId\": \"fixture.logger\", \"version\": \"1.0.0\", \"assemblyIdentity\": " +
+            assemblyIdentity + ", \"typeIdentity\": " + typeIdentity + "}],\n" +
+            "  \"imports\": [{\"contractId\": \"fixture.logger\", \"versionRange\": \">=1.0.0\", \"assemblyIdentity\": " +
+            assemblyIdentity + ", \"typeIdentity\": " + typeIdentity + "}]\n}";
     }
 
     private static string RuntimeManifestJson(

@@ -353,3 +353,340 @@ BEGIN
 END $EF$;
 COMMIT;
 
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816203250_AddServiceRuntime') THEN
+    CREATE TABLE nekostick.service_runtimes (
+        service_id uuid NOT NULL,
+        node_id character varying(128) NOT NULL,
+        lifecycle character varying(16) NOT NULL,
+        health character varying(16) NOT NULL,
+        restart_count integer NOT NULL,
+        created_at timestamptz NOT NULL,
+        updated_at timestamptz NOT NULL,
+        version bigint NOT NULL DEFAULT 1,
+        CONSTRAINT pk_service_runtimes PRIMARY KEY (node_id, service_id),
+        CONSTRAINT ck_service_runtimes_state CHECK (lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0),
+        CONSTRAINT fk_service_runtimes_services_service_id FOREIGN KEY (service_id) REFERENCES nekostick.services (id) ON DELETE RESTRICT
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816203250_AddServiceRuntime') THEN
+    CREATE INDEX ix_service_runtimes_service_id ON nekostick.service_runtimes (service_id);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260816203250_AddServiceRuntime') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260816203250_AddServiceRuntime', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings DROP CONSTRAINT ck_global_settings_limits;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD client_ip_rate_queue_limit integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD client_ip_rate_rejection_behavior character varying(16);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD client_ip_rate_replenishment_period_milliseconds integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD client_ip_rate_retry_after_behavior character varying(32);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD client_ip_rate_token_limit bigint;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD client_ip_rate_tokens_per_period bigint;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD client_ip_rate_queue_limit integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD client_ip_rate_rejection_behavior character varying(16);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD client_ip_rate_replenishment_period_milliseconds integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD client_ip_rate_retry_after_behavior character varying(32);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD client_ip_rate_token_limit bigint;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD client_ip_rate_tokens_per_period bigint;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD max_request_header_bytes bigint NOT NULL DEFAULT 0;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD request_read_timeout_milliseconds integer NOT NULL DEFAULT 0;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    UPDATE nekostick.global_settings SET client_ip_rate_queue_limit = NULL, client_ip_rate_rejection_behavior = NULL, client_ip_rate_replenishment_period_milliseconds = NULL, client_ip_rate_retry_after_behavior = NULL, client_ip_rate_token_limit = NULL, client_ip_rate_tokens_per_period = NULL, max_request_header_bytes = 32768, request_read_timeout_milliseconds = 30000
+    WHERE id = '018f0f00-0000-7000-8000-000000000002';
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.routes ADD CONSTRAINT ck_routes_client_ip_rate_policy CHECK ((client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod')));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_client_ip_rate_policy CHECK ((client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod')));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_limits CHECK (max_request_body_bytes > 0 AND max_request_header_bytes > 0 AND max_concurrent_requests > 0 AND configuration_poll_interval_seconds > 0 AND request_read_timeout_milliseconds BETWEEN 1 AND 86400000);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_max_request_header_bytes CHECK (max_request_header_bytes <= 32768);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818230804_AddRequestLimitsAndRatePolicies') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260818230804_AddRequestLimitsAndRatePolicies', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818234332_HardenRatePolicyChecks') THEN
+    ALTER TABLE nekostick.routes DROP CONSTRAINT ck_routes_client_ip_rate_policy;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818234332_HardenRatePolicyChecks') THEN
+    ALTER TABLE nekostick.global_settings DROP CONSTRAINT ck_global_settings_client_ip_rate_policy;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818234332_HardenRatePolicyChecks') THEN
+    ALTER TABLE nekostick.routes ADD CONSTRAINT ck_routes_client_ip_rate_policy CHECK ((client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod')));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818234332_HardenRatePolicyChecks') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_client_ip_rate_policy CHECK ((client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod')));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260818234332_HardenRatePolicyChecks') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260818234332_HardenRatePolicyChecks', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    ALTER TABLE nekostick.routes ADD max_concurrent_requests integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    ALTER TABLE nekostick.routes ADD max_request_body_bytes bigint;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    ALTER TABLE nekostick.routes ADD max_request_header_bytes bigint;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    ALTER TABLE nekostick.routes ADD request_read_timeout_milliseconds integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    ALTER TABLE nekostick.routes ADD CONSTRAINT ck_routes_resource_limits CHECK ((max_request_body_bytes IS NULL OR max_request_body_bytes BETWEEN 1 AND 31457280) AND (max_request_header_bytes IS NULL OR max_request_header_bytes BETWEEN 1 AND 32768) AND (max_concurrent_requests IS NULL OR max_concurrent_requests > 0) AND (request_read_timeout_milliseconds IS NULL OR request_read_timeout_milliseconds BETWEEN 1 AND 86400000));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    UPDATE "nekostick"."global_settings"
+    SET "max_request_body_bytes" = 31457280
+    WHERE "max_request_body_bytes" > 31457280;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_max_request_body_bytes CHECK (max_request_body_bytes <= 31457280);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260819015557_AddRouteResourceOverrides') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260819015557_AddRouteResourceOverrides', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    ALTER TABLE nekostick.global_settings
+        ADD proxy_max_retries integer NOT NULL DEFAULT 0,
+        ADD proxy_initial_retry_backoff_milliseconds integer NOT NULL DEFAULT 200,
+        ADD proxy_maximum_retry_backoff_milliseconds integer NOT NULL DEFAULT 2000,
+        ADD proxy_retry_on_connection_failure boolean NOT NULL DEFAULT TRUE,
+        ADD proxy_retry_on_upstream_disconnect boolean NOT NULL DEFAULT TRUE,
+        ADD CONSTRAINT ck_global_settings_proxy_retries CHECK (proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260820090000_AddProxyRetries', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    ALTER TABLE nekostick.routes
+        ADD proxy_max_retries integer,
+        ADD proxy_initial_retry_backoff_milliseconds integer,
+        ADD proxy_maximum_retry_backoff_milliseconds integer,
+        ADD proxy_retry_on_connection_failure boolean,
+        ADD proxy_retry_on_upstream_disconnect boolean,
+        ADD CONSTRAINT ck_routes_proxy_retries CHECK ((proxy_max_retries IS NULL AND proxy_initial_retry_backoff_milliseconds IS NULL AND proxy_maximum_retry_backoff_milliseconds IS NULL AND proxy_retry_on_connection_failure IS NULL AND proxy_retry_on_upstream_disconnect IS NULL) OR (proxy_max_retries IS NOT NULL AND proxy_initial_retry_backoff_milliseconds IS NOT NULL AND proxy_maximum_retry_backoff_milliseconds IS NOT NULL AND proxy_retry_on_connection_failure IS NOT NULL AND proxy_retry_on_upstream_disconnect IS NOT NULL AND proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260820100000_AddRouteProxyRetries', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;

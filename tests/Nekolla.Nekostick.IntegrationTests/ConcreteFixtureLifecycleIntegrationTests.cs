@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Host;
@@ -61,6 +63,67 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         Assert.Equal(HealthObservationStatus.Unavailable, unavailable.Status);
         Assert.False(await fixture.CanConnectAsync(CancellationToken.None));
     }
+
+    [Fact]
+    public async Task PosixExecutorStopsDescendantProcessGroupWithoutKillingTestHost()
+    {
+        if (!IsSupportedPosix())
+        {
+            Assert.Skip("POSIX process-group evidence is unsupported on this platform.");
+            return;
+        }
+
+        var hostProcessId = Environment.ProcessId;
+        var hostProcessGroupId = GetProcessGroup(hostProcessId);
+        Assert.True(hostProcessGroupId > 1);
+
+        await using var fixture = FixtureProcessHarness.CreateDescendant();
+        var start = await fixture.StartAsync(CancellationToken.None);
+        Assert.Equal(ProcessOperationStatus.Accepted, start.Status);
+        Assert.NotNull(start.InstanceId);
+
+        var evidence = await fixture.WaitForDescendantEvidenceAsync(
+            TimeSpan.FromSeconds(8),
+            CancellationToken.None);
+
+        Assert.NotEqual(hostProcessGroupId, evidence.LeaderProcessGroupId);
+        Assert.NotEqual(evidence.LeaderProcessId, evidence.DescendantProcessId);
+        Assert.NotEqual(evidence.LeaderProcessId, evidence.LeaderProcessGroupId);
+        Assert.True(evidence.LeaderAlive);
+        Assert.True(evidence.DescendantAlive);
+        Assert.True(IsProcessAlive(evidence.LeaderProcessId));
+        Assert.True(IsProcessAlive(evidence.DescendantProcessId));
+        Assert.True(IsProcessAlive(evidence.LeaderProcessGroupId));
+        Assert.Equal(evidence.LeaderProcessGroupId, GetProcessGroup(evidence.LeaderProcessId));
+        Assert.True(IsProcessAlive(hostProcessId));
+
+        Assert.Equal(evidence.DescendantProcessGroupId, GetProcessGroup(evidence.DescendantProcessId));
+        Assert.True(IsProcessInGroup(evidence.LeaderProcessGroupId, evidence.LeaderProcessGroupId));
+        Assert.True(IsProcessInGroup(hostProcessId, hostProcessGroupId));
+
+        var stopped = await fixture.StopAsync(CancellationToken.None);
+        Assert.Equal(ProcessOperationStatus.Completed, stopped.Status);
+        Assert.True(await WaitForProcessGoneAsync(
+            evidence.LeaderProcessId,
+            TimeSpan.FromSeconds(8),
+            CancellationToken.None));
+        Assert.True(await WaitForProcessGoneAsync(
+            evidence.DescendantProcessId,
+            TimeSpan.FromSeconds(8),
+            CancellationToken.None));
+        Assert.True(await WaitForProcessGroupGoneAsync(
+            evidence.LeaderProcessGroupId,
+            TimeSpan.FromSeconds(8),
+            CancellationToken.None));
+        Assert.False(IsProcessInGroup(evidence.LeaderProcessId, evidence.LeaderProcessGroupId));
+        Assert.False(IsProcessAlive(evidence.LeaderProcessId));
+        Assert.False(IsProcessAlive(evidence.DescendantProcessId));
+        Assert.True(IsProcessAlive(hostProcessId));
+
+        Assert.False(IsProcessInGroup(evidence.DescendantProcessId, evidence.DescendantProcessGroupId));
+        Assert.True(IsProcessInGroup(hostProcessId, hostProcessGroupId));
+    }
+
 
     [Fact]
     public async Task FailedLaunchAndFailedHealthNeverBecomeHealthy()
@@ -278,14 +341,229 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         Assert.Equal(host.ServiceId, request.ServiceId);
     }
 
-    /*
-     * Output-cap evidence is intentionally not asserted here. IProcessOutputSink,
-     * ProcessOutputRecord, and the retained-byte budget are internal to Supervision;
-     * the public PosixProcessExecutor constructor always installs NullProcessOutputSink
-     * and exposes neither records nor dropped-byte counters. The missing seam is a
-     * public bounded output-observer contract (or a Supervision InternalsVisibleTo
-     * grant for this integration assembly), not a deterministic fixture mode.
-     */
+
+
+    private static bool IsSupportedPosix() =>
+        (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) &&
+        (RuntimeInformation.ProcessArchitecture is Architecture.Arm64 or Architecture.X64) &&
+        (RuntimeInformation.RuntimeIdentifier is "osx-arm64" or "osx-x64" or "linux-arm64" or "linux-x64");
+
+    private static int GetProcessGroup(int processId)
+    {
+        if (processId <= 1)
+        {
+            return -1;
+        }
+
+        try
+        {
+            return OperatingSystem.IsMacOS()
+                ? GetProcessGroupDarwin(processId)
+                : GetProcessGroupLinux(processId);
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        if (processId <= 1)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+
+    private static bool IsProcessInGroup(int processId, int processGroupId) =>
+        processGroupId > 1 && GetProcessGroup(processId) == processGroupId;
+
+    private static async Task<bool> WaitForProcessGroupGoneAsync(
+        int processGroupId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(timeout);
+        try
+        {
+            while (!bounded.IsCancellationRequested)
+            {
+                if (GetProcessGroup(processGroupId) <= 0)
+                {
+                    return true;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25), bounded.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && bounded.IsCancellationRequested)
+        {
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return GetProcessGroup(processGroupId) <= 0;
+    }
+    private static async Task<bool> WaitForProcessGoneAsync(
+        int processId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(timeout);
+        try
+        {
+            while (!bounded.IsCancellationRequested)
+            {
+                if (!IsProcessAlive(processId))
+                {
+                    return true;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25), bounded.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && bounded.IsCancellationRequested)
+        {
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return !IsProcessAlive(processId);
+    }
+
+    private static bool TryReadDescendantEvidence(
+        string text,
+        out DescendantEvidence evidence)
+    {
+        evidence = default;
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("event", out JsonElement eventProperty) ||
+                eventProperty.ValueKind != JsonValueKind.String ||
+                !string.Equals(eventProperty.GetString(), "descendant-ready", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (!root.TryGetProperty("leaderProcessId", out JsonElement leaderProcessProperty) ||
+                leaderProcessProperty.ValueKind != JsonValueKind.Number ||
+                !leaderProcessProperty.TryGetInt32(out int leaderProcessId))
+            {
+                return false;
+            }
+
+            if (!root.TryGetProperty("leaderProcessGroupId", out JsonElement leaderProcessGroupProperty) ||
+                leaderProcessGroupProperty.ValueKind != JsonValueKind.Number ||
+                !leaderProcessGroupProperty.TryGetInt32(out int leaderProcessGroupId))
+            {
+                return false;
+            }
+
+            if (!root.TryGetProperty("descendantProcessId", out JsonElement descendantProcessProperty) ||
+                descendantProcessProperty.ValueKind != JsonValueKind.Number ||
+                !descendantProcessProperty.TryGetInt32(out int descendantProcessId))
+            {
+                return false;
+            }
+
+            if (!root.TryGetProperty("descendantProcessGroupId", out JsonElement descendantProcessGroupProperty) ||
+                descendantProcessGroupProperty.ValueKind != JsonValueKind.Number ||
+                !descendantProcessGroupProperty.TryGetInt32(out int descendantProcessGroupId))
+            {
+                return false;
+            }
+
+            if (!root.TryGetProperty("leaderAlive", out JsonElement leaderAliveProperty) ||
+                leaderAliveProperty.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                return false;
+            }
+
+            bool leaderAlive = leaderAliveProperty.GetBoolean();
+            if (!root.TryGetProperty("descendantAlive", out JsonElement descendantAliveProperty) ||
+                descendantAliveProperty.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                return false;
+            }
+
+            bool descendantAlive = descendantAliveProperty.GetBoolean();
+
+            evidence = new DescendantEvidence(
+                leaderProcessId,
+                leaderProcessGroupId,
+                descendantProcessId,
+                descendantProcessGroupId,
+                leaderAlive,
+                descendantAlive);
+            return leaderProcessId > 1 &&
+                leaderProcessGroupId > 1 &&
+                descendantProcessId > 1 &&
+                descendantProcessGroupId > 1;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    [DllImport("libSystem.B.dylib", EntryPoint = "getpgid", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int GetProcessGroupDarwin(int processId);
+
+    [DllImport("libc.so.6", EntryPoint = "getpgid", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int GetProcessGroupLinux(int processId);
+
+    private readonly record struct DescendantEvidence(
+        int LeaderProcessId,
+        int LeaderProcessGroupId,
+        int DescendantProcessId,
+        int DescendantProcessGroupId,
+        bool LeaderAlive,
+        bool DescendantAlive);
+
+    private sealed class CapturingOutputSink : IProcessOutputSink
+    {
+        private readonly ConcurrentQueue<ProcessOutputRecord> _records = new();
+
+        internal bool TryDequeue(out ProcessOutputRecord record)
+        {
+            if (_records.TryDequeue(out var candidate))
+            {
+                record = candidate;
+                return true;
+            }
+
+            record = null!;
+            return false;
+        }
+
+        public void OnLine(ProcessOutputRecord record) => _records.Enqueue(record);
+
+        public void OnDropped(Guid serviceId, ProcessOutputStream stream, long count)
+        {
+        }
+    }
 
 
     private sealed class FixtureProcessHarness : IAsyncDisposable
@@ -296,22 +574,27 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         private readonly Guid _serviceId;
         private ProcessInstanceId? _instanceId;
         private bool _disposed;
+        private readonly CapturingOutputSink? _outputSink;
+
 
         private FixtureProcessHarness(
             string fixturePath,
             string workingDirectory,
             string helperPath,
             int port,
-            ImmutableArray<string> arguments)
+            ImmutableArray<string> arguments,
+            CapturingOutputSink? outputSink)
         {
             FixturePath = fixturePath;
             WorkingDirectory = workingDirectory;
             Port = port;
             Arguments = arguments;
+            _outputSink = outputSink;
             _serviceId = Guid.CreateVersion7();
-            _executor = new PosixProcessExecutor(helperPath, StopGrace);
+            _executor = new PosixProcessExecutor(helperPath, StopGrace, outputSink);
             _probe = new ServiceHealthProbe(_executor);
         }
+
 
         internal string FixturePath { get; }
         internal string WorkingDirectory { get; }
@@ -320,6 +603,9 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         internal Uri HealthUri => new($"http://127.0.0.1:{Port}/fixture/health");
 
         internal static FixtureProcessHarness Create() => Create([]);
+        internal static FixtureProcessHarness CreateDescendant() =>
+            CreateWithOutput(new CapturingOutputSink(), "--mode", "descendant");
+
 
         internal static async Task<FixtureProcessHarness> CreateAsync(
             IReadOnlyList<string> additionalArguments,
@@ -329,7 +615,12 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             return Create(additionalArguments.ToArray());
         }
 
-        internal static FixtureProcessHarness Create(params string[] additionalArguments)
+        internal static FixtureProcessHarness Create(params string[] additionalArguments) =>
+            CreateWithOutput(null, additionalArguments);
+
+        private static FixtureProcessHarness CreateWithOutput(
+            CapturingOutputSink? outputSink,
+            params string[] additionalArguments)
         {
             var fixturePath = RuntimeArtifactLocator.RequireFixturePath();
             var helperPath = RuntimeArtifactLocator.RequireNativeHelperPath();
@@ -340,8 +631,10 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
                 Path.GetDirectoryName(fixturePath)!,
                 helperPath,
                 reservation.Port,
-                arguments);
+                arguments,
+                outputSink);
         }
+
 
         internal async Task<ProcessOperationResult> StartAsync(
             CancellationToken cancellationToken,
@@ -374,6 +667,37 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             _instanceId = null;
             return result;
         }
+        internal async Task<DescendantEvidence> WaitForDescendantEvidenceAsync(
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            var outputSink = _outputSink ?? throw new InvalidOperationException("descendant output capture is unavailable");
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            bounded.CancelAfter(timeout);
+            try
+            {
+                while (!bounded.IsCancellationRequested)
+                {
+                    while (outputSink.TryDequeue(out var record))
+                    {
+                        if (record.Stream == ProcessOutputStream.Stdout &&
+                            TryReadDescendantEvidence(record.Text, out var evidence))
+                        {
+                            return evidence;
+                        }
+                    }
+
+                    await Task.Delay(TimeSpan.FromMilliseconds(25), bounded.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && bounded.IsCancellationRequested)
+            {
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new TimeoutException("descendant readiness evidence was not observed");
+        }
+
 
         internal async Task<HealthObservationResult> WaitForHealthAsync(
             HealthObservationStatus expected,

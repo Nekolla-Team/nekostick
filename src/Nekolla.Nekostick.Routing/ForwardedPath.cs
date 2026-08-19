@@ -81,6 +81,17 @@ internal static class ForwardedPathContract
 
                 index = end - 1;
             }
+            else if (template[index] == '%')
+            {
+                if (index + 2 >= template.Length ||
+                    !IsHexDigit(template[index + 1]) ||
+                    !IsHexDigit(template[index + 2]))
+                {
+                    return false;
+                }
+
+                index += 2;
+            }
             else if (template[index] == '}')
             {
                 return false;
@@ -89,6 +100,11 @@ internal static class ForwardedPathContract
 
         return true;
     }
+
+    private static bool IsHexDigit(char value) =>
+        value is >= '0' and <= '9'
+            or >= 'a' and <= 'f'
+            or >= 'A' and <= 'F';
 
     private static string BuildStrippedPath(
         RouteMatcherType matcherType,
@@ -163,8 +179,63 @@ internal static class ForwardedPathContract
             }
         }
 
-        return EnsureAbsolute(result.ToString());
+        return EncodePath(EnsureAbsolute(result.ToString()));
     }
+
+    private static string EncodePath(string path)
+    {
+        var encoded = new StringBuilder(path.Length);
+        Span<byte> bytes = stackalloc byte[4];
+        for (var index = 0; index < path.Length; index++)
+        {
+            var character = path[index];
+            if (character == '/')
+            {
+                encoded.Append('/');
+                continue;
+            }
+
+            if (character == '%' &&
+                index + 2 < path.Length &&
+                IsHexDigit(path[index + 1]) &&
+                IsHexDigit(path[index + 2]))
+            {
+                encoded.Append(path.AsSpan(index, 3));
+                index += 2;
+                continue;
+            }
+
+            var charCount = char.IsHighSurrogate(character) &&
+                index + 1 < path.Length &&
+                char.IsLowSurrogate(path[index + 1])
+                ? 2
+                : 1;
+            if (charCount == 1 && character <= 0x7f && IsPchar(character))
+            {
+                encoded.Append(character);
+                continue;
+            }
+
+            var byteCount = Encoding.UTF8.GetBytes(path.AsSpan(index, charCount), bytes);
+            for (var byteIndex = 0; byteIndex < byteCount; byteIndex++)
+            {
+                encoded.Append('%');
+                encoded.Append(bytes[byteIndex].ToString("X2", CultureInfo.InvariantCulture));
+            }
+
+            index += charCount - 1;
+        }
+
+        return encoded.ToString();
+    }
+
+    private static bool IsPchar(char value) =>
+        value is >= 'A' and <= 'Z'
+            or >= 'a' and <= 'z'
+            or >= '0' and <= '9'
+            or '-' or '.' or '_' or '~'
+            or '!' or '$' or '&' or '\'' or '(' or ')' or '*' or '+' or ',' or ';' or '='
+            or ':' or '@';
 
     private static string EnsureAbsolute(string path) =>
         path.Length == 0 ? "/" : path[0] == '/' ? path : "/" + path;

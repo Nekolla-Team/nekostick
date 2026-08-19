@@ -4,6 +4,18 @@ namespace Nekolla.Nekostick.Extensions;
 
 internal sealed record ManifestDependencyValues(string? Id, string? VersionRange);
 
+internal sealed record ManifestContractExportValues(
+    string? ContractId,
+    string? Version,
+    string? AssemblyIdentity,
+    string? TypeIdentity);
+
+internal sealed record ManifestContractImportValues(
+    string? ContractId,
+    string? VersionRange,
+    string? AssemblyIdentity,
+    string? TypeIdentity);
+
 internal sealed record ManifestDocumentValues(
     int? SchemaVersion,
     string? Id,
@@ -11,7 +23,9 @@ internal sealed record ManifestDocumentValues(
     string? EntryAssembly,
     string? EntryType,
     IReadOnlyList<ManifestDependencyValues?>? Dependencies,
-    string? RequiredHostApiVersion);
+    string? RequiredHostApiVersion,
+    IReadOnlyList<ManifestContractExportValues?>? Exports,
+    IReadOnlyList<ManifestContractImportValues?>? Imports);
 
 internal static class ManifestParserCore
 {
@@ -22,7 +36,8 @@ internal static class ManifestParserCore
     {
         if (values.SchemaVersion is null || values.Id is null || values.Version is null ||
             values.EntryAssembly is null || values.EntryType is null || values.Dependencies is null ||
-            values.RequiredHostApiVersion is null || values.SchemaVersion != 1)
+            values.RequiredHostApiVersion is null || values.Exports is null || values.Imports is null ||
+            values.SchemaVersion != 1)
         {
             return Failure(format, ExtensionFailureCode.ManifestSchemaInvalid);
         }
@@ -82,6 +97,69 @@ internal static class ManifestParserCore
 
             dependencies.Add(new ExtensionDependency(dependency.Id!, dependencyRange));
         }
+        var exports = ImmutableArray.CreateBuilder<ExtensionContractExport>(values.Exports.Count);
+        var exportIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var export in values.Exports)
+        {
+            if (export is null || !ExtensionIdentifierSyntax.IsValid(export.ContractId))
+            {
+                return Failure(format, ExtensionFailureCode.InvalidIdentifier);
+            }
+
+            if (!exportIds.Add(export.ContractId!))
+            {
+                return Failure(format, ExtensionFailureCode.DuplicateContractDeclaration);
+            }
+
+            if (!SemVersion.TryParse(export.Version, out var exportVersion))
+            {
+                return Failure(format, ExtensionFailureCode.InvalidVersion);
+            }
+
+            if (string.IsNullOrWhiteSpace(export.AssemblyIdentity) ||
+                string.IsNullOrWhiteSpace(export.TypeIdentity))
+            {
+                return Failure(format, ExtensionFailureCode.ManifestSchemaInvalid);
+            }
+
+            exports.Add(new ExtensionContractExport(
+                export.ContractId!,
+                exportVersion,
+                export.AssemblyIdentity!,
+                export.TypeIdentity!));
+        }
+
+        var imports = ImmutableArray.CreateBuilder<ExtensionContractImport>(values.Imports.Count);
+        var importIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var import in values.Imports)
+        {
+            if (import is null || !ExtensionIdentifierSyntax.IsValid(import.ContractId))
+            {
+                return Failure(format, ExtensionFailureCode.InvalidIdentifier);
+            }
+
+            if (!importIds.Add(import.ContractId!))
+            {
+                return Failure(format, ExtensionFailureCode.DuplicateContractDeclaration);
+            }
+
+            if (!SemVersionRange.TryParse(import.VersionRange, out var importRange) || importRange is null)
+            {
+                return Failure(format, ExtensionFailureCode.InvalidVersionRange);
+            }
+
+            if (string.IsNullOrWhiteSpace(import.AssemblyIdentity) ||
+                string.IsNullOrWhiteSpace(import.TypeIdentity))
+            {
+                return Failure(format, ExtensionFailureCode.ManifestSchemaInvalid);
+            }
+
+            imports.Add(new ExtensionContractImport(
+                import.ContractId!,
+                importRange,
+                import.AssemblyIdentity!,
+                import.TypeIdentity!));
+        }
 
         return ManifestDiscoveryResult.Success(
             format,
@@ -93,6 +171,8 @@ internal static class ManifestParserCore
                 values.EntryType,
                 hostRange,
                 dependencies.ToImmutable(),
+                exports.ToImmutable(),
+                imports.ToImmutable(),
                 root,
                 entryAssemblyPath));
     }

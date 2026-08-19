@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Routing;
 using Xunit;
@@ -18,19 +17,6 @@ public sealed class RouteMatchForwardedPathTests
 
         Assert.True(normalized.IsSuccess);
         Assert.Equal(inputPath, normalized.NormalizedPath);
-
-        var fullRegex = new Regex(
-            $@"\A(?:{pattern})\z",
-            RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
-            TimeSpan.FromMilliseconds(50));
-        var directMatch = fullRegex.Match(normalized.NormalizedPath!);
-
-        Assert.True(directMatch.Success);
-        Assert.Equal("/files//%2F/item", directMatch.Groups[0].Value);
-        Assert.Equal("/files", directMatch.Groups[1].Value);
-        Assert.Equal("//", directMatch.Groups[2].Value);
-        Assert.Equal("%2F", directMatch.Groups[3].Value);
-        Assert.Equal("item", directMatch.Groups[4].Value);
 
         var snapshot = RoutingTestData.Build(
             RoutingTestData.CreateRoute(

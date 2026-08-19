@@ -3,6 +3,7 @@ using System.Collections.Immutable;
 using Microsoft.Extensions.Hosting;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Supervision;
 using ContractHealthKind = Nekolla.Nekostick.Contracts.ServiceHealthCheckType;
 using ContractRestartPolicy = Nekolla.Nekostick.Contracts.ServiceRestartPolicy;
@@ -84,6 +85,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly HostServiceEndpointSnapshotPublisher _endpointPublisher;
     private readonly HostRuntimeState _runtimeState;
     private readonly HostRuntimeOptions _options;
+    private readonly ExtensionRuntimeManager? _runtimeManager;
     private readonly NodeIdentifier _nodeId;
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
@@ -99,7 +101,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         HostConfigurationSnapshotHolder snapshotHolder,
         HostServiceEndpointSnapshotPublisher endpointPublisher,
         HostRuntimeState runtimeState,
-        HostRuntimeOptions options)
+        HostRuntimeOptions options,
+        ExtensionRuntimeManager? runtimeManager = null)
     {
         _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
         _healthProbe = healthProbe ?? throw new ArgumentNullException(nameof(healthProbe));
@@ -108,6 +111,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         _endpointPublisher = endpointPublisher ?? throw new ArgumentNullException(nameof(endpointPublisher));
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _runtimeManager = runtimeManager;
         _nodeId = new NodeIdentifier(options.NodeId);
         if (processExecutor is IProcessExitObserver observer)
         {
@@ -208,7 +212,11 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
     /// <summary>Records a safe process-exit observation and schedules bounded restart handoff.</summary>
     public void NotifyProcessExit(Guid serviceId, bool successfulExit) =>
-        _ = HandleProcessExitAsync(serviceId, null, successfulExit, DateTimeOffset.UtcNow);
+        _ = NotifyProcessExitAsync(serviceId, successfulExit);
+
+    /// <summary>Completes the process-exit handoff, including any bounded restart refusal or attempt.</summary>
+    internal Task NotifyProcessExitAsync(Guid serviceId, bool successfulExit) =>
+        HandleProcessExitAsync(serviceId, null, successfulExit, DateTimeOffset.UtcNow);
 
     private void HandleProcessExitObservation(ProcessExitObservation observation) =>
         _ = HandleProcessExitAsync(
@@ -275,6 +283,10 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             {
                 using var stopCts = new CancellationTokenSource(SupervisorStopBound);
                 await StopGenerationAsync(slot, generation, stopCts.Token).ConfigureAwait(false);
+                PublishServiceState(
+                    generation.Configuration.Id,
+                    generation.SnapshotVersion,
+                    "stopped");
             }
             catch
             {
@@ -382,6 +394,11 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 continue;
             }
 
+            if (!_runtimeState.NewLeasesAllowed)
+            {
+                continue;
+            }
+
             var result = await generation.Supervisor.RenewLeaseAsync(
                 DateTimeOffset.UtcNow,
                 LeasePolicy,
@@ -390,6 +407,10 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             {
                 generation.Ready = false;
                 _runtimeState.MarkDatabaseUnavailable();
+                PublishServiceState(
+                    generation.Configuration.Id,
+                    generation.SnapshotVersion,
+                    "unavailable");
                 await PublishReadyEndpointsAsync().ConfigureAwait(false);
             }
             else
@@ -419,6 +440,11 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             var candidate = await StartGenerationAsync(snapshot, service, _shutdownCts.Token).ConfigureAwait(false);
             if (candidate is null)
             {
+                if (!IsStopping)
+                {
+                    PublishServiceState(service.Id, snapshot.Version, "unavailable");
+                }
+
                 return IsStopping
                     ? new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled)
                     : new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
@@ -443,18 +469,22 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             if (!accepted)
             {
                 await StopGenerationAsync(slot, candidate, CancellationToken.None).ConfigureAwait(false);
+                PublishServiceState(service.Id, snapshot.Version, "stopped");
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
 
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
+            PublishServiceState(service.Id, candidate.SnapshotVersion, "ready");
             if (old is not null && !ReferenceEquals(old, candidate))
             {
                 await StopGenerationAsync(slot, old, CancellationToken.None).ConfigureAwait(false);
+                PublishServiceState(old.Configuration.Id, old.SnapshotVersion, "stopped");
             }
 
             if (IsStopping)
             {
                 await StopGenerationAsync(slot, candidate, CancellationToken.None).ConfigureAwait(false);
+                PublishServiceState(service.Id, candidate.SnapshotVersion, "stopped");
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
 
@@ -466,6 +496,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         }
         catch
         {
+            PublishServiceState(service.Id, snapshot.Version, "unavailable");
             return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
         }
         finally
@@ -628,4 +659,16 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     }
 
 
+    private void PublishServiceState(Guid serviceId, long version, string state)
+    {
+        HostCoreEventPublisher.Publish(
+            _runtimeManager,
+            ExtensionCoreEventKind.ServiceStateChanged,
+            new
+            {
+                serviceId,
+                version,
+                state
+            });
+    }
 }

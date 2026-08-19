@@ -118,14 +118,19 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
     private readonly SemaphoreSlim _available = new(0);
     private readonly CancellationTokenSource _stop = new();
     private readonly Func<Exception, ValueTask> _onFailure;
+    private readonly Func<long, ValueTask>? _onDrop;
     private readonly int _capacity;
     private readonly Task _consumer;
     private long _dropped;
     private bool _stopped;
 
-    internal ExtensionEventQueue(Func<Exception, ValueTask> onFailure, int capacity = DefaultCapacity)
+    internal ExtensionEventQueue(
+        Func<Exception, ValueTask> onFailure,
+        int capacity = DefaultCapacity,
+        Func<long, ValueTask>? onDrop = null)
     {
         _onFailure = onFailure;
+        _onDrop = onDrop;
         _capacity = capacity is < 1 or > 1024 ? DefaultCapacity : capacity;
         _consumer = ConsumeAsync();
     }
@@ -139,19 +144,43 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
             return false;
         }
 
+        var dropped = false;
         lock (_gate)
         {
             if (_stopped || _events.Count >= _capacity)
             {
                 Interlocked.Increment(ref _dropped);
-                return false;
+                dropped = true;
+            }
+            else
+            {
+                _events.Enqueue(@event);
+                _available.Release();
+            }
+        }
+
+        if (dropped)
+        {
+            if (_onDrop is { } onDrop)
+            {
+                _ = ObserveDropAsync(onDrop(DroppedCount).AsTask());
             }
 
-            _events.Enqueue(@event);
-            _available.Release();
+            return false;
         }
 
         return true;
+    }
+
+    private static async Task ObserveDropAsync(Task notification)
+    {
+        try
+        {
+            await notification.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+        }
     }
 
     public bool TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback)

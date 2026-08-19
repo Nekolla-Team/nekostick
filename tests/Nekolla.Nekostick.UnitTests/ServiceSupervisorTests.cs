@@ -55,6 +55,37 @@ public sealed class ServiceSupervisorTests
         Assert.Null(supervisor.Lease);
     }
 
+    [Theory]
+    [InlineData(ProcessOperationStatus.Rejected, SupervisorOperationStatus.Failed, ServiceStateReasonCode.StopRequested)]
+    [InlineData(ProcessOperationStatus.Failed, SupervisorOperationStatus.Failed, ServiceStateReasonCode.StopRequested)]
+    [InlineData(ProcessOperationStatus.Cancelled, SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled)]
+    public async Task IncompleteStopRetainsLeaseAndStoppingSnapshot(
+        ProcessOperationStatus processStatus,
+        SupervisorOperationStatus supervisorStatus,
+        ServiceStateReasonCode reason)
+    {
+        var events = new List<string>();
+        var lease = Lease();
+        var supervisor = Create(
+            new RecordingExecutor(events, stop: new ProcessOperationResult(processStatus, reason)),
+            new RecordingLeaseStore(events, lease));
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        var publishedLease = supervisor.Lease;
+        events.Clear();
+
+        var result = await supervisor.StopAsync(Now.AddSeconds(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(supervisorStatus, result.Status);
+        Assert.Equal(reason, result.Reason);
+        Assert.Equal(["stop"], events);
+        Assert.NotNull(publishedLease);
+        Assert.Same(publishedLease, supervisor.Lease);
+        Assert.Equal(ServiceLifecycleState.Stopping, result.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceStateReasonCode.StopRequested, result.Snapshot.Reason);
+        Assert.Same(result.Snapshot, supervisor.Snapshot);
+    }
+
+
     [Fact]
     public async Task CancelledStartMapsToCancelledWithoutStartingWhenAlreadyRequested()
     {
@@ -126,11 +157,36 @@ public sealed class ServiceSupervisorTests
 
     private sealed class RecordingExecutor : IProcessExecutor
     {
-        public RecordingExecutor(List<string> events, ProcessOperationResult? start = null) { Events = events; StartResult = start ?? new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted); }
+        public RecordingExecutor(
+            List<string> events,
+            ProcessOperationResult? start = null,
+            ProcessOperationResult? stop = null)
+        {
+            Events = events;
+            StartResult = start ?? new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted);
+            StopResult = stop ?? new(ProcessOperationStatus.Completed, ServiceStateReasonCode.StopCompleted);
+        }
+
         public List<string> Events { get; }
         private ProcessOperationResult StartResult { get; }
-        public ValueTask<ProcessOperationResult> StartAsync(ProcessLaunchSpecification specification, CancellationToken cancellationToken = default) { Events.Add("start"); return ValueTask.FromResult(StartResult); }
-        public ValueTask<ProcessOperationResult> StopAsync(Guid serviceId, TimeSpan gracePeriod, CancellationToken cancellationToken = default) { Events.Add("stop"); return ValueTask.FromResult(new ProcessOperationResult(ProcessOperationStatus.Completed, ServiceStateReasonCode.StopCompleted)); }
+        private ProcessOperationResult StopResult { get; }
+
+        public ValueTask<ProcessOperationResult> StartAsync(
+            ProcessLaunchSpecification specification,
+            CancellationToken cancellationToken = default)
+        {
+            Events.Add("start");
+            return ValueTask.FromResult(StartResult);
+        }
+
+        public ValueTask<ProcessOperationResult> StopAsync(
+            Guid serviceId,
+            TimeSpan gracePeriod,
+            CancellationToken cancellationToken = default)
+        {
+            Events.Add("stop");
+            return ValueTask.FromResult(StopResult);
+        }
     }
     private sealed class RecordingLeaseStore : IPortLeaseStore
     {

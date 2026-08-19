@@ -1,6 +1,12 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Nekolla.Nekostick.Contracts;
 using Yarp.ReverseProxy.Forwarder;
 
 namespace Nekolla.Nekostick.Proxy;
@@ -181,19 +187,23 @@ public sealed class MicroserviceHttpExecutor
     private readonly IHttpForwarder _forwarder;
     private readonly IMicroserviceEndpointResolver _endpointResolver;
     private readonly MicroserviceHttpInvokerPool _invokerPool;
+    private readonly ILogger<MicroserviceHttpExecutor> _logger;
 
     /// <summary>Creates an executor with shared YARP transport dependencies.</summary>
     /// <param name="forwarder">The YARP forwarder.</param>
     /// <param name="endpointResolver">The endpoint resolver.</param>
     /// <param name="invokerPool">The bounded timeout-keyed HTTP invoker pool.</param>
+    /// <param name="logger">The safe structured proxy logger.</param>
     public MicroserviceHttpExecutor(
         IHttpForwarder forwarder,
         IMicroserviceEndpointResolver endpointResolver,
-        MicroserviceHttpInvokerPool invokerPool)
+        MicroserviceHttpInvokerPool invokerPool,
+        ILogger<MicroserviceHttpExecutor>? logger = null)
     {
         _forwarder = forwarder ?? throw new ArgumentNullException(nameof(forwarder));
         _endpointResolver = endpointResolver ?? throw new ArgumentNullException(nameof(endpointResolver));
         _invokerPool = invokerPool ?? throw new ArgumentNullException(nameof(invokerPool));
+        _logger = logger ?? NullLogger<MicroserviceHttpExecutor>.Instance;
     }
 
     /// <summary>Resolves and forwards one request without exposing destination details.</summary>
@@ -210,7 +220,8 @@ public sealed class MicroserviceHttpExecutor
         ArgumentNullException.ThrowIfNull(request);
 
         var timeoutPolicy = request.TimeoutPolicy;
-        var isWebSocket = httpContext.WebSockets.IsWebSocketRequest;
+        var retryPolicy = request.RetryPolicy;
+        var isWebSocket = IsWebSocketRequest(httpContext);
         using var cancellationScope = new MicroserviceCancellationScope(
             new MicroserviceCancellationInputs
             {
@@ -245,59 +256,265 @@ public sealed class MicroserviceHttpExecutor
 
         var originalPath = httpContext.Request.Path;
         var originalPathBase = httpContext.Request.PathBase;
+        var canReplay = retryPolicy.MaxRetries > 0 && CanReplayRequest(httpContext, isWebSocket);
+        var startedAt = Stopwatch.GetTimestamp();
+        var attempt = 0;
         try
         {
             httpContext.Request.PathBase = PathString.Empty;
             httpContext.Request.Path = request.ForwardedPath;
-            var transformer = new MicroserviceHttpTransformer(request, operationToken);
-            if (!_invokerPool.TryAcquire(timeoutPolicy.ConnectTimeout, out var lease)
-                || lease is null)
-            {
-                return MicroserviceProxyExecutionResult.For(
-                    MicroserviceProxyExecutionDisposition.BadGateway);
-            }
 
-            using (lease)
+            while (true)
             {
-                var requestConfig = new ForwarderRequestConfig
+                attempt++;
+                try
                 {
-                    Version = HttpVersion.Version11,
-                    VersionPolicy = HttpVersionPolicy.RequestVersionExact,
-                    ActivityTimeout = isWebSocket
-                        ? timeoutPolicy.WebSocketIdleTimeout
-                        : timeoutPolicy.ActivityTimeout
-                };
+                    var error = await SendAttemptAsync(
+                            httpContext,
+                            request,
+                            resolution.Endpoint.DestinationPrefix,
+                            timeoutPolicy,
+                            isWebSocket,
+                            operationToken)
+                        .ConfigureAwait(false);
+                    if (error == ForwarderError.None)
+                    {
+                        return MicroserviceProxyExecutionResult.For(
+                            MicroserviceProxyExecutionDisposition.Handled);
+                    }
 
-                var error = await _forwarder.SendAsync(
-                        httpContext,
-                        resolution.Endpoint.DestinationPrefix,
-                        lease.Invoker,
-                        requestConfig,
-                        transformer,
-                        operationToken)
-                    .ConfigureAwait(false);
-                return MapForwarderError(
-                    error,
-                    cancellationScope.FirstCause);
+                    var errorFeature = httpContext.GetForwarderErrorFeature();
+                    var failureStage = ClassifyForwarderFailure(error, errorFeature?.Exception);
+                    var canRetry = canReplay
+                        && !httpContext.Response.HasStarted
+                        && cancellationScope.FirstCause == MicroserviceCancellationCause.None
+                        && attempt <= retryPolicy.MaxRetries
+                        && IsRetryableForwarderFailure(
+                            error,
+                            errorFeature?.Exception,
+                            retryPolicy);
+                    LogFailure(request, attempt, failureStage, startedAt);
+                    if (!canRetry)
+                    {
+                        return MapForwarderError(error, cancellationScope.FirstCause);
+                    }
+
+                    await DelayBeforeRetryAsync(retryPolicy, attempt, operationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return ResultForCancellation(cancellationScope.FirstCause);
+                }
+                catch (InvalidOperationException)
+                {
+                    LogFailure(request, attempt, MicroserviceProxyFailureStage.Request, startedAt);
+                    return MicroserviceProxyExecutionResult.For(
+                        MicroserviceProxyExecutionDisposition.BadRequest);
+                }
+                catch (Exception exception)
+                {
+                    var failureStage = ClassifyException(exception);
+                    var canRetry = canReplay
+                        && !httpContext.Response.HasStarted
+                        && cancellationScope.FirstCause == MicroserviceCancellationCause.None
+                        && attempt <= retryPolicy.MaxRetries
+                        && IsRetryableException(exception, retryPolicy);
+                    LogFailure(request, attempt, failureStage, startedAt);
+                    if (!canRetry)
+                    {
+                        return MicroserviceProxyExecutionResult.For(
+                            MicroserviceProxyExecutionDisposition.BadGateway);
+                    }
+
+                    await DelayBeforeRetryAsync(retryPolicy, attempt, operationToken)
+                        .ConfigureAwait(false);
+                }
             }
-        }
-        catch (OperationCanceledException)
-        {
-            return ResultForCancellation(cancellationScope.FirstCause);
-        }
-        catch (InvalidOperationException)
-        {
-            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.BadRequest);
-        }
-        catch (Exception)
-        {
-            return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.BadGateway);
         }
         finally
         {
             httpContext.Request.Path = originalPath;
             httpContext.Request.PathBase = originalPathBase;
         }
+    }
+
+    private async ValueTask<ForwarderError> SendAttemptAsync(
+        HttpContext httpContext,
+        MicroserviceProxyRequest request,
+        string destinationPrefix,
+        MicroserviceTimeoutPolicy timeoutPolicy,
+        bool isWebSocket,
+        CancellationToken operationToken)
+    {
+        if (!_invokerPool.TryAcquire(timeoutPolicy.ConnectTimeout, out var lease)
+            || lease is null)
+        {
+            return ForwarderError.NoAvailableDestinations;
+        }
+
+        using (lease)
+        {
+            var requestConfig = new ForwarderRequestConfig
+            {
+                Version = HttpVersion.Version11,
+                VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+                ActivityTimeout = isWebSocket
+                    ? timeoutPolicy.WebSocketIdleTimeout
+                    : timeoutPolicy.ActivityTimeout
+            };
+            var transformer = new MicroserviceHttpTransformer(request, operationToken);
+            return await _forwarder.SendAsync(
+                    httpContext,
+                    destinationPrefix,
+                    lease.Invoker,
+                    requestConfig,
+                    transformer,
+                    operationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static bool CanReplayRequest(HttpContext context, bool isWebSocket)
+    {
+        if (isWebSocket || context.Request.Headers.ContainsKey("Transfer-Encoding"))
+        {
+            return false;
+        }
+
+        if (context.Request.ContentLength is 0)
+        {
+            return true;
+        }
+
+        if (context.Request.ContentLength is not null)
+        {
+            return false;
+        }
+
+        var bodyDetection = context.Features.Get<IHttpRequestBodyDetectionFeature>();
+        return bodyDetection is not null && !bodyDetection.CanHaveBody;
+    }
+
+    private static bool IsWebSocketRequest(HttpContext context)
+    {
+        if (context.WebSockets.IsWebSocketRequest)
+        {
+            return true;
+        }
+
+        return context.Request.Headers.TryGetValue("Upgrade", out var values)
+            && values.Any(value => string.Equals(value, "websocket", StringComparison.OrdinalIgnoreCase));
+    }
+    private static bool IsRetryableForwarderFailure(
+        ForwarderError error,
+        Exception? exception,
+        ProxyRetryConfiguration policy)
+    {
+        if (error != ForwarderError.Request)
+        {
+            return false;
+        }
+
+        return exception switch
+        {
+            HttpRequestException => policy.RetryOnConnectionFailure,
+            IOException => policy.RetryOnUpstreamDisconnect,
+            _ => false
+        };
+    }
+
+    private static bool IsRetryableException(
+        Exception exception,
+        ProxyRetryConfiguration policy) =>
+        exception switch
+        {
+            HttpRequestException => policy.RetryOnConnectionFailure,
+            IOException => policy.RetryOnUpstreamDisconnect,
+            _ => false
+        };
+
+    private static MicroserviceProxyFailureStage ClassifyForwarderFailure(
+        ForwarderError error,
+        Exception? exception)
+    {
+        if (error is ForwarderError.RequestTimedOut or ForwarderError.UpgradeActivityTimeout)
+        {
+            return MicroserviceProxyFailureStage.Timeout;
+        }
+
+        if (error is ForwarderError.RequestCanceled
+            or ForwarderError.RequestBodyCanceled
+            or ForwarderError.ResponseBodyCanceled
+            or ForwarderError.UpgradeRequestCanceled
+            or ForwarderError.UpgradeResponseCanceled)
+        {
+            return MicroserviceProxyFailureStage.Cancellation;
+        }
+
+        if (error == ForwarderError.Request)
+        {
+            return exception is IOException
+                ? MicroserviceProxyFailureStage.UpstreamDisconnect
+                : MicroserviceProxyFailureStage.Connection;
+        }
+
+        return error is ForwarderError.ResponseHeaders
+            or ForwarderError.ResponseBodyClient
+            or ForwarderError.ResponseBodyDestination
+            or ForwarderError.UpgradeResponseClient
+            or ForwarderError.UpgradeResponseDestination
+            ? MicroserviceProxyFailureStage.Response
+            : MicroserviceProxyFailureStage.Request;
+    }
+
+    private static MicroserviceProxyFailureStage ClassifyException(Exception exception) =>
+        exception switch
+        {
+            HttpRequestException => MicroserviceProxyFailureStage.Connection,
+            IOException => MicroserviceProxyFailureStage.UpstreamDisconnect,
+            OperationCanceledException => MicroserviceProxyFailureStage.Cancellation,
+            _ => MicroserviceProxyFailureStage.Unknown
+        };
+
+    private static async ValueTask DelayBeforeRetryAsync(
+        ProxyRetryConfiguration policy,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        var delay = CalculateRetryDelay(policy, attempt, Random.Shared.NextDouble());
+        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static TimeSpan CalculateRetryDelay(
+        ProxyRetryConfiguration policy,
+        int retryNumber,
+        double jitter)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(retryNumber);
+
+        var exponential = policy.InitialBackoff.TotalMilliseconds * Math.Pow(2, retryNumber - 1);
+        var capped = Math.Min(exponential, policy.MaximumBackoff.TotalMilliseconds);
+        var jitterFactor = Math.Clamp(jitter, 0, 1);
+        var jittered = capped + ((capped * 0.25) * jitterFactor);
+        return TimeSpan.FromMilliseconds(Math.Min(policy.MaximumBackoff.TotalMilliseconds, jittered));
+    }
+
+    private void LogFailure(
+        MicroserviceProxyRequest request,
+        int attempt,
+        MicroserviceProxyFailureStage stage,
+        long startedAt)
+    {
+        var elapsed = Math.Max(0, (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+        MicroserviceProxyTelemetry.AttemptFailed(
+            _logger,
+            request.RouteId,
+            request.ServiceId,
+            attempt,
+            stage,
+            elapsed);
     }
 
     internal static MicroserviceProxyExecutionResult MapForwarderError(

@@ -47,7 +47,7 @@ public sealed class PersistenceMigrationTests
         Assert.Equal(
             PersistenceDatabaseDefaults.MigrationHistoryTable,
             relationalOptions.MigrationsHistoryTableName);
-        Assert.Equal(PersistenceDatabaseDefaults.Schema, relationalOptions.MigrationsHistoryTableSchema);
+        Assert.Equal(database.Schema, relationalOptions.MigrationsHistoryTableSchema);
 
         var coordinator = database.CreateMigrationCoordinator();
         var first = await coordinator.MigrateAndValidateAsync(
@@ -92,6 +92,74 @@ public sealed class PersistenceMigrationTests
         Assert.Empty(secondValidation.MissingObjects);
         Assert.Equal(1, await secondContext.ConfigurationRevisions.CountAsync(TestContext.Current.CancellationToken));
         Assert.Equal(1, await secondContext.GlobalSettings.CountAsync(TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>Verifies a legacy over-ceiling body value is normalized during the real latest migration.</summary>
+    [Fact]
+    public async Task LegacyOverCeilingBodyValueIsNormalizedBeforeLatestMigration()
+    {
+        var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        await using (var predecessorContext = database.CreateContext())
+        {
+            await predecessorContext.Database.MigrateAsync(
+                "20260818230804_AddRequestLimitsAndRatePolicies",
+                cancellationToken);
+        }
+
+        await database.ExecuteSchemaCommandAsync(
+            $"UPDATE {database.QualifiedRelation("global_settings")} " +
+            "SET max_request_body_bytes = @max_body_bytes " +
+            "WHERE id = @id;",
+            new NpgsqlParameter("max_body_bytes", NpgsqlDbType.Bigint)
+            {
+                Value = 31457281L
+            },
+            new NpgsqlParameter("id", NpgsqlDbType.Uuid)
+            {
+                Value = Guid.Parse(PersistenceDatabaseDefaults.SeedGlobalSettingsId)
+            });
+
+        await using var latestContext = database.CreateContext();
+        var migrated = await database.CreateMigrationCoordinator()
+            .MigrateAndValidateAsync(latestContext, cancellationToken);
+
+        Assert.True(migrated.IsSuccess, migrated.Error?.Message);
+        var validation = await database.CreateMigrationSchemaValidator()
+            .ValidateAsync(latestContext, cancellationToken);
+        Assert.True(validation.IsValid);
+        Assert.Empty(validation.MissingObjects);
+        Assert.Equal(
+            31457280L,
+            await database.ExecuteScalarAsync<long>(
+                $"SELECT max_request_body_bytes FROM {database.QualifiedRelation("global_settings")} " +
+                "WHERE id = @id;",
+                new NpgsqlParameter("id", NpgsqlDbType.Uuid)
+                {
+                    Value = Guid.Parse(PersistenceDatabaseDefaults.SeedGlobalSettingsId)
+                }));
+
+        var checkViolation = await Assert.ThrowsAsync<PostgresException>(() =>
+            database.ExecuteSchemaCommandAsync(
+                $"UPDATE {database.QualifiedRelation("global_settings")} " +
+                "SET max_request_body_bytes = @max_body_bytes " +
+                "WHERE id = @id;",
+                new NpgsqlParameter("max_body_bytes", NpgsqlDbType.Bigint)
+                {
+                    Value = 31457281L
+                },
+                new NpgsqlParameter("id", NpgsqlDbType.Uuid)
+                {
+                    Value = Guid.Parse(PersistenceDatabaseDefaults.SeedGlobalSettingsId)
+                }));
+        Assert.Equal("23514", checkViolation.SqlState);
+
+        await using var repeatContext = database.CreateContext();
+        var repeated = await database.CreateMigrationCoordinator()
+            .MigrateAndValidateAsync(repeatContext, cancellationToken);
+        Assert.True(repeated.IsSuccess, repeated.Error?.Message);
     }
 
     /// <summary>Verifies the database rejects UUIDs with a non-v7 version or invalid RFC variant.</summary>

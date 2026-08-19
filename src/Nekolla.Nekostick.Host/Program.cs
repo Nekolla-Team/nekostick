@@ -213,6 +213,7 @@ internal static class Program
         builder.Services.AddSingleton<IHostRoutingSnapshotAccessor>(serviceProvider =>
             new HostRoutingSnapshotAccessor(
                 serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>()));
+        builder.Services.AddSingleton<HostRequestAdmission>();
         builder.Services.AddSingleton<ExtensionRuntimeManager>(_ =>
             new ExtensionRuntimeManager(HostApiVersion.Current));
         builder.Services.AddSingleton<HostConfigurationPublisher>();
@@ -227,6 +228,7 @@ internal static class Program
                 serviceProvider.GetRequiredService<IHostRoutingSnapshotAccessor>(),
                 serviceProvider.GetRequiredService<IRouteFallbackDispatcher>(),
                 serviceProvider.GetRequiredService<IRouteTargetExecutor>(),
+                serviceProvider.GetRequiredService<HostRequestAdmission>(),
                 serviceProvider
                     .GetRequiredService<ILoggerFactory>()
                     .CreateLogger(HostLoggerCategory.Routing)));
@@ -255,12 +257,22 @@ internal static class Program
             builder.Services.AddHostedService<HostConfigurationRefreshService>();
             if (!command.RunOptions.DisableSupervisor)
             {
-                builder.Services.AddSingleton<HostServiceEndpointSnapshotPublisher>();
+                builder.Services.AddSingleton<HostServiceEndpointSnapshotPublisher>(serviceProvider =>
+                    new HostServiceEndpointSnapshotPublisher(
+                        serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
                 builder.Services.AddSingleton<IHostServiceEndpointSnapshotAccessor>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceEndpointSnapshotPublisher>());
                 builder.Services.AddSingleton<IMicroserviceEndpointResolver, HostServiceEndpointResolver>();
                 var helperPath = NativeHelperExtractor.TryExtract();
-                builder.Services.AddSingleton<IProcessExecutor>(_ => new PosixProcessExecutor(helperPath));
+                builder.Services.AddSingleton<IProcessOutputSink>(serviceProvider =>
+                    new HostProcessOutputLogSink(
+                        serviceProvider
+                            .GetRequiredService<ILoggerFactory>()
+                            .CreateLogger(HostLoggerCategory.Supervision)));
+                builder.Services.AddSingleton<IProcessExecutor>(serviceProvider =>
+                    new PosixProcessExecutor(
+                        helperPath,
+                        outputSink: serviceProvider.GetRequiredService<IProcessOutputSink>()));
                 builder.Services.AddSingleton<IServiceHealthProbe>(serviceProvider =>
                     new ServiceHealthProbe(
                         serviceProvider.GetRequiredService<IProcessExecutor>()));
@@ -268,9 +280,18 @@ internal static class Program
                     new HostPortLeaseStoreAdapter(
                         serviceProvider.GetRequiredService<IDbContextFactory<NekostickDbContext>>(),
                         serviceProvider.GetRequiredService<HostRuntimeState>()));
+                builder.Services.AddSingleton<HostServiceLifecycleManager>(serviceProvider =>
+                    new HostServiceLifecycleManager(
+                        serviceProvider.GetRequiredService<IProcessExecutor>(),
+                        serviceProvider.GetRequiredService<IServiceHealthProbe>(),
+                        serviceProvider.GetRequiredService<IPortLeaseStore>(),
+                        serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>(),
+                        serviceProvider.GetRequiredService<HostServiceEndpointSnapshotPublisher>(),
+                        serviceProvider.GetRequiredService<HostRuntimeState>(),
+                        serviceProvider.GetRequiredService<HostRuntimeOptions>(),
+                        serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
                 builder.Services.AddSingleton<IPortLeaseStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());
-                builder.Services.AddSingleton<HostServiceLifecycleManager>();
                 builder.Services.AddSingleton<IHostServiceLifecycleCoordinator>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
                 builder.Services.AddHostedService(serviceProvider =>
@@ -282,6 +303,12 @@ internal static class Program
             // RunAsync, which is called after InspectDatabaseAsync has succeeded.
             builder.WebHost.ConfigureKestrel(kestrelOptions =>
             {
+                kestrelOptions.Limits.MaxRequestBodySize = GlobalSettingsConfiguration.HardMaximumRequestBodyBytes;
+                kestrelOptions.Limits.MaxRequestHeadersTotalSize =
+                    checked((int)GlobalSettingsConfiguration.HardMaximumRequestHeaderBytes);
+                // This fixed server timeout protects only header reception; application body reads
+                // use the immutable snapshot setting at the dispatcher boundary.
+                kestrelOptions.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(30);
                 kestrelOptions.Listen(listenAddress!, bootstrap.ListenPort, listenOptions =>
                 {
                     listenOptions.Protocols = HttpProtocols.Http1;
@@ -313,6 +340,7 @@ internal static class Program
 
     private static void ConfigureRunPipeline(WebApplication app)
     {
+        app.UseWebSockets();
         app.Run(context =>
             context.RequestServices.GetRequiredService<HostRouteDispatcher>().DispatchAsync(context));
     }

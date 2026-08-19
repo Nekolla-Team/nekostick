@@ -163,6 +163,10 @@ public sealed record ServiceConfiguration
 /// <summary>Defines immutable global business settings.</summary>
 public sealed record GlobalSettingsConfiguration
 {
+    /// <summary>Gets the fixed maximum request header size accepted by the host.</summary>
+    public const long HardMaximumRequestHeaderBytes = 32 * 1024;
+    /// <summary>Gets the fixed maximum request body size accepted by the host.</summary>
+    public const long HardMaximumRequestBodyBytes = 30 * 1024 * 1024;
     /// <summary>Creates global settings with the business defaults.</summary>
     /// <param name="version">The optimistic-concurrency version.</param>
     /// <param name="autoPortRangeStart">The inclusive automatic port range start.</param>
@@ -172,15 +176,23 @@ public sealed record GlobalSettingsConfiguration
     /// <param name="configurationPollInterval">The configuration version poll interval.</param>
     /// <param name="trustedProxyCidrs">The immutable trusted proxy CIDR list.</param>
     /// <param name="proxyTimeouts">The immutable global proxy timeout settings.</param>
+    /// <param name="maxRequestHeaderBytes">The maximum request header size.</param>
+    /// <param name="requestReadTimeout">The request body read timeout.</param>
+    /// <param name="clientIpRatePolicy">The global client-IP rate policy, or <see langword="null"/> for unlimited.</param>
+    /// <param name="proxyRetries">The immutable global proxy retry settings.</param>
     public GlobalSettingsConfiguration(
         long version = 0,
         int autoPortRangeStart = 20000,
         int autoPortRangeEnd = 29999,
-        long maxRequestBodyBytes = 30 * 1024 * 1024,
+        long maxRequestBodyBytes = HardMaximumRequestBodyBytes,
         int maxConcurrentRequests = 1024,
         TimeSpan? configurationPollInterval = null,
         ImmutableArray<string> trustedProxyCidrs = default,
-        ProxyTimeoutConfiguration? proxyTimeouts = null)
+        ProxyTimeoutConfiguration? proxyTimeouts = null,
+        long maxRequestHeaderBytes = HardMaximumRequestHeaderBytes,
+        TimeSpan? requestReadTimeout = null,
+        ClientIpRatePolicyConfiguration? clientIpRatePolicy = null,
+        ProxyRetryConfiguration? proxyRetries = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(version);
 
@@ -190,10 +202,17 @@ public sealed record GlobalSettingsConfiguration
         ArgumentOutOfRangeException.ThrowIfGreaterThan(autoPortRangeEnd, 65535);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(autoPortRangeStart, autoPortRangeEnd);
 
-        if (maxRequestBodyBytes <= 0 || maxConcurrentRequests <= 0)
+        if (maxRequestBodyBytes is <= 0 or > HardMaximumRequestBodyBytes)
         {
             throw new ArgumentOutOfRangeException(nameof(maxRequestBodyBytes));
         }
+
+        if (maxRequestHeaderBytes is <= 0 or > HardMaximumRequestHeaderBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxRequestHeaderBytes));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxConcurrentRequests);
 
         var interval = configurationPollInterval ?? TimeSpan.FromSeconds(30);
         if (interval <= TimeSpan.Zero)
@@ -201,16 +220,28 @@ public sealed record GlobalSettingsConfiguration
             throw new ArgumentOutOfRangeException(nameof(configurationPollInterval));
         }
 
+        var readTimeout = requestReadTimeout ?? TimeSpan.FromSeconds(30);
+        if (readTimeout <= TimeSpan.Zero ||
+            readTimeout.Ticks % TimeSpan.TicksPerMillisecond != 0 ||
+            readTimeout > TimeSpan.FromDays(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(requestReadTimeout));
+        }
+
         Version = version;
         AutoPortRangeStart = autoPortRangeStart;
         AutoPortRangeEnd = autoPortRangeEnd;
         MaxRequestBodyBytes = maxRequestBodyBytes;
+        MaxRequestHeaderBytes = maxRequestHeaderBytes;
         MaxConcurrentRequests = maxConcurrentRequests;
         ConfigurationPollInterval = interval;
+        RequestReadTimeout = readTimeout;
         TrustedProxyCidrs = trustedProxyCidrs.IsDefault
             ? ImmutableArray<string>.Empty
             : trustedProxyCidrs;
         ProxyTimeouts = proxyTimeouts ?? ProxyTimeoutConfiguration.Default;
+        ClientIpRatePolicy = clientIpRatePolicy;
+        ProxyRetries = proxyRetries ?? ProxyRetryConfiguration.Default;
     }
 
     /// <summary>Gets the global optimistic-concurrency version.</summary>
@@ -225,8 +256,14 @@ public sealed record GlobalSettingsConfiguration
     /// <summary>Gets the request body limit in bytes.</summary>
     public long MaxRequestBodyBytes { get; }
 
+    /// <summary>Gets the request header limit in bytes.</summary>
+    public long MaxRequestHeaderBytes { get; }
+
     /// <summary>Gets the maximum concurrent request count.</summary>
     public int MaxConcurrentRequests { get; }
+
+    /// <summary>Gets the request read timeout.</summary>
+    public TimeSpan RequestReadTimeout { get; }
 
     /// <summary>Gets the configuration poll interval.</summary>
     public TimeSpan ConfigurationPollInterval { get; }
@@ -236,4 +273,10 @@ public sealed record GlobalSettingsConfiguration
 
     /// <summary>Gets the immutable global proxy timeout settings.</summary>
     public ProxyTimeoutConfiguration ProxyTimeouts { get; }
+
+    /// <summary>Gets the global client-IP rate policy, or <see langword="null"/> for unlimited.</summary>
+    public ClientIpRatePolicyConfiguration? ClientIpRatePolicy { get; }
+
+    /// <summary>Gets the immutable global proxy retry settings.</summary>
+    public ProxyRetryConfiguration ProxyRetries { get; }
 }
