@@ -32,7 +32,12 @@ internal interface IHostRoutingSnapshotLeaseAccessor
 internal sealed class HostRoutingSnapshot
 {
     internal HostRoutingSnapshot(HostConfigurationSnapshot configuration, RouteMatchSnapshot matcher)
-        : this(configuration, matcher, BuildExecutableRoutesOrEmpty(configuration), null)
+        : this(
+            configuration,
+            matcher,
+            BuildExecutableRoutesOrEmpty(configuration),
+            null,
+            ImmutableDictionary<Guid, string?>.Empty)
     {
     }
 
@@ -40,11 +45,13 @@ internal sealed class HostRoutingSnapshot
         HostConfigurationSnapshot configuration,
         RouteMatchSnapshot matcher,
         ImmutableDictionary<Guid, ExecutableRoute> executableRoutes,
-        ExtensionDispatchGeneration? dispatchGeneration)
+        ExtensionDispatchGeneration? dispatchGeneration,
+        ImmutableDictionary<Guid, string?> serviceOwners)
     {
         Configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         Matcher = matcher ?? throw new ArgumentNullException(nameof(matcher));
         ExecutableRoutes = executableRoutes ?? throw new ArgumentNullException(nameof(executableRoutes));
+        ServiceOwners = serviceOwners ?? throw new ArgumentNullException(nameof(serviceOwners));
         DispatchGeneration = dispatchGeneration;
         Publication = new HostSnapshotPublicationState(dispatchGeneration);
     }
@@ -58,10 +65,14 @@ internal sealed class HostRoutingSnapshot
     /// <summary>Gets the immutable executable route metadata compiled from <see cref="Configuration"/>.</summary>
     internal ImmutableDictionary<Guid, ExecutableRoute> ExecutableRoutes { get; }
 
+    /// <summary>Gets the persisted service ownership paired with <see cref="Configuration"/>.</summary>
+    internal ImmutableDictionary<Guid, string?> ServiceOwners { get; }
+
     /// <summary>Gets the opaque extension dispatch generation paired with this snapshot.</summary>
     internal ExtensionDispatchGeneration? DispatchGeneration { get; }
 
     internal HostSnapshotPublicationState Publication { get; }
+
 
     private static ImmutableDictionary<Guid, ExecutableRoute> BuildExecutableRoutesOrEmpty(
         HostConfigurationSnapshot configuration)
@@ -256,7 +267,6 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
 {
     private readonly object _replacementGate = new();
     private HostRoutingSnapshot? _published;
-
     /// <inheritdoc />
     public HostConfigurationSnapshot? Current => Volatile.Read(ref _published)?.Configuration;
 
@@ -268,12 +278,18 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     /// <inheritdoc />
     public bool HasSnapshot => Current is not null;
 
-    /// <summary>Attempts to replace the current snapshot with a complete validated value.</summary>
-    public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null);
+    /// <inheritdoc />
+    public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null, null);
 
     internal bool TryReplace(
         HostConfigurationSnapshot snapshot,
-        ExtensionDispatchGeneration? dispatchGeneration)
+        ExtensionDispatchGeneration? dispatchGeneration) =>
+        TryReplace(snapshot, dispatchGeneration, null);
+
+    internal bool TryReplace(
+        HostConfigurationSnapshot snapshot,
+        ExtensionDispatchGeneration? dispatchGeneration,
+        ImmutableDictionary<Guid, string?>? serviceOwners)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         if (!HostConfigurationSnapshotValidator.IsComplete(snapshot) ||
@@ -281,6 +297,10 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         {
             return false;
         }
+
+        serviceOwners ??= snapshot.Services.ToImmutableDictionary(
+            static value => value.Id,
+            static _ => (string?)null);
 
         RouteSnapshotBuildResult routeBuild;
         try
@@ -302,7 +322,8 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             snapshot,
             routeBuild.Snapshot,
             executableRoutes,
-            dispatchGeneration);
+            dispatchGeneration,
+            serviceOwners);
         HostRoutingSnapshot? previous;
         lock (_replacementGate)
         {

@@ -749,3 +749,42 @@ BEGIN
 END $EF$;
 COMMIT;
 
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820120000_AddExtensionOwnerMetadata') THEN
+    ALTER TABLE nekostick.services ADD owner_extension_id character varying(128);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820120000_AddExtensionOwnerMetadata') THEN
+    ALTER TABLE nekostick.routes ADD owner_extension_id character varying(128);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820120000_AddExtensionOwnerMetadata') THEN
+    CREATE INDEX ix_routes_owner_extension_id ON nekostick.routes (owner_extension_id);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820120000_AddExtensionOwnerMetadata') THEN
+    CREATE INDEX ix_services_owner_extension_id ON nekostick.services (owner_extension_id);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820120000_AddExtensionOwnerMetadata') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260820120000_AddExtensionOwnerMetadata', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+

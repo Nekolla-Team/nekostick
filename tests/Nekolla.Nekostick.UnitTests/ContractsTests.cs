@@ -194,12 +194,12 @@ public sealed class ContractsTests
         var compatibleFix = new HostApiVersion(current.Major, current.Minor, current.Patch + 1);
         var incompatible = new HostApiVersion(current.Major + 1, 0, 0);
 
-        Assert.Equal(new HostApiVersion(1, 0, 0), current);
-        Assert.Equal("1.0.0", current.ToString());
+        Assert.Equal(new HostApiVersion(1, 1, 0), current);
+        Assert.Equal("1.1.0", current.ToString());
         Assert.True(compatibleFeature.CompareTo(current) > 0);
         Assert.True(compatibleFix.CompareTo(current) > 0);
         Assert.True(incompatible.CompareTo(current) > 0);
-        Assert.Equal(0, current.CompareTo(new HostApiVersion(1, 0, 0)));
+        Assert.Equal(0, current.CompareTo(new HostApiVersion(1, 1, 0)));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(-1, 0, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(0, -1, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(0, 0, -1));

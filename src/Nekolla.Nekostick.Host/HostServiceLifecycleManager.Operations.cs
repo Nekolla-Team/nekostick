@@ -499,15 +499,19 @@ public sealed partial class HostServiceLifecycleManager
             }
 
             var now = DateTimeOffset.UtcNow;
+            var serviceOwners = _snapshotHolder.RoutingSnapshot?.ServiceOwners;
             var leases = new List<HostServiceEndpointLease>();
             foreach (var slot in _slots.Values)
             {
                 ServiceGeneration? generation;
                 lock (slot.Gate) generation = slot.Active;
-                if (generation is { Ready: true, Lease: { } lease } && !lease.IsExpired(now))
+                if (generation is not { Ready: true, Lease: { } lease } || lease.IsExpired(now) ||
+                    serviceOwners is null || !serviceOwners.TryGetValue(lease.ServiceId, out var owner))
                 {
-                    leases.Add(new HostServiceEndpointLease(lease.ServiceId, lease.Port, lease.ExpiresAt));
+                    continue;
                 }
+
+                leases.Add(new HostServiceEndpointLease(lease.ServiceId, lease.Port, lease.ExpiresAt, owner));
             }
 
             _endpointPublisher.Publish(leases);

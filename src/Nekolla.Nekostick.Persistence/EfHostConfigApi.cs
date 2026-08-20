@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Nekolla.Nekostick.Contracts;
@@ -13,6 +14,13 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly EfHostConfigEntityOperations _entityOperations;
     private readonly EfHostConfigRevisionHelper _revisionHelper;
+    private readonly AsyncLocal<OwnerWriteContext?> _ownerWriteContext = new();
+
+    private sealed record OwnerWriteContext(
+        string ExtensionId,
+        IReadOnlySet<Guid> RouteIds,
+        IReadOnlySet<Guid> ServiceIds);
+
 
     /// <summary>Creates the EF-backed host configuration API.</summary>
     /// <param name="dbContext">The scoped PostgreSQL context owned by the host.</param>
@@ -205,15 +213,33 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             }
 
             var now = _timeProvider.GetUtcNow();
-            _entityOperations.ApplyReplacement(
-                changes,
-                revision,
-                globalSettings,
-                routes,
-                services,
-                extensionRecords,
-                extensionSettings,
-                now);
+            if (_ownerWriteContext.Value is { } ownerContext)
+            {
+                _entityOperations.ApplyReplacement(
+                    changes,
+                    revision,
+                    globalSettings,
+                    routes,
+                    services,
+                    extensionRecords,
+                    extensionSettings,
+                    now,
+                    ownerContext.ExtensionId,
+                    ownerContext.RouteIds,
+                    ownerContext.ServiceIds);
+            }
+            else
+            {
+                _entityOperations.ApplyReplacement(
+                    changes,
+                    revision,
+                    globalSettings,
+                    routes,
+                    services,
+                    extensionRecords,
+                    extensionSettings,
+                    now);
+            }
 
             var newVersion = EfHostConfigRevisionHelper.IncrementVersion(revision.Version);
             revision.Version = newVersion;
@@ -256,6 +282,88 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             _gate.Release();
         }
     }
+
+    internal async ValueTask<ConfigurationReadResult<ExtensionConfigurationSnapshot>> ReadExtensionOwnedAsync(
+        string extensionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!HostConfigurationSemanticValidator.IsSafeExtensionId(extensionId))
+        {
+            return ConfigurationReadResult<ExtensionConfigurationSnapshot>.Failure(
+                new ConfigurationError(ConfigurationErrorCode.Validation));
+        }
+
+        var full = await ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        if (!full.IsSuccess || full.Value is not { } snapshot)
+        {
+            return ConfigurationReadResult<ExtensionConfigurationSnapshot>.Failure(full.Errors.ToArray());
+        }
+
+        var routeIds = await _dbContext.Routes.AsNoTracking()
+            .Where(value => value.OwnerExtensionId == extensionId)
+            .Select(value => value.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var serviceIds = await _dbContext.Services.AsNoTracking()
+            .Where(value => value.OwnerExtensionId == extensionId)
+            .Select(value => value.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var routeSet = routeIds.ToHashSet();
+        var serviceSet = serviceIds.ToHashSet();
+        return ConfigurationReadResult<ExtensionConfigurationSnapshot>.Success(
+            new ExtensionConfigurationSnapshot(
+                snapshot.Version,
+                snapshot.Routes.Where(value => routeSet.Contains(value.Id))
+                    .Select(MapExtensionRoute).ToImmutableArray(),
+                snapshot.Services.Where(value => serviceSet.Contains(value.Id))
+                    .Select(MapExtensionService).ToImmutableArray(),
+                snapshot.ExtensionSettings.SingleOrDefault(value =>
+                    string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal))));
+    }
+
+    internal async ValueTask<ConfigurationWriteResult> WriteExtensionOwnedSnapshotAsync(
+        string extensionId,
+        long expectedVersion,
+        ConfigurationChangeSet changes,
+        IReadOnlySet<Guid> ownedRouteIds,
+        IReadOnlySet<Guid> ownedServiceIds,
+        CancellationToken cancellationToken = default)
+    {
+        var previous = _ownerWriteContext.Value;
+        _ownerWriteContext.Value = new OwnerWriteContext(extensionId, ownedRouteIds, ownedServiceIds);
+        try
+        {
+            return await WriteSnapshotAsync(expectedVersion, changes, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ownerWriteContext.Value = previous;
+        }
+    }
+
+    private static ExtensionRouteConfiguration MapExtensionRoute(RouteConfiguration route)
+    {
+        ExtensionRouteTargetConfiguration target = route.Target switch
+        {
+            ExtensionHandlerRouteTargetConfiguration handler => new ExtensionHandlerRouteTarget(handler.HandlerId),
+            MicroserviceRouteTargetConfiguration service => new ExtensionServiceRouteTarget(service.ServiceId),
+            _ => throw new HostConfigurationSemanticValidator.ConfigurationValidationException()
+        };
+        return new ExtensionRouteConfiguration(route.Id, route.Enabled, route.Matcher, target, route.Priority);
+    }
+
+    private static ExtensionServiceConfiguration MapExtensionService(ServiceConfiguration service) =>
+        new(
+            service.Id,
+            service.Enabled,
+            service.FileName,
+            service.ArgumentList,
+            service.WorkingDirectory,
+            service.StartMode,
+            service.RestartPolicy,
+            service.HealthCheck,
+            service.CreatedAt,
+            service.UpdatedAt,
+            service.Version);
 
     /// <inheritdoc />
     public async ValueTask<ConfigurationReadResult<ExtensionSettingsConfiguration>> ReadExtensionSettingsAsync(

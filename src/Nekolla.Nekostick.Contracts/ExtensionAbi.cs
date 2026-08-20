@@ -7,7 +7,7 @@ namespace Nekolla.Nekostick.Contracts;
 public static class ExtensionAbi
 {
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
-    public static HostApiVersion Version { get; } = new(1, 0, 0);
+    public static HostApiVersion Version { get; } = new(1, 1, 0);
 
     /// <summary>Determines whether a host API version can satisfy an extension ABI requirement.</summary>
     /// <param name="required">The required version.</param>
@@ -413,6 +413,17 @@ public interface IExtensionRegistration
 
     /// <summary>Attempts to register the sole global fallback.</summary>
     bool TryRegisterFallback(IExtensionFallback fallback);
+
+    /// <summary>Attempts to unregister one handler ID owned by this extension.</summary>
+    /// <remarks>The operation is a nonblocking future-dispatch tombstone; an active invocation may finish.</remarks>
+    /// <param name="handlerId">The stable handler identifier.</param>
+    /// <returns><see langword="true" /> when the handler was tombstoned for future dispatch.</returns>
+    bool TryUnregisterHandler(string handlerId);
+
+    /// <summary>Attempts to unregister this extension's fallback.</summary>
+    /// <remarks>The operation is a nonblocking future-dispatch tombstone; an active invocation may finish.</remarks>
+    /// <returns><see langword="true" /> when the fallback was tombstoned for future dispatch.</returns>
+    bool TryUnregisterFallback();
 }
 
 /// <summary>Provides lifecycle state, typed contracts, and registration to an extension entrypoint.</summary>
@@ -437,8 +448,23 @@ public interface IExtensionHostBridge
     /// <summary>Gets the host API version used for compatibility checks.</summary>
     HostApiVersion ApiVersion { get; }
 
-    /// <summary>Gets read-only versioned extension settings.</summary>
+    /// <summary>Gets the legacy read-only versioned extension settings view.</summary>
     IExtensionSettingsReader Configuration { get; }
+
+    /// <summary>Gets the full owned configuration and settings facade introduced in API 1.1.</summary>
+    IExtensionConfigurationApi ConfigurationApi { get; }
+
+    /// <summary>Gets owned route configuration operations.</summary>
+    IExtensionRouteApi Routes { get; }
+
+    /// <summary>Gets owned service configuration and lifecycle operations.</summary>
+    IExtensionServiceApi Services { get; }
+
+    /// <summary>Gets read-only published endpoint lease information.</summary>
+    IExtensionEndpointApi Endpoints { get; }
+
+    /// <summary>Gets self-scoped lifecycle status and requests.</summary>
+    IExtensionLifecycleApi Lifecycle { get; }
 
     /// <summary>Gets the startup-only typed shared-contract registry.</summary>
     IExtensionContractRegistry Contracts { get; }

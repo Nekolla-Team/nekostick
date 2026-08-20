@@ -147,6 +147,9 @@ public sealed class Route
     /// <summary>Gets or sets the absolute root for a static target.</summary>
     public string? StaticRootPath { get; set; }
 
+    /// <summary>Gets or sets the stable extension owner identifier; null denotes host ownership.</summary>
+    public string? OwnerExtensionId { get; set; }
+
     /// <summary>Gets or sets the stable extension handler identifier.</summary>
     public string? ExtensionHandlerId { get; set; }
 
@@ -242,6 +245,9 @@ public sealed class Service
 
     /// <summary>Gets or sets the absolute working directory.</summary>
     public string WorkingDirectory { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the stable extension owner identifier; null denotes host ownership.</summary>
+    public string? OwnerExtensionId { get; set; }
 
     /// <summary>Gets or sets sensitive environment overrides as JSONB.</summary>
     public string EnvironmentJson { get; set; } = "{}";

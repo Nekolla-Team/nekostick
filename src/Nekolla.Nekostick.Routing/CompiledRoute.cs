@@ -120,7 +120,7 @@ internal class RouteTargetData
     {
         MicroserviceRouteTarget microservice => new MicroserviceTargetData(microservice.ServiceId),
         StaticFileRouteTarget staticFile => new StaticFileTargetData(staticFile.RootPath),
-        ExtensionHandlerRouteTarget extension => new ExtensionTargetData(extension.HandlerId),
+        global::Nekolla.Nekostick.Domain.ExtensionHandlerRouteTarget extension => new ExtensionTargetData(extension.HandlerId),
         _ => null
     };
 }

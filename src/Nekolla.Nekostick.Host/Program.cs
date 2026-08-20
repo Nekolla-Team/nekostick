@@ -214,8 +214,10 @@ internal static class Program
             new HostRoutingSnapshotAccessor(
                 serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>()));
         builder.Services.AddSingleton<HostRequestAdmission>();
-        builder.Services.AddSingleton<ExtensionRuntimeManager>(_ =>
-            new ExtensionRuntimeManager(HostApiVersion.Current));
+        builder.Services.AddSingleton<ExtensionRuntimeManager>(serviceProvider =>
+            new ExtensionRuntimeManager(
+                HostApiVersion.Current,
+                capabilityFactory: serviceProvider.GetService<IExtensionCapabilityFactory>()));
         builder.Services.AddSingleton<HostConfigurationPublisher>();
         builder.Services.AddSingleton<IRouteFallbackDispatcher, ExtensionRouteFallbackDispatcher>();
         builder.Services.AddMicroserviceProxy();
@@ -247,6 +249,12 @@ internal static class Program
             new HostConfigApiReadOnlyDecorator(
                 serviceProvider.GetRequiredService<EfHostConfigApi>(),
                 serviceProvider.GetRequiredService<HostRuntimeOptions>()));
+        builder.Services.AddScoped<IExtensionOwnedConfigurationApi, EfExtensionOwnedConfigurationApi>();
+        builder.Services.AddSingleton<IExtensionCapabilityFactory>(serviceProvider =>
+            new ExtensionCapabilityFactory(
+                serviceProvider.GetRequiredService<IServiceScopeFactory>(),
+                serviceProvider.GetRequiredService<HostRuntimeState>(),
+                serviceProvider));
 
         if (command.Kind == CliCommandKind.Run)
         {

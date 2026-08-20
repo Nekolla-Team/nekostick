@@ -148,6 +148,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     private readonly CollectibleExtensionLoader _loader;
     private readonly HostApiVersion _hostApiVersion;
     private readonly ExtensionContractCatalog _contractCatalog;
+    private readonly IExtensionCapabilityFactory? _capabilityFactory;
     private readonly Dictionary<string, ExtensionInstance> _instances = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HandlerBinding> _handlers = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _dispatchLifetime = new();
@@ -157,12 +158,15 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     /// <summary>Creates an explicit-only runtime manager for one host API version and catalog.</summary>
     /// <param name="hostApiVersion">The host API version used for compatibility checks.</param>
     /// <param name="contractCatalog">The immutable host-owned shared contract catalog.</param>
+    /// <param name="capabilityFactory">The optional host-owned factory for extension capabilities.</param>
     public ExtensionRuntimeManager(
         HostApiVersion hostApiVersion,
-        ExtensionContractCatalog? contractCatalog = null)
+        ExtensionContractCatalog? contractCatalog = null,
+        IExtensionCapabilityFactory? capabilityFactory = null)
     {
         _hostApiVersion = hostApiVersion;
         _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault();
+        _capabilityFactory = capabilityFactory;
         _loader = new CollectibleExtensionLoader(
             new SemVersion(hostApiVersion.Major, hostApiVersion.Minor, hostApiVersion.Patch),
             _contractCatalog);
@@ -482,10 +486,14 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
         }
 
 
-        if (binding is null || binding.Handler is not { } handler || !binding.Instance.TryEnterRequest())
+        if (binding is null || binding.Handler is not { } handler ||
+            !binding.Instance.IsHandlerOwned(handlerId) ||
+            !binding.Instance.TryEnterRequest())
         {
             return ExtensionInvocationResult.Unavailable;
         }
+
+        using var callbackScope = ExtensionCallbackGuard.Enter();
 
         try
         {
@@ -536,10 +544,12 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
             binding = _fallback;
         }
 
-        if (binding is null || !binding.Instance.TryEnterRequest())
+        if (binding is null || !binding.Instance.IsFallbackOwned || !binding.Instance.TryEnterRequest())
         {
             return ExtensionInvocationResult.NotHandled;
         }
+
+        using var callbackScope = ExtensionCallbackGuard.Enter();
 
         try
         {
@@ -686,10 +696,16 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
                 loaded.Handle,
                 _hostApiVersion,
                 settings,
-                ResolveContractProvider);
-            instance.SetSettings(settings);
+                ResolveContractProvider,
+                _capabilityFactory);
             instance.SetFailureCallback(exception =>
                 RecordFailureAsync(instance, ExtensionFailureCode.CallbackFailed, exception));
+            instance.SetLifecycleCallbacks(
+                cancellationToken => RequestReloadAsync(instance, cancellationToken),
+                cancellationToken => RequestUnloadAsync(instance, cancellationToken));
+            instance.SetUnregisterCallbacks(
+                handlerId => RemoveHandlerRegistration(instance, handlerId),
+                () => RemoveFallbackRegistration(instance));
             if (!await instance.StartAsync(reloading, LifecycleTimeout, cancellationToken).ConfigureAwait(false))
             {
                 await instance.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
@@ -712,6 +728,97 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
             return CandidateResult.Failure(ExtensionFailureCode.EntryConstructorFailed);
         }
     }
+    private async ValueTask<ExtensionLifecycleOperationResult> RequestReloadAsync(
+
+        ExtensionInstance instance,
+        CancellationToken cancellationToken)
+    {
+        if (ExtensionCallbackGuard.IsActive)
+        {
+            return new(false, ExtensionLifecycleOperationCode.Reentrant, instance.GetLifecycleStatus());
+        }
+
+        try
+        {
+            var result = await ReloadAsync(instance.Manifest, instance.Settings, cancellationToken).ConfigureAwait(false);
+            return ToLifecycleResult(result);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(false, ExtensionLifecycleOperationCode.Cancelled, instance.GetLifecycleStatus());
+        }
+        catch
+        {
+            return new(false, ExtensionLifecycleOperationCode.Failed, instance.GetLifecycleStatus());
+        }
+    }
+
+    private async ValueTask<ExtensionLifecycleOperationResult> RequestUnloadAsync(
+        ExtensionInstance instance,
+        CancellationToken cancellationToken)
+    {
+        if (ExtensionCallbackGuard.IsActive)
+        {
+            return new(false, ExtensionLifecycleOperationCode.Reentrant, instance.GetLifecycleStatus());
+        }
+
+        try
+        {
+            var result = await UnloadAsync(instance.Manifest.Id, cancellationToken).ConfigureAwait(false);
+            return ToLifecycleResult(result);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(false, ExtensionLifecycleOperationCode.Cancelled, instance.GetLifecycleStatus());
+        }
+        catch
+        {
+            return new(false, ExtensionLifecycleOperationCode.Failed, instance.GetLifecycleStatus());
+        }
+    }
+
+    private static ExtensionLifecycleOperationResult ToLifecycleResult(ExtensionRuntimeOperationResult result) =>
+        new(
+            result.Succeeded,
+            result.Succeeded
+                ? ExtensionLifecycleOperationCode.Accepted
+                : result.FailureCode switch
+                {
+                    ExtensionFailureCode.ExtensionNotLoaded => ExtensionLifecycleOperationCode.NotFound,
+                    ExtensionFailureCode.AlreadyStopped => ExtensionLifecycleOperationCode.AlreadyStopped,
+                    ExtensionFailureCode.Cancelled => ExtensionLifecycleOperationCode.Cancelled,
+                    ExtensionFailureCode.HandlerConflict or ExtensionFailureCode.FallbackConflict => ExtensionLifecycleOperationCode.Conflict,
+                    _ => ExtensionLifecycleOperationCode.Failed
+                },
+            result.Status is null ? null : ToLifecycleStatus(result.Status));
+
+    private static ExtensionLifecycleStatus ToLifecycleStatus(ExtensionRuntimeStatus status) =>
+        new(
+            status.ExtensionId,
+            status.Version,
+            status.State,
+            status.HandlerCount,
+            status.HasFallback,
+            status.ActiveRequests,
+            status.ActiveTasks,
+            status.FailureCount,
+            status.DroppedEvents,
+            status.LastFailure switch
+            {
+                ExtensionFailureCode.InvalidArgument => ExtensionLifecycleFailureCode.InvalidArgument,
+                ExtensionFailureCode.Cancelled => ExtensionLifecycleFailureCode.Cancelled,
+                ExtensionFailureCode.AlreadyStopped => ExtensionLifecycleFailureCode.AlreadyStopped,
+                ExtensionFailureCode.ExtensionNotLoaded => ExtensionLifecycleFailureCode.ExtensionNotLoaded,
+                ExtensionFailureCode.LoadFailed => ExtensionLifecycleFailureCode.LoadFailed,
+                ExtensionFailureCode.LifecycleFailed => ExtensionLifecycleFailureCode.LifecycleFailed,
+                ExtensionFailureCode.StopFailed => ExtensionLifecycleFailureCode.StopFailed,
+                ExtensionFailureCode.HandlerFailed => ExtensionLifecycleFailureCode.HandlerFailed,
+                ExtensionFailureCode.CallbackFailed => ExtensionLifecycleFailureCode.CallbackFailed,
+                ExtensionFailureCode.HandlerConflict or ExtensionFailureCode.FallbackConflict => ExtensionLifecycleFailureCode.RegistrationConflict,
+                ExtensionFailureCode.ReplacementPreserved => ExtensionLifecycleFailureCode.ReplacementPreserved,
+                _ => ExtensionLifecycleFailureCode.RuntimeUnavailable
+            });
+
 
     private ExtensionFailureCode GetRegistrationConflict(ExtensionInstance candidate, ExtensionInstance? previous)
     {
@@ -876,6 +983,28 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
         }
     }
 
+    private void RemoveHandlerRegistration(ExtensionInstance instance, string handlerId)
+    {
+        lock (_gate)
+        {
+            if (_handlers.TryGetValue(handlerId, out var binding) && ReferenceEquals(binding.Instance, instance))
+            {
+                _handlers.Remove(handlerId);
+            }
+        }
+    }
+
+    private void RemoveFallbackRegistration(ExtensionInstance instance)
+    {
+        lock (_gate)
+        {
+            if (_fallback is not null && ReferenceEquals(_fallback.Instance, instance))
+            {
+                _fallback = null;
+            }
+        }
+    }
+
     private void RemoveInstanceRegistrations(ExtensionInstance instance)
     {
         foreach (var handlerId in instance.Handlers.Keys)
@@ -970,13 +1099,15 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     private readonly object _gate = new();
     private readonly ExtensionLoadHandle _loadHandle;
     private IExtensionEntrypoint? _entrypoint;
-    private Func<Exception, ValueTask>? _failureCallback;
+    private Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>>? _reloadCallback;
+    private Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>>? _unloadCallback;
     private Task<bool>? _stopTask;
     private int _activeRequests;
     private readonly ExtensionTaskTracker _tasks;
     private readonly ExtensionEventQueue _events;
     private readonly ExtensionContractRegistry _contracts;
     private readonly ExtensionFailureTracker _failures = new();
+    private Func<Exception, ValueTask>? _failureCallback;
     private readonly ExtensionHostBridge _bridge;
     private readonly ExtensionHandlerRegistry _registry = new();
     private ExtensionLoadState _state = ExtensionLoadState.Discovered;
@@ -986,9 +1117,11 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         ExtensionLoadHandle loadHandle,
         HostApiVersion hostApiVersion,
         ExtensionSettingsConfiguration? settings,
-        Func<string, Type, object?> resolveProvider)
+        Func<string, Type, object?> resolveProvider,
+        IExtensionCapabilityFactory? capabilityFactory)
     {
         Manifest = manifest;
+        Settings = settings;
         _loadHandle = loadHandle;
         _events = new ExtensionEventQueue(NotifyFailureAsync, onDrop: RecordDroppedEvent);
         _tasks = new ExtensionTaskTracker(NotifyFailureAsync);
@@ -996,16 +1129,29 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             manifest.Exports,
             manifest.Imports,
             resolveProvider);
+        var lifecycle = new ExtensionLifecycleApi(
+            GetLifecycleStatus,
+            cancellationToken => _reloadCallback is null
+                ? ValueTask.FromResult(new ExtensionLifecycleOperationResult(false, ExtensionLifecycleOperationCode.Unsupported, GetLifecycleStatus()))
+                : _reloadCallback(cancellationToken),
+            cancellationToken => _unloadCallback is null
+                ? ValueTask.FromResult(new ExtensionLifecycleOperationResult(false, ExtensionLifecycleOperationCode.Unsupported, GetLifecycleStatus()))
+                : _unloadCallback(cancellationToken));
+        var capabilities = capabilityFactory?.Create(manifest.Id, IsHandlerOwned)
+            ?? UnsupportedExtensionCapabilities.Create();
         _bridge = new ExtensionHostBridge(
             hostApiVersion,
             settings,
             _tasks,
             _events,
             _contracts,
+            capabilities,
+            lifecycle,
             _ => { },
             (_, _) => { });
         _entrypoint = loadHandle.CreateEntrypoint(_bridge);
     }
+
 
     internal ExtensionManifest Manifest { get; }
 
@@ -1015,6 +1161,47 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
 
     internal void SetFailureCallback(Func<Exception, ValueTask> callback) => _failureCallback = callback;
 
+    internal void SetLifecycleCallbacks(
+        Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>> reload,
+        Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>> unload)
+    {
+        _reloadCallback = reload;
+        _unloadCallback = unload;
+    }
+    internal void SetUnregisterCallbacks(Action<string> onHandlerUnregistered, Action onFallbackUnregistered) =>
+        _registry.SetUnregisterCallbacks(onHandlerUnregistered, onFallbackUnregistered);
+    internal bool IsHandlerOwned(string handlerId) =>
+        ExtensionIdentifierSyntax.IsValid(handlerId) && _registry.IsHandlerAvailable(handlerId);
+
+    internal bool IsFallbackOwned => _registry.IsFallbackAvailable;
+    internal ExtensionLifecycleStatus GetLifecycleStatus()
+    {
+        var status = GetStatus();
+        return new(
+            status.ExtensionId,
+            status.Version,
+            status.State,
+            status.HandlerCount,
+            status.HasFallback,
+            status.ActiveRequests,
+            status.ActiveTasks,
+            status.FailureCount,
+            status.DroppedEvents,
+            status.LastFailure switch
+            {
+                ExtensionFailureCode.None => ExtensionLifecycleFailureCode.None,
+                ExtensionFailureCode.Cancelled => ExtensionLifecycleFailureCode.Cancelled,
+                ExtensionFailureCode.AlreadyStopped => ExtensionLifecycleFailureCode.AlreadyStopped,
+                ExtensionFailureCode.ExtensionNotLoaded => ExtensionLifecycleFailureCode.ExtensionNotLoaded,
+                ExtensionFailureCode.LoadFailed => ExtensionLifecycleFailureCode.LoadFailed,
+                ExtensionFailureCode.LifecycleFailed => ExtensionLifecycleFailureCode.LifecycleFailed,
+                ExtensionFailureCode.StopFailed => ExtensionLifecycleFailureCode.StopFailed,
+                ExtensionFailureCode.HandlerFailed => ExtensionLifecycleFailureCode.HandlerFailed,
+                ExtensionFailureCode.CallbackFailed => ExtensionLifecycleFailureCode.CallbackFailed,
+                ExtensionFailureCode.ReplacementPreserved => ExtensionLifecycleFailureCode.ReplacementPreserved,
+                _ => ExtensionLifecycleFailureCode.RuntimeUnavailable
+            });
+    }
     internal async ValueTask<bool> StartAsync(
         bool reloading,
         TimeSpan timeout,
@@ -1024,12 +1211,16 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         {
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(timeout);
-            await _entrypoint!.StartAsync(
-                    new ExtensionStartContext(reloading, _bridge, _contracts, _registry),
-                    timeoutSource.Token)
-                .AsTask()
-                .WaitAsync(timeoutSource.Token)
-                .ConfigureAwait(false);
+            using (ExtensionCallbackGuard.Enter())
+            {
+                await _entrypoint!.StartAsync(
+                        new ExtensionStartContext(reloading, _bridge, _contracts, _registry),
+                        timeoutSource.Token)
+                    .AsTask()
+                    .WaitAsync(timeoutSource.Token)
+                    .ConfigureAwait(false);
+            }
+
             if (_registry.RegistrationRejected)
             {
                 _lastFailure = ExtensionFailureCode.HandlerConflict;
@@ -1057,10 +1248,14 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         try
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
-            await _entrypoint!.OnPreviousStoppedAsync(timeoutSource.Token)
-                .AsTask()
-                .WaitAsync(timeoutSource.Token)
-                .ConfigureAwait(false);
+            using (ExtensionCallbackGuard.Enter())
+            {
+                await _entrypoint!.OnPreviousStoppedAsync(timeoutSource.Token)
+                    .AsTask()
+                    .WaitAsync(timeoutSource.Token)
+                    .ConfigureAwait(false);
+            }
+
             return true;
         }
         catch (Exception exception)
@@ -1229,10 +1424,13 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         try
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
-            await _entrypoint!.StopAsync(timeoutSource.Token)
-                .AsTask()
-                .WaitAsync(timeoutSource.Token)
-                .ConfigureAwait(false);
+            using (ExtensionCallbackGuard.Enter())
+            {
+                await _entrypoint!.StopAsync(timeoutSource.Token)
+                    .AsTask()
+                    .WaitAsync(timeoutSource.Token)
+                    .ConfigureAwait(false);
+            }
         }
         catch (Exception exception)
         {

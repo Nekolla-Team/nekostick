@@ -345,7 +345,7 @@ Host API 至少提供：
 - extension handler 注册、注销、load、unload、reload API。
 - 共享 contract 的 export/import API。
 
-扩展不注册任意 HTTP endpoint 或 health endpoint。其 HTTP 接入仅限于 route target 指向的稳定 handler ID，以及全局唯一 fallback。handler 直接处理 `HttpContext` 并拥有 response 写入权；未加载、已停止或正在切换的 handler target 返回 `503`，handler 未处理异常返回 `500`。系统最多允许一个 fallback；fallback 在所有 404 候选前调用。
+扩展不注册任意 HTTP endpoint 或 health endpoint。其 HTTP 接入仅限于 route target 指向的稳定 handler ID，以及全局唯一 fallback。Host 在 HTTP 边界将 ASP.NET `HttpContext` 适配为 framework-neutral Contracts DTO `ExtensionHandlerRequest` 后调用 handler 或 fallback；扩展只接收该 DTO，不接收 `HttpContext`、stream 或 Host response object。Host 接收 `ExtensionHandlerResponse`，并负责将其状态码、headers 和 body 写入 `HttpContext.Response`。未加载、已停止或正在切换的 handler target 返回 `503`，handler 未处理异常返回 `500`。系统最多允许一个 fallback；fallback 在所有 404 候选前调用。
 
 ### 7.3 显式加载、卸载与重载
 

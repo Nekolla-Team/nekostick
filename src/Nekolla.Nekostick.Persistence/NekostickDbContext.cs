@@ -272,6 +272,7 @@ public sealed class NekostickDbContext : DbContext
         builder.Property(value => value.ServiceId).HasColumnName("service_id").HasColumnType("uuid");
         builder.Property(value => value.StaticRootPath).HasColumnName("static_root_path").HasMaxLength(4096);
         builder.Property(value => value.ExtensionHandlerId).HasColumnName("extension_handler_id").HasMaxLength(256);
+        builder.Property(value => value.OwnerExtensionId).HasColumnName("owner_extension_id").HasMaxLength(128);
         builder.Property(value => value.Priority).HasColumnName("priority").HasColumnType("integer").IsRequired();
         ConfigureEnum(builder.Property(value => value.ForwardingMode).HasColumnName("forwarding_mode"), 16);
         builder.Property(value => value.ReplaceTemplate).HasColumnName("replace_template").HasMaxLength(4096);
@@ -333,6 +334,7 @@ public sealed class NekostickDbContext : DbContext
         builder.Property(value => value.ArgumentListJson).HasColumnName("argument_list_json").HasColumnType("jsonb").IsRequired();
         builder.Property(value => value.WorkingDirectory).HasColumnName("working_directory").HasMaxLength(4096).IsRequired();
         builder.Property(value => value.EnvironmentJson).HasColumnName("environment_json").HasColumnType("jsonb").IsRequired();
+        builder.Property(value => value.OwnerExtensionId).HasColumnName("owner_extension_id").HasMaxLength(128);
         ConfigureEnum(builder.Property(value => value.StartMode).HasColumnName("start_mode"), 16);
         ConfigureEnum(builder.Property(value => value.RestartPolicy).HasColumnName("restart_policy"), 16);
         ConfigureEnum(builder.Property(value => value.HealthCheckType).HasColumnName("health_check_type"), 16);
