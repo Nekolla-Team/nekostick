@@ -1,0 +1,196 @@
+name: Publish Contracts NuGet
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj"
+
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Optional NuGet PackageVersion override. Leave empty to use the project value."
+        required: false
+        type: string
+
+concurrency:
+  group: publish-contracts
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  PROJECT_FILE: src/Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+
+jobs:
+  resolve-package-version:
+    name: Resolve Contracts package version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.current }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve PackageVersion
+        id: version
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: |
+          set -euo pipefail
+
+          extract_package_version() {
+            python3 -c '
+          import sys
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.fromstring(sys.stdin.read())
+          except (ET.ParseError, UnicodeDecodeError):
+              print("")
+              raise SystemExit(0)
+
+          for element in root.iter():
+              if element.tag.rsplit("}", 1)[-1] == "PackageVersion":
+                  print((element.text or "").strip())
+                  break
+          else:
+              print("")
+          '
+          }
+
+          source_version="$(extract_package_version < "$PROJECT_FILE")"
+          if [[ -z "$source_version" ]]; then
+            echo "::error::PackageVersion is missing from $PROJECT_FILE."
+            exit 1
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            current_version="${MANUAL_PACKAGE_VERSION:-$source_version}"
+            publish=true
+            echo "Manual dispatch bypasses PackageVersion history comparison."
+          else
+            current_version="$source_version"
+            previous_version=""
+            zero_sha="0000000000000000000000000000000000000000"
+            if [[ "${BEFORE_SHA:-}" != "$zero_sha" ]] &&
+               git cat-file -e "${BEFORE_SHA}:${PROJECT_FILE}" 2>/dev/null; then
+              previous_version="$(
+                git show "${BEFORE_SHA}:${PROJECT_FILE}" |
+                  extract_package_version
+              )"
+            fi
+
+            if [[ "$current_version" == "$previous_version" ]]; then
+              publish=false
+              echo "PackageVersion unchanged ($current_version); ending before build and publish."
+            else
+              publish=true
+              echo "PackageVersion changed: ${previous_version:-<none>} -> $current_version"
+            fi
+          fi
+
+          if [[ "$current_version" == *$'\r'* || "$current_version" == *$'\n'* ]]; then
+            echo "::error::PackageVersion must be a single line."
+            exit 1
+          fi
+
+          printf 'publish=%s\ncurrent=%s\n' "$publish" "$current_version" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Pack and publish Contracts
+    needs: resolve-package-version
+    if: needs.resolve-package-version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: nuget-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NUGET_SOURCE: https://api.nuget.org/v3/index.json
+      PACKAGE_VERSION: ${{ needs.resolve-package-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.100"
+
+      - name: Restore Contracts project
+        run: dotnet restore "$PROJECT_FILE" --nologo
+
+      - name: Build Contracts project
+        run: dotnet build "$PROJECT_FILE" --configuration Release --no-restore --nologo --verbosity minimal -p:PackageVersion="$PACKAGE_VERSION"
+
+      - name: Pack Contracts project
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/nekostick-contracts-package"
+          rm -rf "$package_dir"
+          mkdir -p "$package_dir"
+
+          dotnet pack "$PROJECT_FILE" \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            -p:PackageVersion="$PACKAGE_VERSION" \
+            --output "$package_dir" \
+            --nologo
+
+          shopt -s nullglob
+          packages=("$package_dir"/Nekolla.Nekostick.Contracts.*.nupkg)
+          if (( ${#packages[@]} != 1 )); then
+            echo "::error::Expected exactly one Contracts NuGet package, found ${#packages[@]}."
+            printf '  %s\n' "${packages[@]}"
+            exit 1
+          fi
+
+          echo "package=${packages[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate NuGet trusted publisher identity
+        env:
+          NUGET_USER: ${{ secrets.NUGET_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$NUGET_USER" ]]; then
+            echo "::error::Configure the NUGET_USER secret with the nuget.org profile name."
+            exit 1
+          fi
+
+      - name: NuGet login (OIDC trusted publishing)
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Publish Contracts NuGet package
+        env:
+          PACKAGE_PATH: ${{ steps.pack.outputs.package }}
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet nuget push "$PACKAGE_PATH" \
+            --api-key "$NUGET_API_KEY" \
+            --source "$NUGET_SOURCE" \
+            --timeout 300
