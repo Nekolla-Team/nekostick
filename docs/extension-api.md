@@ -96,7 +96,13 @@ JSON 和 YAML 同时存在时拒绝该目录。JSON 使用严格解析：不接�
 
 ### 3.1 Discovery 与加载
 
-Host 只对显式指定的目录/manifest 执行 discovery 和 load，不扫描后自动加载。`ManifestDiscoveryResult` 暴露 `Succeeded`、`FailureCode`、`SourceFormat` 和成功时的 `ExtensionManifest`；`ExtensionGraphResult` 暴露依赖校验结果和确定性的 `OrderedManifests`。
+Host 运行时在启动或配置快照重新发布时, 会自动扫描可执行文件目录下的 `extensions/<extension-directory>/`。扫描成功的 manifest 仍必须通过 schema、路径、entry type、Host API、dependency graph 和 contract 校验。
+
+当完整配置快照中的 `ExtensionRecords` 为空时, Host 进入 bootstrap 模式, 将本次扫描得到的全部有效且依赖图可排序的 manifest 加入 staged generation 并加载。这个模式只进行运行时激活, 不会为 extension 自动创建或持久化 `ExtensionRecord`。`--skip-extensions` 仍会完全禁用该行为。
+
+当 `ExtensionRecords` 非空时, 保持显式配置模式: 只有存在唯一 `LoadState == Loaded` 记录, 且记录 ID/version 与 manifest 精确匹配时才会加载; `Discovered`、`Stopped`、`Failed` 或版本不匹配的记录不会触发 bootstrap。
+
+`ExtensionManifestDiscovery.Discover` 和 `ExtensionRuntimeManager.LoadAsync` 仍是显式 API; `LoadAsync` 接收已发现的 manifest, 不自行扫描目录。Host 也没有 filesystem watcher, 仅在启动或既有配置刷新发布路径中重新执行扫描。
 
 校验顺序包括：
 

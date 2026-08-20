@@ -17,6 +17,84 @@ namespace Nekolla.Nekostick.UnitTests;
 public sealed class HostExtensionEvidenceTests
 {
     private const string FixtureExtensionId = "fixture.extension.deterministic";
+    private static readonly SemaphoreSlim OutputExtensionGate = new(1, 1);
+
+    [Fact]
+    public async Task EmptyExtensionRecordsSnapshotBootstrapsValidOutputFixture()
+    {
+        await OutputExtensionGate.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            using var fixture = TestExtensionDirectory.CreateJson();
+            using var staged = StagedHostExtensionDirectory.Create(fixture.RootPath);
+            await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+            var holder = new HostConfigurationSnapshotHolder();
+            await using var publisher = new HostConfigurationPublisher(
+                holder,
+                manager,
+                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+                NullLogger<HostConfigurationPublisher>.Instance);
+            var snapshot = CreatePublisherSnapshot(
+                1,
+                ImmutableArray<ExtensionRecordConfiguration>.Empty);
+
+            Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+
+            Assert.Same(snapshot, holder.Current);
+            Assert.Empty(holder.Current!.ExtensionRecords);
+            var status = manager.GetStatus(FixtureExtensionId);
+            Assert.NotNull(status);
+            Assert.Equal(ExtensionLoadState.Loaded, status!.State);
+        }
+        finally
+        {
+            OutputExtensionGate.Release();
+        }
+    }
+
+    [Theory]
+    [InlineData(ExtensionLoadState.Discovered)]
+    [InlineData(ExtensionLoadState.Stopped)]
+    [InlineData(ExtensionLoadState.Failed)]
+    public async Task NonLoadedExtensionRecordDoesNotBootstrapOutputFixture(
+        ExtensionLoadState loadState)
+    {
+        await OutputExtensionGate.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            using var fixture = TestExtensionDirectory.CreateJson();
+            using var staged = StagedHostExtensionDirectory.Create(fixture.RootPath);
+            await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+            var holder = new HostConfigurationSnapshotHolder();
+            await using var publisher = new HostConfigurationPublisher(
+                holder,
+                manager,
+                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+                NullLogger<HostConfigurationPublisher>.Instance);
+            var record = new ExtensionRecordConfiguration(
+                FixtureExtensionId,
+                "1.0.0",
+                loadState,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                1);
+            var snapshot = CreatePublisherSnapshot(
+                1,
+                ImmutableArray.Create(record),
+                ImmutableArray.Create(Settings(FixtureExtensionId, "non-loaded")));
+
+            Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+
+            Assert.Same(snapshot, holder.Current);
+            Assert.Single(holder.Current!.ExtensionRecords);
+            Assert.Equal(loadState, holder.Current.ExtensionRecords[0].LoadState);
+            Assert.Null(manager.GetStatus(FixtureExtensionId));
+        }
+        finally
+        {
+            OutputExtensionGate.Release();
+        }
+    }
 
     [Fact]
     public async Task PublisherCompletesPrepareReadyExchangeAndCompleteForNormalSnapshot()
@@ -739,7 +817,95 @@ public sealed class HostExtensionEvidenceTests
             records,
             settings);
     }
+    private static HostConfigurationSnapshot CreatePublisherSnapshot(
+        long version,
+        ImmutableArray<ExtensionRecordConfiguration> records,
+        ImmutableArray<ExtensionSettingsConfiguration> settings = default) =>
+        new(
+            version,
+            new GlobalSettingsConfiguration(version: version),
+            ImmutableArray<RouteConfiguration>.Empty,
+            ImmutableArray<ServiceConfiguration>.Empty,
+            records,
+            settings);
 
+    private sealed class StagedHostExtensionDirectory : IDisposable
+    {
+        private readonly string _installRoot;
+        private readonly string _rootPath;
+        private readonly bool _removeInstallRoot;
+
+        private StagedHostExtensionDirectory(
+            string installRoot,
+            string rootPath,
+            bool removeInstallRoot)
+        {
+            _installRoot = installRoot;
+            _rootPath = rootPath;
+            _removeInstallRoot = removeInstallRoot;
+        }
+
+        internal static StagedHostExtensionDirectory Create(string sourceRoot)
+        {
+            var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
+            var removeInstallRoot = !Directory.Exists(installRoot);
+            Directory.CreateDirectory(installRoot);
+            var rootPath = Path.Combine(
+                installRoot,
+                "host-extension-evidence-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                Directory.CreateDirectory(rootPath);
+                foreach (var sourcePath in Directory.EnumerateFiles(
+                    sourceRoot,
+                    "*",
+                    SearchOption.AllDirectories))
+                {
+                    var relativePath = Path.GetRelativePath(sourceRoot, sourcePath);
+                    var targetPath = Path.Combine(rootPath, relativePath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                    File.Copy(sourcePath, targetPath);
+                }
+
+                return new StagedHostExtensionDirectory(
+                    installRoot,
+                    rootPath,
+                    removeInstallRoot);
+            }
+            catch
+            {
+                if (Directory.Exists(rootPath))
+                {
+                    Directory.Delete(rootPath, recursive: true);
+                }
+
+                if (removeInstallRoot &&
+                    Directory.Exists(installRoot) &&
+                    !Directory.EnumerateFileSystemEntries(installRoot).Any())
+                {
+                    Directory.Delete(installRoot);
+                }
+
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(_rootPath))
+            {
+                Directory.Delete(_rootPath, recursive: true);
+            }
+
+            if (_removeInstallRoot &&
+                Directory.Exists(_installRoot) &&
+                !Directory.EnumerateFileSystemEntries(_installRoot).Any())
+            {
+                Directory.Delete(_installRoot);
+            }
+        }
+    }
 
     private readonly record struct DispatchResult(int StatusCode, string Body);
     private static RouteConfiguration CreateRoute(
