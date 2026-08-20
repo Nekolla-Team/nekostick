@@ -643,19 +643,47 @@ BEGIN
 END $EF$;
 COMMIT;
 
-
 START TRANSACTION;
 
 DO $EF$
 BEGIN
     IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
-    ALTER TABLE nekostick.global_settings
-        ADD proxy_max_retries integer NOT NULL DEFAULT 0,
-        ADD proxy_initial_retry_backoff_milliseconds integer NOT NULL DEFAULT 200,
-        ADD proxy_maximum_retry_backoff_milliseconds integer NOT NULL DEFAULT 2000,
-        ADD proxy_retry_on_connection_failure boolean NOT NULL DEFAULT TRUE,
-        ADD proxy_retry_on_upstream_disconnect boolean NOT NULL DEFAULT TRUE,
-        ADD CONSTRAINT ck_global_settings_proxy_retries CHECK (proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds);
+    ALTER TABLE nekostick.global_settings ADD proxy_max_retries integer NOT NULL DEFAULT 0;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    ALTER TABLE nekostick.global_settings ADD proxy_initial_retry_backoff_milliseconds integer NOT NULL DEFAULT 200;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    ALTER TABLE nekostick.global_settings ADD proxy_maximum_retry_backoff_milliseconds integer NOT NULL DEFAULT 2000;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    ALTER TABLE nekostick.global_settings ADD proxy_retry_on_connection_failure boolean NOT NULL DEFAULT TRUE;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    ALTER TABLE nekostick.global_settings ADD proxy_retry_on_upstream_disconnect boolean NOT NULL DEFAULT TRUE;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820090000_AddProxyRetries') THEN
+    ALTER TABLE nekostick.global_settings ADD CONSTRAINT ck_global_settings_proxy_retries CHECK (proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds);
     END IF;
 END $EF$;
 
@@ -667,18 +695,48 @@ BEGIN
     END IF;
 END $EF$;
 COMMIT;
+
 START TRANSACTION;
 
 DO $EF$
 BEGIN
     IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
-    ALTER TABLE nekostick.routes
-        ADD proxy_max_retries integer,
-        ADD proxy_initial_retry_backoff_milliseconds integer,
-        ADD proxy_maximum_retry_backoff_milliseconds integer,
-        ADD proxy_retry_on_connection_failure boolean,
-        ADD proxy_retry_on_upstream_disconnect boolean,
-        ADD CONSTRAINT ck_routes_proxy_retries CHECK ((proxy_max_retries IS NULL AND proxy_initial_retry_backoff_milliseconds IS NULL AND proxy_maximum_retry_backoff_milliseconds IS NULL AND proxy_retry_on_connection_failure IS NULL AND proxy_retry_on_upstream_disconnect IS NULL) OR (proxy_max_retries IS NOT NULL AND proxy_initial_retry_backoff_milliseconds IS NOT NULL AND proxy_maximum_retry_backoff_milliseconds IS NOT NULL AND proxy_retry_on_connection_failure IS NOT NULL AND proxy_retry_on_upstream_disconnect IS NOT NULL AND proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds));
+    ALTER TABLE nekostick.routes ADD proxy_max_retries integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    ALTER TABLE nekostick.routes ADD proxy_initial_retry_backoff_milliseconds integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    ALTER TABLE nekostick.routes ADD proxy_maximum_retry_backoff_milliseconds integer;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    ALTER TABLE nekostick.routes ADD proxy_retry_on_connection_failure boolean;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    ALTER TABLE nekostick.routes ADD proxy_retry_on_upstream_disconnect boolean;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260820100000_AddRouteProxyRetries') THEN
+    ALTER TABLE nekostick.routes ADD CONSTRAINT ck_routes_proxy_retries CHECK ((proxy_max_retries IS NULL AND proxy_initial_retry_backoff_milliseconds IS NULL AND proxy_maximum_retry_backoff_milliseconds IS NULL AND proxy_retry_on_connection_failure IS NULL AND proxy_retry_on_upstream_disconnect IS NULL) OR (proxy_max_retries IS NOT NULL AND proxy_initial_retry_backoff_milliseconds IS NOT NULL AND proxy_maximum_retry_backoff_milliseconds IS NOT NULL AND proxy_retry_on_connection_failure IS NOT NULL AND proxy_retry_on_upstream_disconnect IS NOT NULL AND proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds));
     END IF;
 END $EF$;
 
@@ -690,3 +748,4 @@ BEGIN
     END IF;
 END $EF$;
 COMMIT;
+
