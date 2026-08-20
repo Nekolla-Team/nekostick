@@ -47,10 +47,17 @@ public sealed record ExtensionContractCatalogEntry
 public sealed class ExtensionContractCatalog
 {
     private readonly ImmutableDictionary<string, ExtensionContractCatalogEntry> _entries;
-
+    private readonly Assembly? _trustedAssembly;
     /// <summary>Creates a catalog from host-owned assembly entries.</summary>
     /// <param name="entries">The immutable deployment inventory.</param>
     public ExtensionContractCatalog(IEnumerable<ExtensionContractCatalogEntry>? entries)
+        : this(entries, trustedAssembly: null)
+    {
+    }
+
+    private ExtensionContractCatalog(
+        IEnumerable<ExtensionContractCatalogEntry>? entries,
+        Assembly? trustedAssembly)
     {
         var builder = ImmutableDictionary.CreateBuilder<string, ExtensionContractCatalogEntry>(StringComparer.Ordinal);
         if (entries is not null)
@@ -65,21 +72,34 @@ public sealed class ExtensionContractCatalog
         }
 
         _entries = builder.ToImmutable();
+        // The default contract assembly is trusted by its loaded identity; single-file deployments have no DLL path.
+        _trustedAssembly = trustedAssembly;
     }
 
     /// <summary>Creates the default catalog containing the stable Nekostick Contracts assembly.</summary>
     public static ExtensionContractCatalog CreateDefault()
     {
-        var assembly = typeof(IExtensionEntrypoint).Assembly;
-        return string.IsNullOrWhiteSpace(assembly.Location)
-            ? new ExtensionContractCatalog(null)
-            : new ExtensionContractCatalog(
-                [new ExtensionContractCatalogEntry(
-                    assembly.GetName().FullName!,
-                    Path.GetFullPath(assembly.Location))]);
+        return CreateDefaultForAssembly(typeof(IExtensionEntrypoint).Assembly, assemblyPath: null);
     }
 
-    /// <summary>Gets the immutable assembly inventory.</summary>
+    /// <summary>Creates a default catalog from a loaded contract assembly and optional physical copy.</summary>
+    internal static ExtensionContractCatalog CreateDefaultForAssembly(
+        Assembly assembly,
+        string? assemblyPath)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        var identity = assembly.GetName().FullName ??
+            throw new InvalidOperationException("The shared contract assembly identity is unavailable.");
+
+        return string.IsNullOrWhiteSpace(assemblyPath)
+            ? new ExtensionContractCatalog(null, assembly)
+            : new ExtensionContractCatalog(
+                [new ExtensionContractCatalogEntry(identity, Path.GetFullPath(assemblyPath))],
+                trustedAssembly: null);
+    }
+
+    /// <summary>Gets the immutable path-backed assembly inventory.</summary>
+    /// <remarks>The default single-file contract is represented by its trusted loaded assembly, not a fabricated path.</remarks>
     public IReadOnlyList<ExtensionContractCatalogEntry> Entries => _entries.Values.ToImmutableArray();
 
     internal bool TryGetAssembly(string assemblyIdentity, out ExtensionContractCatalogEntry entry)
@@ -98,13 +118,25 @@ public sealed class ExtensionContractCatalog
         string assemblyIdentity,
         string typeIdentity)
     {
+        if (!CanonicalPath.TryCanonicalDirectory(extensionRoot, out var canonicalRoot) ||
+            !TryGetTrustedAssembly(assemblyIdentity, out var trustedAssembly) &&
+            !TryGetAssembly(assemblyIdentity, out _))
+        {
+            return ExtensionFailureCode.ContractCatalogUnavailable;
+        }
+
+        if (trustedAssembly is not null)
+        {
+            return ValidateAssemblyDeclaration(trustedAssembly, assemblyIdentity, typeIdentity)
+                ? ExtensionFailureCode.None
+                : ExtensionFailureCode.ContractCatalogUnavailable;
+        }
+
         if (!TryGetAssembly(assemblyIdentity, out var entry) ||
-            !CanonicalPath.TryCanonicalDirectory(extensionRoot, out var canonicalRoot) ||
             !CanonicalPath.TryCanonicalExistingFile(entry.AssemblyPath, out var canonicalPath) ||
             CanonicalPath.IsWithin(canonicalRoot, canonicalPath) ||
             !TryValidateAssemblyIdentity(entry, canonicalPath, out var loadedAssembly) ||
-            loadedAssembly.GetType(typeIdentity, throwOnError: false, ignoreCase: false) is not { } contractType ||
-            !string.Equals(contractType.Assembly.GetName().FullName, assemblyIdentity, StringComparison.Ordinal))
+            !ValidateAssemblyDeclaration(loadedAssembly, assemblyIdentity, typeIdentity))
         {
             return ExtensionFailureCode.ContractCatalogUnavailable;
         }
@@ -115,12 +147,25 @@ public sealed class ExtensionContractCatalog
     internal bool TryResolveAssembly(
         AssemblyName requested,
         string extensionRoot,
-        out string approvedPath)
+        out string approvedPath,
+        out Assembly? approvedAssembly)
     {
         approvedPath = string.Empty;
+        approvedAssembly = null;
         var requestedIdentity = requested.FullName;
-        if (requestedIdentity is null || !TryGetAssembly(requestedIdentity, out var entry) ||
-            !CanonicalPath.TryCanonicalDirectory(extensionRoot, out var canonicalRoot) ||
+        if (requestedIdentity is null ||
+            !CanonicalPath.TryCanonicalDirectory(extensionRoot, out var canonicalRoot))
+        {
+            return false;
+        }
+
+        if (TryGetTrustedAssembly(requestedIdentity, out var trustedAssembly))
+        {
+            approvedAssembly = trustedAssembly;
+            return true;
+        }
+
+        if (!TryGetAssembly(requestedIdentity, out var entry) ||
             !CanonicalPath.TryCanonicalExistingFile(entry.AssemblyPath, out var canonicalPath) ||
             CanonicalPath.IsWithin(canonicalRoot, canonicalPath) ||
             !TryValidateAssemblyIdentity(entry, canonicalPath, out _))
@@ -131,6 +176,27 @@ public sealed class ExtensionContractCatalog
         approvedPath = canonicalPath;
         return true;
     }
+
+    private bool TryGetTrustedAssembly(string assemblyIdentity, out Assembly assembly)
+    {
+        if (_trustedAssembly is not null &&
+            string.Equals(_trustedAssembly.GetName().FullName, assemblyIdentity, StringComparison.Ordinal))
+        {
+            assembly = _trustedAssembly;
+            return true;
+        }
+
+        assembly = null!;
+        return false;
+    }
+
+    private static bool ValidateAssemblyDeclaration(
+        Assembly assembly,
+        string assemblyIdentity,
+        string typeIdentity) =>
+        string.Equals(assembly.GetName().FullName, assemblyIdentity, StringComparison.Ordinal) &&
+        assembly.GetType(typeIdentity, throwOnError: false, ignoreCase: false) is { } contractType &&
+        string.Equals(contractType.Assembly.GetName().FullName, assemblyIdentity, StringComparison.Ordinal);
 
     private static bool TryValidateAssemblyIdentity(
         ExtensionContractCatalogEntry entry,

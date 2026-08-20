@@ -204,10 +204,10 @@ public sealed class HostExtensionLoopbackIntegrationTests
             "nekostick-extension-loopback-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         File.Copy(
-            typeof(FixtureEntrypoint).Assembly.Location,
+            GetKnownOutputAssemblyPath(typeof(FixtureEntrypoint).Assembly),
             Path.Combine(root, "Fixtures.Extension.dll"));
         File.Copy(
-            typeof(IExtensionEntrypoint).Assembly.Location,
+            GetKnownOutputAssemblyPath(typeof(IExtensionEntrypoint).Assembly),
             Path.Combine(root, "Nekolla.Nekostick.Contracts.dll"));
         File.WriteAllText(
             Path.Combine(root, "manifest.json"),
@@ -221,6 +221,29 @@ public sealed class HostExtensionLoopbackIntegrationTests
             "  \"requiredHostApiVersion\": \">=1.0.0\"\n" +
             "}");
         return root;
+    }
+
+    private static string GetKnownOutputAssemblyPath(Assembly assembly)
+    {
+        var name = assembly.GetName().Name;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new InvalidOperationException("The fixture assembly name is unavailable.");
+        }
+
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, name + ".dll"));
+        if (!File.Exists(path))
+        {
+            throw new InvalidOperationException("The fixture assembly is not present in the test output.");
+        }
+
+        var actual = AssemblyName.GetAssemblyName(path);
+        if (!string.Equals(actual.FullName, assembly.GetName().FullName, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The fixture assembly identity is not the expected output assembly.");
+        }
+
+        return path;
     }
 
     private sealed class LoopbackApp : IAsyncDisposable
