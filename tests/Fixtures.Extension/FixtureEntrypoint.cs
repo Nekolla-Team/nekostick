@@ -209,12 +209,20 @@ public sealed class FixtureEntrypoint : IExtensionEntry
             ImmutableArray<ExtensionServiceConfiguration>.Empty,
             ImmutableArray<Guid>.Empty,
             settings: null);
+        var fullChanges = new ConfigurationChangeSet(
+            new GlobalSettingsConfiguration(),
+            ImmutableArray<RouteConfiguration>.Empty,
+            ImmutableArray<ServiceConfiguration>.Empty,
+            ImmutableArray<ExtensionRecordConfiguration>.Empty,
+            ImmutableArray<ExtensionSettingsConfiguration>.Empty);
         var fallbackSettings = legacySettings ??
             new ExtensionSettingsConfiguration("fixture.extension.deterministic", 1, "{}", 0);
         var configurationRead = await host.ConfigurationApi.ReadAsync(cancellationToken).ConfigureAwait(false);
         var configurationApply = await host.ConfigurationApi.ApplyAsync(0, emptyChanges, cancellationToken).ConfigureAwait(false);
         var settingsRead = await host.ConfigurationApi.ReadSettingsAsync(cancellationToken).ConfigureAwait(false);
         var settingsWrite = await host.ConfigurationApi.WriteSettingsAsync(0, fallbackSettings, cancellationToken).ConfigureAwait(false);
+        var fullRead = await host.FullConfiguration.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var fullReplace = await host.FullConfiguration.ReplaceAsync(0, fullChanges, cancellationToken).ConfigureAwait(false);
         var routeRead = await host.Routes.ReadOwnedAsync(cancellationToken).ConfigureAwait(false);
         var routeRemove = await host.Routes.RemoveAsync(0, ProbeId, cancellationToken).ConfigureAwait(false);
         var serviceRead = await host.Services.ReadOwnedAsync(cancellationToken).ConfigureAwait(false);
@@ -228,6 +236,7 @@ public sealed class FixtureEntrypoint : IExtensionEntry
         var endpointCount = host.Endpoints?.Current.Length ?? 0;
         var properties =
             host.ConfigurationApi is not null &&
+            host.FullConfiguration is not null &&
             host.Routes is not null &&
             host.Services is not null &&
             host.Endpoints is not null &&
@@ -236,6 +245,7 @@ public sealed class FixtureEntrypoint : IExtensionEntry
             $"lifecycle={lifecycleStatus?.ExtensionId}:{lifecycleStatus?.State};" +
             $"configRead={ReadCode(configurationRead)};configApply={WriteCode(configurationApply)};" +
             $"settingsRead={ReadCode(settingsRead)};settingsWrite={WriteCode(settingsWrite)};" +
+            $"fullRead={ReadCode(fullRead)};fullReplace={WriteCode(fullReplace)};" +
             $"routeRead={ReadCode(routeRead)};routeRemove={WriteCode(routeRemove)};" +
             $"serviceRead={ReadCode(serviceRead)};serviceRemove={WriteCode(serviceRemove)};" +
             $"serviceStart={serviceStart.Code};serviceStop={serviceStop.Code};serviceRestart={serviceRestart.Code};" +

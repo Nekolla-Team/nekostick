@@ -63,7 +63,8 @@ internal static class UnsupportedExtensionCapabilities
             new UnsupportedConfigurationApi(),
             new UnsupportedRouteApi(),
             new UnsupportedServiceApi(),
-            new UnsupportedEndpointApi());
+            new UnsupportedEndpointApi(),
+            new UnsupportedFullConfigurationApi());
 
     private sealed class UnsupportedConfigurationApi : IExtensionConfigurationApi
     {
@@ -76,6 +77,23 @@ internal static class UnsupportedExtensionCapabilities
             ValueTask.FromResult(ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
         public ValueTask<ConfigurationWriteResult> WriteSettingsAsync(long expectedVersion, ExtensionSettingsConfiguration settings, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+    }
+
+    private sealed class UnsupportedFullConfigurationApi : IExtensionFullConfigurationApi
+    {
+        public ValueTask<ConfigurationReadResult<HostConfigurationSnapshot>> ReadAsync(
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationWriteResult> ReplaceAsync(
+            long expectedVersion,
+            ConfigurationChangeSet changes,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
     }
 
     private sealed class UnsupportedRouteApi : IExtensionRouteApi

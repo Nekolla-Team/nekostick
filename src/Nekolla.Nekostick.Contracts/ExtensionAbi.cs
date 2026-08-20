@@ -7,7 +7,7 @@ namespace Nekolla.Nekostick.Contracts;
 public static class ExtensionAbi
 {
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
-    public static HostApiVersion Version { get; } = new(1, 1, 0);
+    public static HostApiVersion Version { get; } = new(1, 2, 0);
 
     /// <summary>Determines whether a host API version can satisfy an extension ABI requirement.</summary>
     /// <param name="required">The required version.</param>
@@ -453,6 +453,9 @@ public interface IExtensionHostBridge
 
     /// <summary>Gets the full owned configuration and settings facade introduced in API 1.1.</summary>
     IExtensionConfigurationApi ConfigurationApi { get; }
+
+    /// <summary>Gets trusted full Host business and configuration data access.</summary>
+    IExtensionFullConfigurationApi FullConfiguration { get; }
 
     /// <summary>Gets owned route configuration operations.</summary>
     IExtensionRouteApi Routes { get; }

@@ -45,6 +45,183 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
 
     private static readonly Guid AtomicCandidateServiceId =
         Guid.Parse("018f0f00-0000-7000-8000-000000000108");
+    private static readonly Guid ForeignFullServiceId =
+        Guid.Parse("018f0f00-0000-7000-8000-00000000010d");
+
+    private static readonly Guid ForeignFullRouteId =
+        Guid.Parse("018f0f00-0000-7000-8000-00000000010e");
+
+    private static readonly Guid AtomicFullCandidateServiceId =
+        Guid.Parse("018f0f00-0000-7000-8000-00000000010f");
+
+    private static readonly Guid MissingFullServiceId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000110");
+
+    [Fact]
+    public async Task FullConfigurationReadsAllCollectionsAndOmittedRowsAreDeleted()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var owner = harness.CreateCapability(OwnerExtensionId, static _ => false);
+        var initial = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(initial.Value);
+
+        var populated = await owner.FullConfiguration.ReplaceAsync(
+            initial.Value!.Version,
+            CreateFullReplacement(initial.Value!, includeForeign: true),
+            cancellationToken);
+        var committedVersion = RequireCommittedVersion(populated);
+
+        var complete = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(complete.IsSuccess, complete.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(complete.Value);
+        Assert.Equal(committedVersion, complete.Value!.Version);
+        Assert.Contains(ForeignFullRouteId, complete.Value.Routes.Select(value => value.Id));
+        var foreignService = Assert.Single(
+            complete.Value.Services,
+            value => value.Id == ForeignFullServiceId);
+        Assert.Equal("full-read-secret", foreignService.Environment["FULL_CONFIGURATION_SECRET"]);
+        var foreignRoute = Assert.Single(
+            complete.Value.Routes,
+            value => value.Id == ForeignFullRouteId);
+        using (var metadata = JsonDocument.Parse(foreignRoute.MetadataJson))
+        {
+            Assert.Equal("foreign", metadata.RootElement.GetProperty("owner").GetString());
+            Assert.True(metadata.RootElement.GetProperty("sensitive").GetBoolean());
+        }
+
+        Assert.Equal(
+            [OwnerExtensionId, ForeignExtensionId],
+            complete.Value.ExtensionRecords.Select(value => value.ExtensionId).OrderBy(value => value));
+        Assert.Equal(
+            [OwnerExtensionId, ForeignExtensionId],
+            complete.Value.ExtensionSettings.Select(value => value.ExtensionId).OrderBy(value => value));
+        var foreignSettings = Assert.Single(
+            complete.Value.ExtensionSettings,
+            value => value.ExtensionId == ForeignExtensionId);
+        using (var settings = JsonDocument.Parse(foreignSettings.SettingsJson))
+        {
+            Assert.Equal("foreign-secret", settings.RootElement.GetProperty("token").GetString());
+        }
+
+        var ownerScoped = await owner.ConfigurationApi.ReadAsync(cancellationToken);
+        Assert.True(ownerScoped.IsSuccess, ownerScoped.Errors.FirstOrDefault()?.Message);
+        Assert.Empty(ownerScoped.Value!.Routes);
+        Assert.Empty(ownerScoped.Value.Services);
+        Assert.Equal(OwnerExtensionId, ownerScoped.Value.Settings!.ExtensionId);
+
+        var omitted = await owner.FullConfiguration.ReplaceAsync(
+            complete.Value!.Version,
+            CreateFullReplacement(complete.Value!, includeForeign: false),
+            cancellationToken);
+        RequireCommittedVersion(omitted);
+        var afterOmission = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(afterOmission.IsSuccess, afterOmission.Errors.FirstOrDefault()?.Message);
+        Assert.DoesNotContain(
+            ForeignFullServiceId,
+            afterOmission.Value!.Services.Select(value => value.Id));
+        Assert.DoesNotContain(
+            ForeignFullRouteId,
+            afterOmission.Value.Routes.Select(value => value.Id));
+        Assert.DoesNotContain(
+            ForeignExtensionId,
+            afterOmission.Value.ExtensionRecords.Select(value => value.ExtensionId));
+        Assert.DoesNotContain(
+            ForeignExtensionId,
+            afterOmission.Value.ExtensionSettings.Select(value => value.ExtensionId));
+    }
+
+    [Fact]
+    public async Task FullConfigurationRejectsStaleGlobalAndEntityVersionsWithoutPartialMutation()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var owner = harness.CreateCapability(OwnerExtensionId, static _ => false);
+        var initial = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(initial.Value);
+        var before = initial.Value!;
+        Assert.True(before.Version > 0);
+
+        var staleGlobal = await owner.FullConfiguration.ReplaceAsync(
+            before.Version - 1,
+            new ConfigurationChangeSet(
+                CreateChangedGlobalSettings(before.GlobalSettings),
+                before.Routes,
+                before.Services,
+                before.ExtensionRecords,
+                before.ExtensionSettings),
+            cancellationToken);
+        AssertConfigurationError(staleGlobal, ConfigurationErrorCode.ConcurrencyConflict);
+
+        var afterGlobalConflict = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(afterGlobalConflict.IsSuccess, afterGlobalConflict.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(afterGlobalConflict.Value);
+        AssertSnapshotCollectionsUnchanged(before, afterGlobalConflict.Value!);
+        Assert.Equal(
+            before.GlobalSettings.MaxConcurrentRequests,
+            afterGlobalConflict.Value!.GlobalSettings.MaxConcurrentRequests);
+
+        var completeAfterGlobalConflict = afterGlobalConflict.Value!;
+        var existingService = Assert.Single(completeAfterGlobalConflict.Services);
+        var staleService = CopyService(existingService, existingService.Version + 1);
+        var staleEntity = await owner.FullConfiguration.ReplaceAsync(
+            completeAfterGlobalConflict.Version,
+            new ConfigurationChangeSet(
+                completeAfterGlobalConflict.GlobalSettings,
+                completeAfterGlobalConflict.Routes,
+                completeAfterGlobalConflict.Services
+                    .Select(value => value.Id == existingService.Id ? staleService : value)
+                    .Append(CreateFullService(AtomicFullCandidateServiceId, "candidate-secret"))
+                    .ToImmutableArray(),
+                completeAfterGlobalConflict.ExtensionRecords,
+                completeAfterGlobalConflict.ExtensionSettings),
+            cancellationToken);
+        AssertConfigurationError(staleEntity, ConfigurationErrorCode.ConcurrencyConflict);
+        var afterEntityConflict = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(afterEntityConflict.IsSuccess, afterEntityConflict.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(afterEntityConflict.Value);
+        AssertSnapshotCollectionsUnchanged(before, afterEntityConflict.Value!);
+        Assert.DoesNotContain(
+            AtomicFullCandidateServiceId,
+            afterEntityConflict.Value!.Services.Select(value => value.Id));
+    }
+
+    [Fact]
+    public async Task FullConfigurationRollsBackInvalidCrossCategoryReplacement()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var owner = harness.CreateCapability(OwnerExtensionId, static _ => false);
+        var initial = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(initial.Value);
+        var before = initial.Value!;
+        var candidateService = CreateFullService(AtomicFullCandidateServiceId, "rollback-secret");
+        var invalidRoute = CreateFullRoute(
+            Guid.Parse("018f0f00-0000-7000-8000-000000000111"),
+            MissingFullServiceId,
+            "rollback-route");
+
+        var rejected = await owner.FullConfiguration.ReplaceAsync(
+            before.Version,
+            new ConfigurationChangeSet(
+                before.GlobalSettings,
+                before.Routes.Add(invalidRoute),
+                before.Services.Add(candidateService),
+                before.ExtensionRecords,
+                before.ExtensionSettings),
+            cancellationToken);
+        AssertConfigurationError(rejected, ConfigurationErrorCode.Validation);
+
+        var after = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(after.IsSuccess, after.Errors.FirstOrDefault()?.Message);
+        AssertSnapshotCollectionsUnchanged(before, after.Value!);
+        Assert.DoesNotContain(
+            AtomicFullCandidateServiceId,
+            after.Value!.Services.Select(value => value.Id));
+    }
 
     [Fact]
     public async Task OwnedReadsStampOwnersAndRejectForeignOrHostMutations()
@@ -427,6 +604,161 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.Null(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
         Assert.Null(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
         Assert.True(expectedVersion > initial.Value!.Version);
+    }
+
+    private static ConfigurationChangeSet CreateFullReplacement(
+        HostConfigurationSnapshot snapshot,
+        bool includeForeign)
+    {
+        var routes = includeForeign
+            ? snapshot.Routes.Add(CreateFullRoute(
+                ForeignFullRouteId,
+                ForeignFullServiceId,
+                "foreign-route"))
+            : snapshot.Routes
+                .Where(value => value.Id != ForeignFullRouteId)
+                .ToImmutableArray();
+        var services = includeForeign
+            ? snapshot.Services.Add(CreateFullService(ForeignFullServiceId, "full-read-secret"))
+            : snapshot.Services
+                .Where(value => value.Id != ForeignFullServiceId)
+                .ToImmutableArray();
+        var extensionRecords = includeForeign
+            ? snapshot.ExtensionRecords.Add(new ExtensionRecordConfiguration(
+                ForeignExtensionId,
+                "2.0.0",
+                ExtensionLoadState.Discovered,
+                DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow,
+                recordVersion: 0))
+            : snapshot.ExtensionRecords
+                .Where(value => value.ExtensionId != ForeignExtensionId)
+                .ToImmutableArray();
+        var extensionSettings = includeForeign
+            ? snapshot.ExtensionSettings.Add(new ExtensionSettingsConfiguration(
+                ForeignExtensionId,
+                schemaVersion: 7,
+                settingsJson: "{\"token\":\"foreign-secret\",\"enabled\":true}",
+                version: 0))
+            : snapshot.ExtensionSettings
+                .Where(value => value.ExtensionId != ForeignExtensionId)
+                .ToImmutableArray();
+        return new ConfigurationChangeSet(
+            snapshot.GlobalSettings,
+            routes,
+            services,
+            extensionRecords,
+            extensionSettings);
+    }
+
+    private static GlobalSettingsConfiguration CreateChangedGlobalSettings(
+        GlobalSettingsConfiguration source) =>
+        new(
+            source.Version,
+            source.AutoPortRangeStart,
+            source.AutoPortRangeEnd,
+            source.MaxRequestBodyBytes,
+            source.MaxConcurrentRequests + 1,
+            source.ConfigurationPollInterval,
+            source.TrustedProxyCidrs,
+            source.ProxyTimeouts,
+            source.MaxRequestHeaderBytes,
+            source.RequestReadTimeout,
+            source.ClientIpRatePolicy,
+            source.ProxyRetries);
+
+    private static ServiceConfiguration CopyService(
+        ServiceConfiguration source,
+        long version) =>
+        new(
+            source.Id,
+            source.Enabled,
+            source.FileName,
+            source.ArgumentList,
+            source.WorkingDirectory,
+            source.Environment,
+            source.StartMode,
+            source.RestartPolicy,
+            source.HealthCheck,
+            source.CreatedAt,
+            source.UpdatedAt,
+            version);
+
+    private static ServiceConfiguration CreateFullService(Guid id, string secret) =>
+        new(
+            id,
+            enabled: true,
+            fileName: "/usr/bin/full-configuration-service",
+            argumentList: ImmutableArray.Create("--full-configuration"),
+            workingDirectory: "/tmp",
+            environment: ImmutableDictionary<string, string>.Empty.Add(
+                "FULL_CONFIGURATION_SECRET",
+                secret),
+            startMode: ServiceStartMode.Lazy,
+            restartPolicy: ServiceRestartPolicy.OnFailure,
+            healthCheck: new ServiceHealthCheckConfiguration(
+                ServiceHealthCheckType.Process,
+                httpPath: null,
+                timeout: TimeSpan.FromSeconds(1)),
+            createdAt: DateTimeOffset.UtcNow,
+            updatedAt: DateTimeOffset.UtcNow,
+            version: 0);
+
+    private static RouteConfiguration CreateFullRoute(
+        Guid id,
+        Guid serviceId,
+        string routeName) =>
+        new(
+            id,
+            enabled: true,
+            matcher: new RouteMatcherConfiguration(
+                RouteMatcherType.Exact,
+                "/full-configuration/" + routeName,
+                ImmutableArray<string>.Empty,
+                ImmutableArray<string>.Empty),
+            target: new MicroserviceRouteTargetConfiguration(serviceId),
+            priority: 10,
+            forwarding: new ForwardingConfiguration(ForwardingMode.Preserve, null),
+            requestHeaderRewrites: ImmutableArray<HeaderRewriteConfiguration>.Empty,
+            responseHeaderRewrites: ImmutableArray<HeaderRewriteConfiguration>.Empty,
+            metadataJson: "{\"owner\":\"foreign\",\"sensitive\":true}",
+            createdAt: DateTimeOffset.UtcNow,
+            updatedAt: DateTimeOffset.UtcNow,
+            version: 0);
+
+    private static void AssertSnapshotCollectionsUnchanged(
+        HostConfigurationSnapshot before,
+        HostConfigurationSnapshot after)
+    {
+        Assert.Equal(before.Version, after.Version);
+        Assert.Equal(before.GlobalSettings.Version, after.GlobalSettings.Version);
+        Assert.Equal(
+            before.Routes.Select(value => (value.Id, value.Version, value.MetadataJson)).OrderBy(value => value.Id),
+            after.Routes.Select(value => (value.Id, value.Version, value.MetadataJson)).OrderBy(value => value.Id));
+        Assert.Equal(
+            before.Services.Select(value => (value.Id, value.Version)).OrderBy(value => value.Id),
+            after.Services.Select(value => (value.Id, value.Version)).OrderBy(value => value.Id));
+        Assert.Equal(
+            before.ExtensionRecords
+                .Select(value => (value.ExtensionId, value.RecordVersion))
+                .OrderBy(value => value.ExtensionId),
+            after.ExtensionRecords
+                .Select(value => (value.ExtensionId, value.RecordVersion))
+                .OrderBy(value => value.ExtensionId));
+        Assert.Equal(
+            before.ExtensionSettings
+                .Select(value => (value.ExtensionId, value.Version, value.SettingsJson))
+                .OrderBy(value => value.ExtensionId),
+            after.ExtensionSettings
+                .Select(value => (value.ExtensionId, value.Version, value.SettingsJson))
+                .OrderBy(value => value.ExtensionId));
+        foreach (var service in before.Services)
+        {
+            var current = Assert.Single(after.Services, value => value.Id == service.Id);
+            Assert.Equal(
+                service.Environment.OrderBy(value => value.Key).ToArray(),
+                current.Environment.OrderBy(value => value.Key).ToArray());
+        }
     }
 
     private static long RequireCommittedVersion(ConfigurationWriteResult result)

@@ -2,7 +2,7 @@
 
 本文是可信、同进程 extension 的稳定 API 参考。稳定 ABI 位于 `Nekolla.Nekostick.Contracts`；extension 只应依赖该 Contracts 程序集和自己声明的独立 shared-contract 程序集，不应引用 Host、Persistence、ASP.NET、EF Core 或其他 extension 的实现程序集。
 
-当前 Host API 和 ABI 版本均为 **1.1.0**（`HostApiVersion.Current`、`ExtensionAbi.Version`）。本文只记录已经实现并经最终验证的公开 surface；没有为尚未实现的 manifest event declaration、event filter 或通用 endpoint 保留接口。
+当前 Host API 和 ABI 版本均为 **1.2.0**（`HostApiVersion.Current`、`ExtensionAbi.Version`）。本文只记录已经实现并经最终验证的公开 surface；没有为尚未实现的 manifest event declaration、event filter 或通用 endpoint 保留接口。API 1.2 新增的 `FullConfiguration` 是可信的完整持久化业务/configuration-data capability；它仍不是 runtime handle 或 HTTP pipeline 的入口。
 
 ## 1. 信任边界与 capability 边界
 
@@ -10,7 +10,8 @@ extension 是宿主进程内的**受信代码**。collectible ALC 用于生命�
 
 ### 1.1 明确可用的能力
 
-- 读取自身的旧版 settings view，以及在 API 1.1 中读写自身拥有的配置、route、service 和 settings。
+- 读取自身的旧版 settings view，以及在 API 1.1 中通过 owner-scoped API 读写自身拥有的配置、route、service 和 settings。
+- 在 API 1.2 中通过 `FullConfiguration` 读取并完整替换五个持久化业务集合：global settings、routes、services、extension records 和 extension settings（见 §5.3）。这是完整数据边界，不受 owner 过滤；使用者必须按受信代码和敏感数据处理。
 - 注册、注销自身的稳定 handler；注册至多一个全局 fallback。
 - 读取自身 service 的已发布、未过期 loopback endpoint lease。
 - 请求自身的 staged reload/unload；观察自身的安全生命周期状态。
@@ -20,18 +21,20 @@ extension 是宿主进程内的**受信代码**。collectible ALC 用于生命�
 
 ### 1.2 刻意不可用的能力
 
-以下对象、权限和数据**不属于** extension API，不能通过桥接对象间接取得：
+以下对象、权限和数据**仍不属于** extension API，不能通过 `FullConfiguration` 或其他桥接对象间接取得：
 
 - root `IServiceProvider`、root DI container，或直接的 `IHostConfigApi`；
 - EF Core、`DbContext`、数据库连接、核心业务表和任意数据库/JSONB 直接操作；
-- ASP.NET `HttpContext`、Host 的 HTTP pipeline、middleware、全局 route/health endpoint；
-- raw process handle、supervisor handle、socket/network handle，任意端口绑定或任意 endpoint；
-- secrets、service environment overrides、连接串以及其他 Host 内部敏感数据；
-- foreign/Host-owned 配置的读写、全局配置策略、forwarding/static/health/global policy 的控制；
+- ASP.NET `HttpContext`、Host 的 HTTP pipeline、middleware，或任意未经 Host 校验的 endpoint；
+- raw process/supervisor handle、`Node`、`PortLease`、`ServiceRuntime`、socket/network handle，任意端口绑定或运行时句柄；
+- 未进入 FullConfiguration 五个集合的 Host secret、连接串和其他内部运行时敏感数据；
 - 自动 file watcher、自动 load/reload；Host 管理面显式发起 load/unload/reload。
 
-`ExtensionServiceConfiguration` 仅包含 Host 允许的进程启动子集（绝对 `FileName`、参数、工作目录、启动/重启策略和 health DTO），不包含 environment、运行时句柄或可调用的进程 API。extension 也不能注册任意 HTTP 或 health endpoint；HTTP 入口只能由 route 指向 caller-owned handler ID，或通过 `ExtensionServiceRouteTarget` 指向 caller-owned 或同一 change set 新建的 service ID；全局 fallback 仍至多一个。
+`FullConfiguration` 是可信的**持久化**数据例外：它会返回 `ServiceConfiguration.Environment`、route `MetadataJson` 和 `ExtensionSettingsConfiguration.SettingsJson` 等可能含敏感值的 DTO 字段。extension 必须保护这些值，不得写日志或把它们当作可调用的 runtime API。`ExtensionServiceConfiguration`（owner-scoped `Services`/`ConfigurationApi` 使用的 DTO）仍只包含 Host 允许的进程启动子集，不包含 `Environment`；完整 service 环境只在 `FullConfiguration` 的 `ServiceConfiguration` 中可见。
+
+FullConfiguration 能替换已持久化的 route definition，但这不等于 endpoint/HTTP runtime 权限：extension 不能取得 `HttpContext`、任意 socket 或进程句柄，也不能绕过 Host 的 route admission、handler registration 和 endpoint lease 边界。`Routes`/`Services` convenience API 的 caller-owned target 限制和 `Endpoints` 的 exact caller-owned active lease 可见性保持不变；全局 fallback 仍至多一个。
 handler 请求会收到 Host 按 admission 限制提供的有界 `ExtensionHandlerRequest.Body` 和复制后的请求 headers；请求提供时 headers 可包含 Cookie、Authorization。extension 必须将 body/headers 按敏感数据处理，并遵守 Host 的 body/header 大小与读取时限。
+
 
 ## 2. Manifest、声明和兼容性
 
@@ -85,11 +88,12 @@ JSON 和 YAML 同时存在时拒绝该目录。JSON 使用严格解析：不接�
 
 `SemVersionRange` 支持比较符（如 `>=1.0.0 <2.0.0`）、`||` alternative、wildcard、`^` 和 `~` 等已实现形式；无效版本或 range 在 discovery 阶段拒绝。contract 的 assembly/type identity 必须与 Host 批准的 identity 完全相容；重复声明、缺 provider、版本不满足或 identity 不匹配都拒绝加载。
 
-### 2.4 1.0/1.1 兼容
+### 2.4 1.0/1.1/1.2 兼容
 
 - 当前 manifest schema 是 `1`；“1.0 manifest”指面向 Host API 1.0 的既有 manifest/extension，不是 `schemaVersion: 1.0`。
 - 1.0 manifest 仍可加载。`requiredHostApiVersion` 满足 Host 后，旧 ABI 的 extension 可继续使用旧成员。
-- `ConfigurationApi`、`Routes`、`Services`、`Endpoints`、`Lifecycle` 等新增成员属于 Host API 1.1。只有 `ApiVersion` 支持 1.1 时才调用它们；旧 extension 不应假设这些成员在 1.0 Host 上可用。旧的 `Configuration` 属性保持不变。
+- `ConfigurationApi`、`Routes`、`Services`、`Endpoints`、`Lifecycle` 等成员属于 Host API 1.1；`FullConfiguration` 属于 Host API 1.2。只有 `ApiVersion` 达到相应版本时才调用它们；旧 extension 不应假设 1.1/1.2 成员在较低版本 Host 上可用。旧的 `Configuration` 属性保持不变。
+- 若 extension **必须**使用完整数据能力，应在 manifest 声明 `"requiredHostApiVersion": ">=1.2.0 <2.0.0"`；若该能力是可选的，则在运行时用 `context.Host.ApiVersion >= new HostApiVersion(1, 2, 0)` 做 feature detection，低版本走 owner-scoped/legacy 路径或跳过该功能。不要仅以 Contracts 程序集版本推断 Host capability。
 - `HostApiVersion` 是不可变语义版本：`new HostApiVersion(major, minor, patch)` 拒绝负数；`ToString()` 为 `major.minor.patch`；`ExtensionAbi.IsCompatible(required, host)` 要求 major 相同且 Host 不低于 required。
 
 ## 3. Discovery、加载、staged reload 和卸载
@@ -214,12 +218,15 @@ public interface IExtensionHostBridge
     // 旧 ABI：只读 settings view，保持不变
     IExtensionSettingsReader Configuration { get; }
 
-    // API 1.1 新增
+    // API 1.1：owner-scoped compatibility/convenience facades
     IExtensionConfigurationApi ConfigurationApi { get; }
     IExtensionRouteApi Routes { get; }
     IExtensionServiceApi Services { get; }
     IExtensionEndpointApi Endpoints { get; }
     IExtensionLifecycleApi Lifecycle { get; }
+
+    // API 1.2：trusted, unfiltered full persisted business/configuration data
+    IExtensionFullConfigurationApi FullConfiguration { get; }
 
     IExtensionContractRegistry Contracts { get; }
     IExtensionTaskScheduler Tasks { get; }
@@ -229,7 +236,7 @@ public interface IExtensionHostBridge
 }
 ```
 
-旧的 `Configuration` 是 `IExtensionSettingsReader`，只有 `ExtensionSettingsConfiguration? Settings { get; }`；它不是新的 CRUD facade。`ExtensionSettingsConfiguration` 的字段为 `ExtensionId`、`SchemaVersion`、`SettingsJson`、`Version`。`SettingsJson` 是已验证的 JSON 文档，使用者仍应按敏感数据处理；不得写入日志。API 1.1 的 `ConfigurationApi` 才提供完整 owned snapshot/change-set/settings 操作。
+旧的 `Configuration` 是 `IExtensionSettingsReader`，只有 `ExtensionSettingsConfiguration? Settings { get; }`；它不是新的 CRUD facade，保持 1.0 ABI 兼容。`ExtensionSettingsConfiguration.SettingsJson` 是已验证的 JSON 文档，使用者仍应按敏感数据处理，不得写入日志。API 1.1 的 `ConfigurationApi`、`Routes` 和 `Services` 是 owner-scoped compatibility/convenience surfaces；它们只返回/修改 caller-owned 数据，且 owner service DTO 不含 `Environment`。API 1.2 的 `FullConfiguration` 才是完整持久化 business/configuration-data boundary：它返回五个集合以及其中的敏感 DTO 字段，且没有 owner 参数或 owner 过滤（详见 §5.2–§5.4）。
 
 ## 5. 配置、route 和 service API
 
@@ -276,7 +283,7 @@ public sealed class ConfigurationWriteResult
 
 `ConfigurationError.Message` 只使用安全固定消息，不含数据库、路径、secret 或内部 exception。读成功时看 `Value`；写成功时看 `NewVersion`；失败时不要把 `Value`/`NewVersion` 当作已提交结果。
 
-### 5.2 完整 configuration facade
+### 5.2 owner-scoped `ConfigurationApi`（兼容/便利 surface）
 
 ```csharp
 public interface IExtensionConfigurationApi
@@ -301,7 +308,7 @@ public interface IExtensionConfigurationApi
 }
 ```
 
-snapshot 和 change set 是不可变 DTO：
+这是 API 1.1 保留的 owner-scoped compatibility/convenience facade，不是完整数据边界。snapshot 和 change set 是不可变 DTO：
 
 ```csharp
 public sealed record ExtensionConfigurationSnapshot(
@@ -318,7 +325,7 @@ public sealed record ExtensionConfigurationChangeSet(
     ExtensionSettingsConfiguration? Settings);
 ```
 
-上面的 positional 形式用于说明属性；实际构造函数参数顺序也是 `(version, routes, services, settings)` 和 `(upserts, removedRouteIds, serviceUpserts, removedServiceIds, settings)`。`settings: null` 表示在 `ApplyAsync` 中保持 settings 不变，不表示删除 settings。所有 route/service/id 必须符合 Host 的 UUID v7 和完整语义校验。
+上面的 positional 形式用于说明属性；实际构造函数参数顺序也是 `(version, routes, services, settings)` 和 `(upserts, removedRouteIds, serviceUpserts, removedServiceIds, settings)`。`settings: null` 表示在 `ApplyAsync` 中保持自身 settings 不变，不表示删除 settings。所有 route/service/id 必须符合 Host 的 UUID v7 和完整语义校验。
 
 `ExtensionSettingsConfiguration` 的实际构造函数为：
 
@@ -330,9 +337,69 @@ new ExtensionSettingsConfiguration(
     long version)
 ```
 
-Host 将 caller identity 绑定到 facade；传入其他 `extensionId` 不会取得其他 owner 的权限，并会在校验/写入阶段拒绝 spoof。`ReadAsync` 只返回本 extension 的 routes、services 和 settings。
+Host 将 caller identity 绑定到 facade；传入其他 `extensionId` 不会取得其他 owner 的权限，并会在校验/写入阶段拒绝 spoof。`ReadAsync` 只返回本 extension 的 routes、services 和 settings；owner service DTO 不包含 `Environment`。需要完整 global settings、foreign/Host-owned routes/services、extension records、所有 extension settings 或敏感 service environment 时，必须使用 §5.3 的 `FullConfiguration`。
 
-### 5.3 route DTO 与 owned route convenience API
+### 5.3 trusted `FullConfiguration`（API 1.2）
+
+`IExtensionHostBridge.FullConfiguration` 是可信 extension 访问完整持久化 Host business/configuration data 的权威 capability。它没有 extension/owner 参数，也不做 owner 过滤；它不是 EF/DI/HTTP/runtime handle 的透传。
+
+```csharp
+public interface IExtensionFullConfigurationApi
+{
+    ValueTask<ConfigurationReadResult<HostConfigurationSnapshot>> ReadAsync(
+        CancellationToken cancellationToken = default);
+
+    ValueTask<ConfigurationWriteResult> ReplaceAsync(
+        long expectedVersion,
+        ConfigurationChangeSet changes,
+        CancellationToken cancellationToken = default);
+}
+```
+
+`HostConfigurationSnapshot` 和 `ConfigurationChangeSet` 只通过 Contracts immutable DTO 跨 ABI 边界。以下 positional 形式仅用于列出属性；实际类型是 immutable `sealed record`，构造参数顺序相同：
+
+```csharp
+public sealed record HostConfigurationSnapshot(
+    long Version,
+    GlobalSettingsConfiguration GlobalSettings,
+    ImmutableArray<RouteConfiguration> Routes,
+    ImmutableArray<ServiceConfiguration> Services,
+    ImmutableArray<ExtensionRecordConfiguration> ExtensionRecords,
+    ImmutableArray<ExtensionSettingsConfiguration> ExtensionSettings);
+
+public sealed record ConfigurationChangeSet(
+    GlobalSettingsConfiguration GlobalSettings,
+    ImmutableArray<RouteConfiguration> Routes,
+    ImmutableArray<ServiceConfiguration> Services,
+    ImmutableArray<ExtensionRecordConfiguration> ExtensionRecords,
+    ImmutableArray<ExtensionSettingsConfiguration> ExtensionSettings);
+```
+
+这两个 DTO 恰好覆盖五个持久化集合（一个 global settings object 加四个 immutable arrays）：
+
+| 集合 | DTO 内容 | 需要特别保护的字段 |
+| --- | --- | --- |
+| global settings | `GlobalSettingsConfiguration`：版本、自动端口范围、请求 body/header/concurrency/read timeout、configuration poll、trusted proxy CIDR、proxy timeout、client-IP policy、proxy retry policy | 按 Host policy 保护全局网络/代理策略 |
+| routes | `RouteConfiguration`：matcher、microservice/static/extension-handler target、priority、forwarding、request/response header rewrites、route policy limits、timestamps、`Version` | `MetadataJson` 是 extension-owned JSON，按敏感数据处理 |
+| services | `ServiceConfiguration`：可执行文件/参数/工作目录、`Environment`、start/restart policy、health check、timestamps、`Version` | `Environment` 是可能含 secret 的敏感 immutable dictionary |
+| extension records | `ExtensionRecordConfiguration`：`ExtensionId`、installed `Version`、`LoadState`、timestamps、`RecordVersion` | load state/version 会影响 Host runtime 激活，必须按配置数据处理 |
+| extension settings | `ExtensionSettingsConfiguration`：`ExtensionId`、`SchemaVersion`、`SettingsJson`、`Version` | `SettingsJson` 是已验证但可能含 secret 的 JSON，不得写日志 |
+
+FullConfiguration 的 routes/services 是完整 Host DTO，不是 owner convenience DTO：因此 route target、forwarding、limits、metadata 和 service `Environment` 都按持久化 Contracts 类型交换。它仍只传 DTO；`Node`、`PortLease`、`ServiceRuntime`、supervisor/process/socket handles、root DI、`DbContext`、数据库连接和 ASP.NET objects 均不在 snapshot/change set 中。
+
+### 5.4 `FullConfiguration.ReplaceAsync` 的完整替换语义
+
+- `changes` 是完整 replacement，不是 patch。`GlobalSettings` 必须提供；`Routes`、`Services`、`ExtensionRecords`、`ExtensionSettings` 的 immutable array 是各自集合的**全部目标内容**。数组为空表示该集合提交后为空，因此当前集合中未出现在 replacement 中的 route、service、extension record 或 extension setting 会被删除；不存在“未传则保持不变”的 FullConfiguration 语义。
+- `expectedVersion` 必须等于读取到的 `HostConfigurationSnapshot.Version`（全局 configuration revision）。`changes.GlobalSettings.Version` 必须匹配当前 global settings entity version；每个已存在 route/service/extension record/extension setting 也必须携带读取到的 entity version（分别为 `RouteConfiguration.Version`、`ServiceConfiguration.Version`、`ExtensionRecordConfiguration.RecordVersion`、`ExtensionSettingsConfiguration.Version`）。任一版本过期都返回 `ConfigurationErrorCode.ConcurrencyConflict`，不覆盖后来提交。
+- Host 在同一事务中先验证完整 candidate，再处理所有五个集合的 upsert/delete；任何 semantic validation、entity-version conflict、foreign reference 或其他 persistence failure 都使整个 replacement rollback，不留下部分集合更新。成功时全局 revision 只递增一次，`ConfigurationWriteResult.NewVersion` 是提交后的权威版本。
+- 如果 replacement 会删除仍有 `PortLease` 行的 service，Host 的 PortLease deletion guard 拒绝整次 replacement（包括该 service 的其他集合变化也不提交）；必须先让 lease 消失，再提交删除。不要通过 `FullConfiguration` 伪造或修改 PortLease。
+- `ConfigurationSnapshotApplied`/configuration-changed notification 只在 database transaction commit **之后**发布；notification 失败/排队不改变已经提交的 replacement。extension 不可在事务内注入 callback 或把该通知当作可写消息总线。
+- read-only Host 仍可读已接受的 snapshot；`ReplaceAsync` 在 writes disabled/read-only 或 FullConfiguration backing store 不可用时返回 `ConfigurationErrorCode.Unsupported`（或相应 safe storage/read error），不抛出 Host implementation exception。
+- 每次 `ReadAsync` 和 `ReplaceAsync` 都由 bridge facade 创建并释放新的 async DI scope；scoped `IHostConfigApi`/`DbContext` 不会被 extension 或 facade 跨调用保留。调用者应把 `ReadAsync` 返回的 snapshot/version 当作一次性 optimistic base，提交后重新读取，不要缓存 scoped implementation 或猜测新版本。
+
+当完整数据能力是 optional feature 时，先按 §2.4 检查 `context.Host.ApiVersion >= new HostApiVersion(1, 2, 0)`，再访问 `context.Host.FullConfiguration`。需要该能力的 extension 应在 manifest 要求 `>=1.2.0 <2.0.0`；不要用 `ConfigurationApi.ApplyAsync` 模拟全量 replacement，因为 owner facade 的 null settings 和 caller-owned filtering 语义不同。
+
+### 5.5 route DTO 与 owned route convenience API
 
 route 只允许两种 target：
 
@@ -383,7 +450,7 @@ public interface IExtensionRouteApi
 
 这里的 `expectedVersion` 是全局配置版本，不是 extension 可自行决定的 route revision。`UpsertAsync`/`RemoveAsync` 和 `ConfigurationApi.ApplyAsync` 均使用同一 Host 事务边界。
 
-### 5.4 service DTO 与 owned service/lifecycle API
+### 5.6 service DTO 与 owned service/lifecycle API
 
 `ExtensionServiceConfiguration` 构造函数和属性为：
 
@@ -663,12 +730,14 @@ public interface IExtensionContractRegistry
 
 ## 9. Ownership、expectedVersion、原子性与 server-owned metadata
 
-1. **Owner 绑定。** `ConfigurationApi`、`Routes`、`Services`、`Endpoints` 都在 Host 创建时绑定调用 extension identity；调用者没有 `ownerId` 选择参数。read 只返回自身记录；Host/foreign 记录被隐藏或按 safe `NotFound`/`null` 处理。
-2. **乐观版本。** configuration/route/service writes 使用调用者读取到的全局 `snapshot.Version` 作为 `expectedVersion`；settings write 使用自身 settings 的 `Version`。旧版本得到 `ConfigurationErrorCode.ConcurrencyConflict`，不得覆盖后来提交。
-3. **原子事务。** `ApplyAsync` 的 route upsert/remove、service upsert/remove 和可选 settings replacement 作为一次完整 candidate 校验和原子提交；任何 validation、ownership、handler/service target 或并发冲突都会使整个 change set rollback，不留下部分 route、service 或 settings。route/service convenience API 使用同一语义。
-4. **通知时序。** configuration notification 只在数据库 transaction commit 后发布，且不在 EF config gate 内执行 callback。通知不是 extension 可直接操纵的消息持久化机制。
-5. **Host-owned revision/timestamp。** `ExtensionRouteConfiguration` 不暴露可写 route revision/timestamp；持久化 route 的 revision/timestamps 由 Host 从当前实体/提交时刻赋值。现有 service 记录的 `CreatedAt`、`UpdatedAt` 和 revision/version metadata 由 Host 保留并维护；新 service 创建当前按实现接受并映射 DTO 提供的 creation metadata。客户端必须以 Host 返回的这些值和 `Version` 为权威，不得把它们当作 Host-global control，也不能自行推进 server revision。`ExtensionServiceConfiguration.Version` 和 `ExtensionSettingsConfiguration.Version` 仍是服务器返回的并发字段；repair 后不存在 public per-route `Version` expected gate，唯一公开写 gate 仍是全局 `expectedVersion`。
-6. **Endpoint owner visibility。** endpoint snapshot 中的 owner metadata 是 Host 内部绑定信息；extension lease DTO 只露 `ServiceId`、`Port`、`ExpiresAt`，并且只对 exact caller-owned active lease 输出。Host-owned/null 和 foreign 永远不能通过 `Current` 或 `ResolveAsync` 观察。
+1. **两条数据边界。** `FullConfiguration` 没有 owner 参数或过滤，`ReadAsync` 返回五个完整持久化集合；`ConfigurationApi`、`Routes`、`Services` 是 Host 绑定 caller identity 的 owner-scoped compatibility/convenience surfaces，只读写自身记录。`Endpoints` 仍只返回 exact caller-owned active lease；旧 `Configuration` 仍只是只读 settings view。
+2. **乐观版本。** FullConfiguration 的 `ReplaceAsync` 同时使用 `HostConfigurationSnapshot.Version` 作为全局 `expectedVersion`，以及 `GlobalSettingsConfiguration.Version`、`RouteConfiguration.Version`、`ServiceConfiguration.Version`、`ExtensionRecordConfiguration.RecordVersion`、`ExtensionSettingsConfiguration.Version` 作为现有 entity 的版本前提。owner APIs 仍使用 caller 读取到的全局 snapshot version，settings write 使用自身 settings `Version`。任一旧版本得到 `ConfigurationErrorCode.ConcurrencyConflict`，不得覆盖后来提交。
+3. **完整替换与 owner apply 的区别。** FullConfiguration 的 arrays 是五个集合的完整 replacement；省略 route/service/extension record/extension setting 即删除，整个 candidate 一次校验和提交。owner `ApplyAsync` 的 route/service upsert/remove 与可选 settings replacement 保持 owner-scoped patch 语义，其中 `settings: null` 是保持不变。两者都在同一 Host 事务边界内执行，validation、ownership/reference、handler/service target 或并发冲突都会 rollback。
+4. **PortLease guard。** Full replacement 或 owner service removal 若会删除仍有对应 `PortLease` 行的 service，Host 拒绝整次 write；必须先让 lease 消失。PortLease、Node 和 runtime lease state 不属于 FullConfiguration DTO，也不能由 extension 伪造、更新或绕过 guard。
+5. **通知时序。** configuration notification 只在 database transaction commit 后发布，且不在 EF config gate 内执行 callback。通知不是 extension 可直接操纵的消息持久化机制；已提交 replacement 不因 notification 排队/失败而回滚。
+6. **Host-owned revision/timestamp。** Full DTO 的 route/service/extension-record/settings timestamps 和 entity versions 是 Host 返回的权威值；existing entity 的 Host metadata 会被保留/更新，new entity 的 creation metadata 按当前 Host mapping 处理。owner `ExtensionRouteConfiguration` 不暴露 route version；`ExtensionServiceConfiguration.Version` 和 `ExtensionSettingsConfiguration.Version` 仍是服务器返回的并发字段。客户端不得自行推进 server revision/version，也不能把这些 entity fields 当作 Host-global control。
+7. **Fresh scope 与 read-only。** FullConfiguration facade 每次操作都创建并释放新的 async DI scope，不跨调用保留 scoped `IHostConfigApi`/`DbContext`；因此应在每次提交后重新读取 snapshot。read-only Host 可以继续读取已接受 snapshot，但 write 返回 safe `ConfigurationErrorCode.Unsupported`。
+8. **Endpoint owner visibility。** endpoint snapshot 中的 owner metadata 是 Host 内部绑定信息；extension lease DTO 只露 `ServiceId`、`Port`、`ExpiresAt`，并且只对 exact caller-owned active lease 输出。Host-owned/null 和 foreign 永远不能通过 `Current` 或 `ResolveAsync` 观察。
 
 ## 10. Failure、reentrancy 和 unregister 语义
 
@@ -703,7 +772,7 @@ registry mutation 与 availability read 已 gate 串行化；manager callback �
 
 ## 11. 完整但精简的 C# 使用示例
 
-下面示例使用的类型和签名均来自 `Nekolla.Nekostick.Contracts`。示例先注册 handler，再提交只引用自身 service/handler 的 owned configuration；service metadata 由 Host 返回并维护：新建 service 时当前实现接受并映射 DTO 提供的 creation metadata，客户端必须以返回的 `CreatedAt`、`UpdatedAt` 和 `Version` 为准，且不得把这些字段当作 Host-global control。
+下面示例使用的类型和签名均来自 `Nekolla.Nekostick.Contracts`。`FullConfiguration` 示例先读取完整 snapshot，再以同一 snapshot 的全局/entity versions 构造完整 replacement；为了不删除任何数据，示例把五个集合全部带回。若故意从任一 array 中删去项，该项会按 §5.4 被删除。service/route metadata 和 versions 由 Host 返回并维护，客户端必须以新 snapshot 返回的值为准，且不得把这些字段当作 Host-global control。
 
 ```csharp
 using System;
@@ -742,55 +811,24 @@ public sealed class ExampleEntrypoint : IExtensionEntry
         // fallback 是全局唯一资源，失败时必须按 false 处理。
         _ = context.Registration.TryRegisterFallback(new NoMatchFallback());
 
-        // 新 facade 只在 Host API 1.1 可用时使用。
-        if (context.Host.ApiVersion >= new HostApiVersion(1, 1, 0))
+        // FullConfiguration 是 API 1.2 capability；先做精确 feature detection。
+        if (context.Host.ApiVersion >= new HostApiVersion(1, 2, 0))
         {
-            var read = await context.Host.ConfigurationApi
+            var fullRead = await context.Host.FullConfiguration
                 .ReadAsync(cancellationToken)
                 .ConfigureAwait(false);
-            if (read.IsSuccess && read.Value is { } snapshot)
+            if (fullRead.IsSuccess && fullRead.Value is { } snapshot)
             {
-                var serviceId = Guid.Parse(
-                    "01900000-0000-7000-8000-000000000702");
-                var routeId = Guid.Parse(
-                    "01900000-0000-7000-8000-000000000701");
+                // 这是 complete replacement，不是 patch。省略任何 array 会删除其中未列出的实体。
+                var completeChanges = new ConfigurationChangeSet(
+                    snapshot.GlobalSettings,
+                    snapshot.Routes,
+                    snapshot.Services,
+                    snapshot.ExtensionRecords,
+                    snapshot.ExtensionSettings);
 
-                var service = new ExtensionServiceConfiguration(
-                    serviceId,
-                    enabled: true,
-                    fileName: "/opt/example/bin/example-service",
-                    argumentList: ImmutableArray<string>.Empty,
-                    workingDirectory: "/opt/example",
-                    startMode: ServiceStartMode.Lazy,
-                    restartPolicy: ServiceRestartPolicy.OnFailure,
-                    healthCheck: new ServiceHealthCheckConfiguration(
-                        ServiceHealthCheckType.Process,
-                        httpPath: null,
-                        timeout: TimeSpan.FromSeconds(3)),
-                    createdAt: DateTimeOffset.UtcNow,
-                    updatedAt: DateTimeOffset.UtcNow,
-                    version: 0);
-
-                var route = new ExtensionRouteConfiguration(
-                    routeId,
-                    enabled: true,
-                    matcher: new RouteMatcherConfiguration(
-                        RouteMatcherType.Exact,
-                        "/hello",
-                        ImmutableArray<string>.Empty,
-                        ImmutableArray.Create("GET")),
-                    target: new ExtensionServiceRouteTarget(serviceId),
-                    priority: 0);
-
-                var changes = new ExtensionConfigurationChangeSet(
-                    ImmutableArray.Create(route),
-                    ImmutableArray<Guid>.Empty,
-                    ImmutableArray.Create(service),
-                    ImmutableArray<Guid>.Empty,
-                    settings: null);
-
-                var write = await context.Host.ConfigurationApi
-                    .ApplyAsync(snapshot.Version, changes, cancellationToken)
+                var write = await context.Host.FullConfiguration
+                    .ReplaceAsync(snapshot.Version, completeChanges, cancellationToken)
                     .ConfigureAwait(false);
                 if (!write.IsSuccess)
                 {
@@ -894,10 +932,10 @@ static async ValueTask<ConfigurationWriteResult?> WriteSettingsAsync(
 
 对应实现入口：
 
-- 稳定 ABI/DTO：`src/Nekolla.Nekostick.Contracts/ExtensionAbi.cs`、`HostApiVersion.cs`、`ExtensionContracts.cs`、`ExtensionConfigurationApi.cs`、`ExtensionCapabilityApis.cs`、`ConfigurationContracts.cs`、`ExtensionCapabilityFactory.cs`；
+- 稳定 ABI/DTO：`src/Nekolla.Nekostick.Contracts/ExtensionAbi.cs`、`HostApiVersion.cs`、`ExtensionContracts.cs`、`ExtensionConfigurationApi.cs`、`ExtensionFullConfigurationApi.cs`、`ExtensionCapabilityApis.cs`、`ConfigurationContracts.cs`、`ExtensionCapabilityFactory.cs`；
 - manifest/discovery/ALC：`src/Nekolla.Nekostick.Extensions/ExtensionManifestContracts.cs`、`ExtensionManifestJsonParser.cs`、`ExtensionManifestYamlParser.cs`、`ManifestParserCore.cs`、`CollectibleExtensionLoader.cs`；
 - bridge/registry/queue/task/failure：`ExtensionHostBridge.cs`、`ExtensionRuntimePrimitives.cs`、`ExtensionCapabilityRuntime.cs`；
 - staged runtime：`ExtensionRuntimeManager.cs` 及其 staged/reload implementation；
-- owner-bound Host facade 和 endpoint snapshot：`src/Nekolla.Nekostick.Host/ExtensionCapabilityFacades.cs`、`HostServiceEndpointResolver.cs`、`HostServiceEndpointPublicationService.cs`，以及 Persistence owner metadata/migration。
+- full/owner Host facade 与 endpoint snapshot：`src/Nekolla.Nekostick.Host/ExtensionCapabilityFacades.cs`、`src/Nekolla.Nekostick.Host/HostConfigApiReadOnlyDecorator.cs`、`src/Nekolla.Nekostick.Host/HostServiceEndpointResolver.cs`、`src/Nekolla.Nekostick.Host/HostServiceEndpointPublicationService.cs`，以及 `src/Nekolla.Nekostick.Persistence/EfHostConfigApi.cs`、`EfHostConfigEntityOperations.cs` 和 Persistence owner metadata/migration。
 
 这些路径是实现定位，不表示 extension 可以引用其中的 Host/Persistence/runtime 实现类型。
