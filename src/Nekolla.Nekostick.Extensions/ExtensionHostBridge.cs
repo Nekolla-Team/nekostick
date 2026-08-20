@@ -18,6 +18,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
         ApiVersion = apiVersion;
         Configuration = new ExtensionSettingsReader(settings);
         ConfigurationApi = capabilities.ConfigurationApi;
+        FullConfiguration = capabilities.FullConfiguration;
         Routes = capabilities.Routes;
         Services = capabilities.Services;
         Endpoints = capabilities.Endpoints;
@@ -33,6 +34,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
 
     public IExtensionSettingsReader Configuration { get; }
     public IExtensionConfigurationApi ConfigurationApi { get; }
+    public IExtensionFullConfigurationApi FullConfiguration { get; }
     public IExtensionRouteApi Routes { get; }
     public IExtensionServiceApi Services { get; }
     public IExtensionEndpointApi Endpoints { get; }

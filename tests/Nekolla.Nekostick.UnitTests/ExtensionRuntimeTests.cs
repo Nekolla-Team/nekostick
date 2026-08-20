@@ -464,12 +464,14 @@ public async Task BridgeAddsCapabilitiesWhilePreservingLegacySettingsAndSafeUnsu
 
     Assert.Equal(ExtensionInvocationState.Handled, result.State);
     var body = Body(result);
-    Assert.Contains("api=1.1.0", body, StringComparison.Ordinal);
+    Assert.Contains("api=1.2.0", body, StringComparison.Ordinal);
     Assert.Contains($"legacy={manifest.Id}:1:0", body, StringComparison.Ordinal);
     Assert.Contains("properties=True", body, StringComparison.Ordinal);
     Assert.Contains($"lifecycle={manifest.Id}:Discovered", body, StringComparison.Ordinal);
     Assert.Contains("configRead=Unsupported", body, StringComparison.Ordinal);
     Assert.Contains("configApply=Unsupported", body, StringComparison.Ordinal);
+    Assert.Contains("fullRead=Unsupported", body, StringComparison.Ordinal);
+    Assert.Contains("fullReplace=Unsupported", body, StringComparison.Ordinal);
     Assert.Contains("settingsRead=Unsupported", body, StringComparison.Ordinal);
     Assert.Contains("settingsWrite=Unsupported", body, StringComparison.Ordinal);
     Assert.Contains("routeRead=Unsupported", body, StringComparison.Ordinal);

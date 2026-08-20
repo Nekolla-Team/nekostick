@@ -44,7 +44,46 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory
                 _serviceProvider.GetService<IHostServiceLifecycleCoordinator>()),
             new ExtensionEndpointFacade(
                 extensionId,
-                _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()));
+                _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
+            new ExtensionFullConfigurationFacade(_scopeFactory));
+
+    }
+}
+
+internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigurationApi
+{
+    private readonly IServiceScopeFactory _scopeFactory;
+
+    internal ExtensionFullConfigurationFacade(IServiceScopeFactory scopeFactory)
+    {
+        _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
+    }
+
+    public async ValueTask<ConfigurationReadResult<HostConfigurationSnapshot>> ReadAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
+        return hostConfig is null
+            ? ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
+                new ConfigurationError(ConfigurationErrorCode.Unsupported))
+            : await hostConfig.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ConfigurationWriteResult> ReplaceAsync(
+        long expectedVersion,
+        ConfigurationChangeSet changes,
+        CancellationToken cancellationToken = default)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
+        return hostConfig is null
+            ? ConfigurationWriteResult.Failure(
+                new ConfigurationError(ConfigurationErrorCode.Unsupported))
+            : await hostConfig.WriteSnapshotAsync(
+                expectedVersion,
+                changes,
+                cancellationToken).ConfigureAwait(false);
     }
 }
 

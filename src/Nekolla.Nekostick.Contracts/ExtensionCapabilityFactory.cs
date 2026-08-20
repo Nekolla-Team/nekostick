@@ -2,11 +2,11 @@ using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Contracts;
 
-/// <summary>Provides host-created, identity-bound extension capability facades.</summary>
+/// <summary>Provides host-created extension capability facades.</summary>
 /// <remarks>The factory crosses the extension boundary only with Contracts DTOs and facades.</remarks>
 public interface IExtensionCapabilityFactory
 {
-    /// <summary>Creates one owner-bound capability set for an extension.</summary>
+    /// <summary>Creates one capability set for an extension.</summary>
     /// <param name="extensionId">The host-validated extension identifier.</param>
     /// <param name="handlerIsOwned">Checks a stable handler identifier owned by the extension.</param>
     /// <returns>The immutable set of approved facades.</returns>
@@ -15,12 +15,13 @@ public interface IExtensionCapabilityFactory
         Func<string, bool> handlerIsOwned);
 }
 
-/// <summary>Contains the approved owner-bound capability facades supplied to a bridge.</summary>
+/// <summary>Contains the approved capability facades supplied to a bridge.</summary>
 public sealed record ExtensionCapabilitySet(
     IExtensionConfigurationApi ConfigurationApi,
     IExtensionRouteApi Routes,
     IExtensionServiceApi Services,
-    IExtensionEndpointApi Endpoints);
+    IExtensionEndpointApi Endpoints,
+    IExtensionFullConfigurationApi FullConfiguration);
 
 /// <summary>Provides the persistence-backed owner-scoped configuration seam used by Host facades.</summary>
 public interface IExtensionOwnedConfigurationApi
