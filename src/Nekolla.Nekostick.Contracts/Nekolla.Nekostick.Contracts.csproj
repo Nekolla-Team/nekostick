@@ -2,5 +2,19 @@
   <PropertyGroup>
     <AssemblyName>Nekolla.Nekostick.Contracts</AssemblyName>
     <RootNamespace>Nekolla.Nekostick.Contracts</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>Nekolla.Nekostick.Contracts</PackageId>
+    <PackageVersion>1.2.0</PackageVersion>
+    <Authors>Nekolla-Team</Authors>
+    <PackageDescription>Stable host and extension contracts for Nekostick.</PackageDescription>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>nekostick;contracts;extensions;abi</PackageTags>
+    <PackageProjectUrl>https://github.com/Nekolla-Team/nekostick</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Nekolla-Team/nekostick</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>
