@@ -440,13 +440,35 @@ internal sealed class TestExtensionDirectory : IDisposable
 
     private void StageFixtureAssets()
     {
-        var fixtureAssembly = typeof(FixtureEntrypoint).Assembly;
         File.Copy(
-            fixtureAssembly.Location,
+            GetKnownOutputAssemblyPath(typeof(FixtureEntrypoint).Assembly),
             Path.Combine(RootPath, "Fixtures.Extension.dll"));
         File.Copy(
-            typeof(IExtensionEntrypoint).Assembly.Location,
+            GetKnownOutputAssemblyPath(typeof(IExtensionEntrypoint).Assembly),
             Path.Combine(RootPath, "Nekolla.Nekostick.Contracts.dll"));
+    }
+
+    private static string GetKnownOutputAssemblyPath(Assembly assembly)
+    {
+        var name = assembly.GetName().Name;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new InvalidOperationException("The fixture assembly name is unavailable.");
+        }
+
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, name + ".dll"));
+        if (!File.Exists(path))
+        {
+            throw new InvalidOperationException("The fixture assembly is not present in the test output.");
+        }
+
+        var actual = AssemblyName.GetAssemblyName(path);
+        if (!string.Equals(actual.FullName, assembly.GetName().FullName, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The fixture assembly identity is not the expected output assembly.");
+        }
+
+        return path;
     }
 
     private static TestExtensionDirectory CreateRoot()

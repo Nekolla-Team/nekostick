@@ -378,8 +378,19 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
 
     protected override Assembly? Load(AssemblyName assemblyName)
     {
-        if (_contractCatalog.TryResolveAssembly(assemblyName, _root, out var approvedPath))
+        if (_contractCatalog.TryResolveAssembly(
+                assemblyName,
+                _root,
+                out var approvedPath,
+                out var approvedAssembly))
         {
+            if (approvedAssembly is not null)
+            {
+                return AssemblyIdentityMatches(assemblyName, approvedAssembly.GetName())
+                    ? approvedAssembly
+                    : throw new ContractsIdentityException();
+            }
+
             return AssemblyIdentityMatches(assemblyName, _contractsIdentity)
                 ? _contractsAssembly
                 : LoadFromAssemblyPath(approvedPath);
