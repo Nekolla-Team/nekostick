@@ -304,6 +304,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
             .Where(static record => record is not null && record.LoadState == ExtensionLoadState.Loaded)
             .GroupBy(static record => record.ExtensionId, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
+        var bootstrap = snapshot.ExtensionRecords.Length == 0;
         var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
         if (!Directory.Exists(installRoot))
         {
@@ -364,11 +365,13 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
             return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, localFailure);
         }
 
-        var matchedManifests = discoveredById.Values
-            .Where(manifest => loadedRecords.TryGetValue(manifest.Id, out var records) &&
-                records.Length == 1 &&
-                string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal))
-            .ToImmutableArray();
+        var matchedManifests = bootstrap
+            ? discoveredById.Values.ToImmutableArray()
+            : discoveredById.Values
+                .Where(manifest => loadedRecords.TryGetValue(manifest.Id, out var records) &&
+                    records.Length == 1 &&
+                    string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal))
+                .ToImmutableArray();
         var graph = ExtensionManifestGraph.ValidateAndOrder(
             matchedManifests,
             new SemVersion(
@@ -393,9 +396,10 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
 
         foreach (var manifest in graph.OrderedManifests)
         {
-            if (!loadedRecords.TryGetValue(manifest.Id, out var records) ||
-                records.Length != 1 ||
-                !string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal))
+            if (!bootstrap &&
+                (!loadedRecords.TryGetValue(manifest.Id, out var records) ||
+                 records.Length != 1 ||
+                 !string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal)))
             {
                 continue;
             }
