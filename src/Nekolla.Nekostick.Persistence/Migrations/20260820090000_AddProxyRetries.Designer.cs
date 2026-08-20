@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Nekolla.Nekostick.Persistence;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Nekolla.Nekostick.Persistence.Migrations
 {
     [DbContext(typeof(NekostickDbContext))]
-    partial class NekostickDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260820090000_AddProxyRetries")]
+    partial class AddProxyRetries
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -292,6 +295,7 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("boolean")
                         .HasDefaultValue(true)
                         .HasColumnName("proxy_retry_on_upstream_disconnect");
+
                     b.Property<int>("MaxConcurrentRequests")
                         .HasColumnType("integer")
                         .HasColumnName("max_concurrent_requests");
@@ -348,6 +352,7 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                             t.HasCheckConstraint("ck_global_settings_port_range", "auto_port_range_start BETWEEN 1 AND 65535 AND auto_port_range_end BETWEEN 1 AND 65535 AND auto_port_range_start <= auto_port_range_end");
 
                             t.HasCheckConstraint("ck_global_settings_proxy_timeouts", "connect_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_activity_timeout_milliseconds BETWEEN 1 AND 86400000 AND http_total_timeout_milliseconds BETWEEN 1 AND 86400000 AND websocket_idle_timeout_milliseconds BETWEEN 1 AND 86400000");
+
                             t.HasCheckConstraint("ck_global_settings_proxy_retries", "proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds");
 
                             t.HasCheckConstraint("ck_global_settings_singleton", "id = '018f0f00-0000-7000-8000-000000000002'::uuid");
@@ -606,26 +611,6 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("priority");
 
-                    b.Property<int?>("ProxyMaxRetries")
-                        .HasColumnType("integer")
-                        .HasColumnName("proxy_max_retries");
-
-                    b.Property<int?>("ProxyInitialRetryBackoffMilliseconds")
-                        .HasColumnType("integer")
-                        .HasColumnName("proxy_initial_retry_backoff_milliseconds");
-
-                    b.Property<int?>("ProxyMaximumRetryBackoffMilliseconds")
-                        .HasColumnType("integer")
-                        .HasColumnName("proxy_maximum_retry_backoff_milliseconds");
-
-                    b.Property<bool?>("ProxyRetryOnConnectionFailure")
-                        .HasColumnType("boolean")
-                        .HasColumnName("proxy_retry_on_connection_failure");
-
-                    b.Property<bool?>("ProxyRetryOnUpstreamDisconnect")
-                        .HasColumnType("boolean")
-                        .HasColumnName("proxy_retry_on_upstream_disconnect");
-
                     b.Property<string>("ReplaceTemplate")
                         .HasMaxLength(4096)
                         .HasColumnType("character varying(4096)")
@@ -689,7 +674,6 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                     b.ToTable("routes", "nekostick", t =>
                         {
                             t.HasCheckConstraint("ck_routes_client_ip_rate_policy", "(client_ip_rate_token_limit IS NULL AND client_ip_rate_tokens_per_period IS NULL AND client_ip_rate_replenishment_period_milliseconds IS NULL AND client_ip_rate_queue_limit IS NULL AND client_ip_rate_rejection_behavior IS NULL AND client_ip_rate_retry_after_behavior IS NULL) OR (client_ip_rate_token_limit IS NOT NULL AND client_ip_rate_tokens_per_period IS NOT NULL AND client_ip_rate_replenishment_period_milliseconds IS NOT NULL AND client_ip_rate_queue_limit IS NOT NULL AND client_ip_rate_rejection_behavior IS NOT NULL AND client_ip_rate_retry_after_behavior IS NOT NULL AND client_ip_rate_token_limit > 0 AND client_ip_rate_tokens_per_period > 0 AND client_ip_rate_tokens_per_period <= client_ip_rate_token_limit AND client_ip_rate_replenishment_period_milliseconds BETWEEN 1 AND 86400000 AND client_ip_rate_queue_limit >= 0 AND client_ip_rate_rejection_behavior IN ('Reject', 'Queue') AND client_ip_rate_retry_after_behavior IN ('None', 'FromReplenishmentPeriod'))");
-                            t.HasCheckConstraint("ck_routes_proxy_retries", "(proxy_max_retries IS NULL AND proxy_initial_retry_backoff_milliseconds IS NULL AND proxy_maximum_retry_backoff_milliseconds IS NULL AND proxy_retry_on_connection_failure IS NULL AND proxy_retry_on_upstream_disconnect IS NULL) OR (proxy_max_retries IS NOT NULL AND proxy_initial_retry_backoff_milliseconds IS NOT NULL AND proxy_maximum_retry_backoff_milliseconds IS NOT NULL AND proxy_retry_on_connection_failure IS NOT NULL AND proxy_retry_on_upstream_disconnect IS NOT NULL AND proxy_max_retries BETWEEN 0 AND 10 AND proxy_initial_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_maximum_retry_backoff_milliseconds BETWEEN 1 AND 2000 AND proxy_initial_retry_backoff_milliseconds <= proxy_maximum_retry_backoff_milliseconds)");
 
                             t.HasCheckConstraint("ck_routes_enum_values", "matcher_type IN ('Exact', 'ExactCaseInsensitive', 'Prefix', 'PrefixCaseInsensitive', 'Regex') AND target_type IN ('Microservice', 'StaticFile', 'ExtensionHandler') AND forwarding_mode IN ('Preserve', 'Strip', 'Replace')");
 
