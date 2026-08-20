@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:e17e86066e5ef83e0952a9347f5c792b7ece00972e2aa787a6986f471b3dd3d5 # postgres:16
         env:
           POSTGRES_DB: nekostick_ci
           POSTGRES_USER: nekostick_ci
@@ -66,10 +66,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.100"
 
@@ -98,26 +98,6 @@ jobs:
 
       - name: Build canonical solution
         run: dotnet build Nekolla.Nekostick.slnx --configuration Release --no-restore --verbosity quiet --nologo
-
-      - name: Smoke test linux-x64 release publish
-        shell: bash
-        run: |
-          set -euo pipefail
-          publish_root="$RUNNER_TEMP/nekostick-linux-x64-publish"
-          host_publish="$publish_root/host"
-          rm -rf "$publish_root"
-
-          # Host publish embeds the matching NativeHelper; publish no separate helper artifact.
-          dotnet publish src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj \
-            --configuration Release \
-            --runtime linux-x64 \
-            --self-contained false \
-            -p:PublishReadyToRun=true \
-            -p:PublishSingleFile=true \
-            --output "$host_publish" \
-            --nologo
-
-          test -x "$host_publish/Nekolla.Nekostick.Host"
 
       - name: Validate idempotent EF migration SQL
         shell: bash
@@ -157,6 +137,67 @@ jobs:
       - name: Test canonical solution
         run: dotnet test Nekolla.Nekostick.slnx --configuration Release --no-build --no-restore --nologo --logger "console;verbosity=minimal"
 
+      - name: Publish linux-x64 release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_root="$RUNNER_TEMP/nekostick-linux-x64-publish"
+          host_publish="$publish_root/host"
+          rm -rf "$publish_root"
+
+          # Host publish embeds the matching NativeHelper; publish no separate helper artifact.
+          dotnet publish src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj \
+            --configuration Release \
+            --runtime linux-x64 \
+            --self-contained false \
+            -p:PublishReadyToRun=true \
+            -p:PublishSingleFile=true \
+            --output "$host_publish" \
+            --nologo
+
+          test -x "$host_publish/Nekolla.Nekostick.Host"
+
+      - name: Package linux-x64 workflow artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_root="$RUNNER_TEMP/nekostick-linux-x64-publish"
+          host_publish="$publish_root/host"
+          package_root="$RUNNER_TEMP/nekostick-linux-x64-artifact"
+          archive_path="$RUNNER_TEMP/Nekolla.Nekostick-linux-x64.tar.gz"
+          migration_script="$RUNNER_TEMP/Nekolla.Nekostick.idempotent-migrations.sql"
+          verify_root="$RUNNER_TEMP/nekostick-linux-x64-artifact-verify"
+
+          test -x "$host_publish/Nekolla.Nekostick.Host"
+          test -s "$migration_script"
+          rm -rf "$package_root" "$verify_root" "$archive_path" "$archive_path.sha256"
+          mkdir -p "$package_root" "$verify_root"
+          cp -a "$host_publish" "$package_root/host"
+          cp "$migration_script" "$package_root/Nekolla.Nekostick.idempotent-migrations.sql"
+
+          tar -C "$package_root" -czf "$archive_path" \
+            host Nekolla.Nekostick.idempotent-migrations.sql
+          (
+            cd "$(dirname "$archive_path")"
+            sha256sum "$(basename "$archive_path")" > "$(basename "$archive_path").sha256"
+          )
+
+          tar -xzf "$archive_path" -C "$verify_root"
+          test -x "$verify_root/host/Nekolla.Nekostick.Host"
+          test -s "$verify_root/Nekolla.Nekostick.idempotent-migrations.sql"
+          test -s "$archive_path"
+          test -s "$archive_path.sha256"
+
+      - name: Upload linux-x64 workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nekostick-linux-x64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/Nekolla.Nekostick-linux-x64.tar.gz
+            ${{ runner.temp }}/Nekolla.Nekostick-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+
   macos:
     name: macOS with Postgres 16
     if: github.event_name == 'workflow_dispatch' && inputs.test_macos
@@ -164,10 +205,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.100"
 
