@@ -308,7 +308,7 @@ public sealed class ExtensionManifestTests
             contractsReference.GetPublicKeyToken());
         Assert.True(typeof(IExtensionEntrypoint).IsAssignableFrom(typeof(FixtureEntrypoint)));
         Assert.Equal(
-            ["ApiVersion", "Configuration", "Contracts", "Events", "Logger", "Status", "Tasks"],
+            ["ApiVersion", "Configuration", "ConfigurationApi", "Contracts", "Endpoints", "Events", "Lifecycle", "Logger", "Routes", "Services", "Status", "Tasks"],
             typeof(IExtensionHostBridge).GetProperties()
                 .Select(property => property.Name)
                 .OrderBy(name => name, StringComparer.Ordinal)

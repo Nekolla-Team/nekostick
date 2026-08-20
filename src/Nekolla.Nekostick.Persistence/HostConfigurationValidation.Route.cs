@@ -21,8 +21,7 @@ internal static class HostConfigurationRouteValidator
     internal static void Validate(
         RouteConfiguration? value,
         GlobalSettingsConfiguration globalSettings,
-        HashSet<Guid> serviceIds,
-        HashSet<string> extensionIds)
+        HashSet<Guid> serviceIds)
     {
         if (value is null || value.Matcher is null || value.Target is null || value.Forwarding is null ||
             !HostConfigurationValueValidator.IsUuidV7(value.Id) || value.Version < 0 ||
@@ -111,8 +110,7 @@ internal static class HostConfigurationRouteValidator
             case ExtensionHandlerRouteTargetConfiguration handler:
                 if (!HostConfigurationValueValidator.IsSafeText(
                         handler.HandlerId,
-                        HostConfigurationValueValidator.MaxHandlerIdLength) ||
-                    !extensionIds.Contains(handler.HandlerId))
+                        HostConfigurationValueValidator.MaxHandlerIdLength))
                 {
                     HostConfigurationValueValidator.Throw();
                 }

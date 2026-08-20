@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+using Nekolla.Nekostick.Persistence;
 using System.Collections.Immutable;
 using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
@@ -12,6 +14,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
     private readonly ExtensionRuntimeManager _runtimeManager;
     private readonly HostNodeOptions _nodeOptions;
     private readonly ILogger<HostConfigurationPublisher> _logger;
+    private readonly IDbContextFactory<NekostickDbContext>? _dbContextFactory;
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private int _disposed;
 
@@ -20,16 +23,19 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
     /// <param name="runtimeManager">The extension runtime manager used to prepare and publish generations.</param>
     /// <param name="nodeOptions">The immutable host node options controlling extension publication.</param>
     /// <param name="logger">The logger used to record publication failures.</param>
+    /// <param name="dbContextFactory">The optional persistence factory used to load service ownership metadata.</param>
     public HostConfigurationPublisher(
         HostConfigurationSnapshotHolder snapshotHolder,
         ExtensionRuntimeManager runtimeManager,
         HostNodeOptions nodeOptions,
-        ILogger<HostConfigurationPublisher> logger)
+        ILogger<HostConfigurationPublisher> logger,
+        IDbContextFactory<NekostickDbContext>? dbContextFactory = null)
     {
         _snapshotHolder = snapshotHolder ?? throw new ArgumentNullException(nameof(snapshotHolder));
         _runtimeManager = runtimeManager ?? throw new ArgumentNullException(nameof(runtimeManager));
         _nodeOptions = nodeOptions ?? throw new ArgumentNullException(nameof(nodeOptions));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _dbContextFactory = dbContextFactory;
     }
 
     internal async ValueTask<bool> PublishAsync(
@@ -49,6 +55,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
             {
                 return false;
             }
+            var serviceOwners = await ReadServiceOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
 
             var previousSnapshot = _snapshotHolder.RoutingSnapshot;
             var previousGeneration = previousSnapshot?.DispatchGeneration;
@@ -57,7 +64,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
                 previousGeneration is not null &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
             {
-                if (!_snapshotHolder.TryReplace(snapshot, previousGeneration))
+                if (!_snapshotHolder.TryReplace(snapshot, previousGeneration, serviceOwners))
                 {
                     return false;
                 }
@@ -82,6 +89,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
                 return await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
+                        serviceOwners,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -93,11 +101,12 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
                 return await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
+                        serviceOwners,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
 
-            if (!_snapshotHolder.TryReplace(snapshot, ready.Generation))
+            if (!_snapshotHolder.TryReplace(snapshot, ready.Generation, serviceOwners))
             {
                 await preparation.AbortAsync().ConfigureAwait(false);
                 return false;
@@ -130,12 +139,13 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
     private async ValueTask<bool> PublishWithPreviousOrEmptyAsync(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? previousGeneration,
+        ImmutableDictionary<Guid, string?> serviceOwners,
         CancellationToken cancellationToken)
     {
         var previousSnapshot = _snapshotHolder.Current;
         if (previousGeneration is not null)
         {
-            if (!_snapshotHolder.TryReplace(snapshot, previousGeneration))
+            if (!_snapshotHolder.TryReplace(snapshot, previousGeneration, serviceOwners))
             {
                 return false;
             }
@@ -155,9 +165,8 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
         var emptyPreparation = emptyResult.Preparation;
         var ready = await emptyPreparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
         if (!ready.Succeeded || ready.Generation is null ||
-            !_snapshotHolder.TryReplace(snapshot, ready.Generation))
+            !_snapshotHolder.TryReplace(snapshot, ready.Generation, serviceOwners))
         {
-            await emptyPreparation.AbortAsync().ConfigureAwait(false);
             return false;
         }
 
@@ -168,6 +177,43 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
 
         PublishSnapshotEvents(snapshot, previousSnapshot);
         return true;
+    }
+
+    private async ValueTask<ImmutableDictionary<Guid, string?>> ReadServiceOwnersAsync(
+        HostConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (_dbContextFactory is null)
+        {
+            return snapshot.Services.ToImmutableDictionary(
+                static value => value.Id,
+                static _ => (string?)null);
+        }
+
+        try
+        {
+            await using var db = await _dbContextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var serviceIds = snapshot.Services.Select(static value => value.Id).ToArray();
+            var rows = await db.Services
+                .AsNoTracking()
+                .Where(value => serviceIds.Contains(value.Id))
+                .Select(value => new { value.Id, value.OwnerExtensionId })
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return rows.ToImmutableDictionary(
+                static value => value.Id,
+                static value => value.OwnerExtensionId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return ImmutableDictionary<Guid, string?>.Empty;
+        }
     }
 
     private void PublishSnapshotEvents(

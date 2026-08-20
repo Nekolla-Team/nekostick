@@ -276,11 +276,14 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(handlerId) || request is null ||
             !_handlers.TryGetValue(handlerId, out var binding) ||
-            binding.Handler is not { } handler || !binding.Context.Instance.TryEnterRequest())
+            binding.Handler is not { } handler ||
+            !binding.Context.Instance.IsHandlerOwned(handlerId) ||
+            !binding.Context.Instance.TryEnterRequest())
         {
             return ExtensionInvocationResult.Unavailable;
         }
 
+        using var callbackScope = ExtensionCallbackGuard.Enter();
         try
         {
             var response = await handler.HandleAsync(request, cancellationToken).ConfigureAwait(false);
@@ -316,11 +319,13 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
 
         var fallbackBinding = _fallback;
         if (fallbackBinding is null || fallbackBinding.Fallback is not { } fallback ||
+            !fallbackBinding.Context.Instance.IsFallbackOwned ||
             !fallbackBinding.Context.Instance.TryEnterRequest())
         {
             return ExtensionInvocationResult.NotHandled;
         }
 
+        using var callbackScope = ExtensionCallbackGuard.Enter();
         try
         {
             var result = await fallback.HandleAsync(

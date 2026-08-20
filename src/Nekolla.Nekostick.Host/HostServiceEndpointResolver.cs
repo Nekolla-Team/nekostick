@@ -17,7 +17,12 @@ public interface IHostServiceEndpointSnapshotAccessor
 /// <param name="ServiceId">The service identifier associated with the lease.</param>
 /// <param name="Port">The loopback port assigned to the service.</param>
 /// <param name="ExpiresAt">The time at which the lease expires.</param>
-public sealed record HostServiceEndpointLease(Guid ServiceId, int Port, DateTimeOffset ExpiresAt)
+/// <param name="OwnerExtensionId">The persisted extension owner, or <see langword="null"/> for Host-owned services.</param>
+public sealed record HostServiceEndpointLease(
+    Guid ServiceId,
+    int Port,
+    DateTimeOffset ExpiresAt,
+    string? OwnerExtensionId = null)
 {
     /// <summary>Determines whether the lease identifies a valid, unexpired endpoint at the specified time.</summary>
     /// <param name="now">The current time.</param>
@@ -25,7 +30,6 @@ public sealed record HostServiceEndpointLease(Guid ServiceId, int Port, DateTime
     public bool IsActive(DateTimeOffset now) =>
         ServiceId != Guid.Empty && Port is >= 1 and <= 65535 && now < ExpiresAt;
 }
-
 /// <summary>Atomically publishes a complete endpoint lease snapshot.</summary>
 public sealed class HostServiceEndpointSnapshotPublisher : IHostServiceEndpointSnapshotAccessor
 {

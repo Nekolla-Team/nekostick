@@ -20,7 +20,7 @@ public readonly record struct HostApiVersion : IComparable<HostApiVersion>
     }
 
     /// <summary>Gets the current host API version.</summary>
-    public static HostApiVersion Current { get; } = new(1, 0, 0);
+    public static HostApiVersion Current { get; } = new(1, 1, 0);
 
     /// <summary>Gets the major component.</summary>
     public int Major { get; }

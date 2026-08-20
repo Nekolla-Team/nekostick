@@ -6,37 +6,94 @@ namespace Nekolla.Nekostick.Extensions;
 
 internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
 {
-    private readonly Dictionary<string, IExtensionHandler> _handlers = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
+    private ImmutableDictionary<string, IExtensionHandler> _handlers =
+        ImmutableDictionary.Create<string, IExtensionHandler>(StringComparer.Ordinal);
+    private ImmutableHashSet<string> _unregisteredHandlers =
+        ImmutableHashSet.Create<string>(StringComparer.Ordinal);
     private IExtensionFallback? _fallback;
+    private Action<string>? _onHandlerUnregistered;
+    private Action? _onFallbackUnregistered;
+    private bool _fallbackUnregistered;
+    private bool _registrationRejected;
 
-    internal bool RegistrationRejected { get; private set; }
+    internal bool RegistrationRejected
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _registrationRejected;
+            }
+        }
+    }
 
-    internal IReadOnlyDictionary<string, IExtensionHandler> Handlers => _handlers;
+    internal IReadOnlyDictionary<string, IExtensionHandler> Handlers
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _handlers;
+            }
+        }
+    }
 
-    internal IExtensionFallback? Fallback => _fallback;
+    internal IExtensionFallback? Fallback
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _fallback;
+            }
+        }
+    }
+
+    internal void SetUnregisterCallbacks(Action<string> onHandlerUnregistered, Action onFallbackUnregistered)
+    {
+        lock (_gate)
+        {
+            _onHandlerUnregistered = onHandlerUnregistered;
+            _onFallbackUnregistered = onFallbackUnregistered;
+        }
+    }
 
     public bool TryRegisterHandler(IExtensionHandler handler)
     {
-        if (handler is null || !ExtensionIdentifierSyntax.IsValid(handler.HandlerId))
+        if (handler is null)
         {
             return false;
         }
 
-        if (_handlers.TryGetValue(handler.HandlerId, out var existing))
+        var handlerId = handler.HandlerId;
+        if (!ExtensionIdentifierSyntax.IsValid(handlerId))
         {
-            if (ReferenceEquals(existing, handler))
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_unregisteredHandlers.Contains(handlerId))
             {
-                return true;
+                return false;
             }
 
-            RegistrationRejected = true;
-            return false;
+            if (_handlers.TryGetValue(handlerId, out var existing))
+            {
+                if (ReferenceEquals(existing, handler))
+                {
+                    return true;
+                }
+
+                _registrationRejected = true;
+                return false;
+            }
+
+            _handlers = _handlers.Add(handlerId, handler);
+            return true;
         }
-
-        _handlers.Add(handler.HandlerId, handler);
-        return true;
     }
-
 
     public bool TryRegisterFallback(IExtensionFallback fallback)
     {
@@ -45,25 +102,95 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
             return false;
         }
 
-        if (_fallback is not null)
+        lock (_gate)
         {
-            if (ReferenceEquals(_fallback, fallback))
+            if (_fallbackUnregistered)
             {
-                return true;
+                return false;
             }
 
-            RegistrationRejected = true;
-            return false;
+            if (_fallback is not null)
+            {
+                if (ReferenceEquals(_fallback, fallback))
+                {
+                    return true;
+                }
+
+                _registrationRejected = true;
+                return false;
+            }
+
+            _fallback = fallback;
+            return true;
+        }
+    }
+
+    public bool TryUnregisterHandler(string handlerId)
+    {
+        Action<string>? callback;
+        lock (_gate)
+        {
+            if (string.IsNullOrWhiteSpace(handlerId) || !_handlers.ContainsKey(handlerId))
+            {
+                return false;
+            }
+
+            _handlers = _handlers.Remove(handlerId);
+            _unregisteredHandlers = _unregisteredHandlers.Add(handlerId);
+            callback = _onHandlerUnregistered;
         }
 
-        _fallback = fallback;
+        callback?.Invoke(handlerId);
+        return true;
+    }
+
+    public bool TryUnregisterFallback()
+    {
+        Action? callback;
+        lock (_gate)
+        {
+            if (_fallback is null)
+            {
+                return false;
+            }
+
+            _fallback = null;
+            _fallbackUnregistered = true;
+            callback = _onFallbackUnregistered;
+        }
+
+        callback?.Invoke();
         return true;
     }
 
     internal void Clear()
     {
-        _handlers.Clear();
-        _fallback = null;
+        lock (_gate)
+        {
+            _handlers = ImmutableDictionary.Create<string, IExtensionHandler>(StringComparer.Ordinal);
+            _unregisteredHandlers = ImmutableHashSet.Create<string>(StringComparer.Ordinal);
+            _fallback = null;
+            _fallbackUnregistered = false;
+        }
+    }
+
+    internal bool IsHandlerAvailable(string handlerId)
+    {
+        lock (_gate)
+        {
+            return !_unregisteredHandlers.Contains(handlerId) && _handlers.ContainsKey(handlerId);
+        }
+    }
+
+    internal bool IsFallbackAvailable
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return !_fallbackUnregistered && _fallback is not null;
+            }
+        }
     }
 }
 
@@ -257,6 +384,7 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
 
                 foreach (var subscriber in subscribers)
                 {
+                    using var callbackScope = ExtensionCallbackGuard.Enter();
                     try
                     {
                         await subscriber(@event, _stop.Token).ConfigureAwait(false);
@@ -406,6 +534,7 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
 
     private async Task RunTrackedAsync(Func<CancellationToken, ValueTask> callback)
     {
+        using var callbackScope = ExtensionCallbackGuard.Enter();
         try
         {
             await callback(_stop.Token).ConfigureAwait(false);

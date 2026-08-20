@@ -43,10 +43,15 @@ public sealed class HostServiceEndpointPublicationService : BackgroundService
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;
-            var leases = await db.PortLeases
-                .AsNoTracking()
-                .Where(value => value.NodeId == _options.NodeId && value.LeaseExpiresAt > now)
-                .Select(value => new HostServiceEndpointLease(value.ServiceId, value.Port, value.LeaseExpiresAt))
+            var leases = await (
+                from lease in db.PortLeases.AsNoTracking()
+                join service in db.Services.AsNoTracking() on lease.ServiceId equals service.Id
+                where lease.NodeId == _options.NodeId && lease.LeaseExpiresAt > now
+                select new HostServiceEndpointLease(
+                    lease.ServiceId,
+                    lease.Port,
+                    lease.LeaseExpiresAt,
+                    service.OwnerExtensionId))
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
             _publisher.Publish(leases);

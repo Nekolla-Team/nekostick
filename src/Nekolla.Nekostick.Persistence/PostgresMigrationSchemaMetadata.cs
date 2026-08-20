@@ -20,10 +20,10 @@ internal static class PostgresMigrationSchemaMetadata
     [
         new("configuration_revisions", 7),
         new("global_settings", 27),
-        new("services", 14),
+        new("services", 15),
         new("extension_records", 7),
         new("nodes", 9),
-        new("routes", 35),
+        new("routes", 36),
         new("extension_settings", 7),
         new("port_leases", 9),
         new(PersistenceDatabaseDefaults.MigrationHistoryTable, 2)
@@ -82,6 +82,8 @@ internal static class PostgresMigrationSchemaMetadata
         new("services", "updated_at", "timestamp with time zone", false),
         new("services", "version", "bigint", false),
 
+        new("services", "owner_extension_id", "character varying(128)", true),
+
         new("extension_records", "id", "uuid", false),
         new("extension_records", "extension_id", "character varying(128)", false),
         new("extension_records", "installed_version", "character varying(128)", false),
@@ -135,6 +137,8 @@ internal static class PostgresMigrationSchemaMetadata
         new("routes", "proxy_maximum_retry_backoff_milliseconds", "integer", true),
         new("routes", "proxy_retry_on_connection_failure", "boolean", true),
         new("routes", "proxy_retry_on_upstream_disconnect", "boolean", true),
+
+        new("routes", "owner_extension_id", "character varying(128)", true),
 
         new("extension_settings", "id", "uuid", false),
         new("extension_settings", "extension_record_id", "uuid", false),
@@ -237,7 +241,9 @@ internal static class PostgresMigrationSchemaMetadata
         new("configuration_revisions", "ux_configuration_revisions_revision_key", true, "revision_key", 1, false, ""),
         new("routes", "ix_routes_enabled_matcher_type_priority", false, "enabled,matcher_type,priority", 3, false, ""),
         new("routes", "ix_routes_service_id", false, "service_id", 1, false, ""),
+        new("routes", "ix_routes_owner_extension_id", false, "owner_extension_id", 1, false, ""),
         new("services", "ix_services_enabled", false, "enabled", 1, false, ""),
+        new("services", "ix_services_owner_extension_id", false, "owner_extension_id", 1, false, ""),
         new("extension_records", "ux_extension_records_extension_id", true, "extension_id", 1, false, ""),
         new("extension_settings", "ux_extension_settings_extension_record_id", true, "extension_record_id", 1, false, ""),
         new("nodes", "ux_nodes_default_node_id_active", true, "node_id", 1, true, "%node_id%0%is_active%"),

@@ -10,11 +10,18 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
         ExtensionTaskTracker tasks,
         ExtensionEventQueue events,
         ExtensionContractRegistry contracts,
+        ExtensionCapabilitySet capabilities,
+        IExtensionLifecycleApi lifecycle,
         Action<ExtensionStatus> reportStatus,
         Action<ExtensionLogLevel, string> reportLog)
     {
         ApiVersion = apiVersion;
         Configuration = new ExtensionSettingsReader(settings);
+        ConfigurationApi = capabilities.ConfigurationApi;
+        Routes = capabilities.Routes;
+        Services = capabilities.Services;
+        Endpoints = capabilities.Endpoints;
+        Lifecycle = lifecycle;
         Contracts = contracts;
         Tasks = tasks;
         Events = events;
@@ -25,6 +32,11 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
     public HostApiVersion ApiVersion { get; }
 
     public IExtensionSettingsReader Configuration { get; }
+    public IExtensionConfigurationApi ConfigurationApi { get; }
+    public IExtensionRouteApi Routes { get; }
+    public IExtensionServiceApi Services { get; }
+    public IExtensionEndpointApi Endpoints { get; }
+    public IExtensionLifecycleApi Lifecycle { get; }
 
     public IExtensionTaskScheduler Tasks { get; }
 

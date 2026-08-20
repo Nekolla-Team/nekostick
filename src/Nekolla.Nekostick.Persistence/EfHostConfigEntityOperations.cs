@@ -25,7 +25,10 @@ internal sealed class EfHostConfigEntityOperations
         List<Service> services,
         List<ExtensionRecord> extensionRecords,
         List<ExtensionSetting> extensionSettings,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        string? ownerExtensionId = null,
+        IReadOnlySet<Guid>? ownedRouteIds = null,
+        IReadOnlySet<Guid>? ownedServiceIds = null)
     {
         var incomingRouteIds = changes.Routes.Select(value => value.Id).ToHashSet();
         var incomingServiceIds = changes.Services.Select(value => value.Id).ToHashSet();
@@ -51,24 +54,35 @@ internal sealed class EfHostConfigEntityOperations
             var entity = routes.FirstOrDefault(value => value.Id == route.Id);
             if (entity is null)
             {
-                _dbContext.Routes.Add(ToRouteEntity(route, now));
+                entity = ToRouteEntity(route, now);
+                _dbContext.Routes.Add(entity);
             }
             else
             {
                 UpdateRoute(entity, route, now);
             }
-        }
 
+            if (ownerExtensionId is not null && ownedRouteIds?.Contains(route.Id) == true)
+            {
+                entity.OwnerExtensionId = ownerExtensionId;
+            }
+        }
         foreach (var service in changes.Services)
         {
             var entity = services.FirstOrDefault(value => value.Id == service.Id);
             if (entity is null)
             {
-                _dbContext.Services.Add(ToServiceEntity(service, now));
+                entity = ToServiceEntity(service, now);
+                _dbContext.Services.Add(entity);
             }
             else
             {
                 UpdateService(entity, service, now);
+            }
+
+            if (ownerExtensionId is not null && ownedServiceIds?.Contains(service.Id) == true)
+            {
+                entity.OwnerExtensionId = ownerExtensionId;
             }
         }
 

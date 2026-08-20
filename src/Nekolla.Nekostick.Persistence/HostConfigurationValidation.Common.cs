@@ -47,7 +47,7 @@ internal static class HostConfigurationValidation
             .ToHashSet(StringComparer.Ordinal);
         foreach (var route in routeArray)
         {
-            HostConfigurationRouteValidator.Validate(route, globalSettings, serviceIds, extensionIds);
+            HostConfigurationRouteValidator.Validate(route, globalSettings, serviceIds);
         }
 
         foreach (var setting in settingsArray)

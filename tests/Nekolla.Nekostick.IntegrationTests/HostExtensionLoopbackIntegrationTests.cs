@@ -77,6 +77,77 @@ public sealed class HostExtensionLoopbackIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task LoopbackRouteHonorsHostAndMethodConstraintsBeforeFallback()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var fixtureRoot = CreateFixtureRoot();
+        var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var holder = new HostConfigurationSnapshotHolder();
+        try
+        {
+            var manifestResult = ExtensionManifestDiscovery.Discover(fixtureRoot);
+            Assert.True(manifestResult.Succeeded, manifestResult.FailureCode.ToString());
+            var settings = new ExtensionSettingsConfiguration(
+                ExtensionId,
+                schemaVersion: 1,
+                settingsJson: JsonSerializer.Serialize(new
+                {
+                    label = "constrained-loopback",
+                    handlerId = ExtensionId,
+                    registerFallback = true,
+                    includeFallbackCount = true
+                }),
+                version: 1);
+            var prepared = await manager.PrepareGenerationAsync(
+                ImmutableArray.Create(
+                    new ExtensionRuntimeDescriptor(
+                        manifestResult.Manifest!,
+                        settings,
+                        [ExtensionId],
+                        includeFallback: true)),
+                previous: null,
+                cancellationToken);
+            Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
+            var preparation = prepared.Preparation!;
+            var ready = await preparation.ReadyToPublishAsync(cancellationToken);
+            Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+            Assert.True(await preparation.CompletePublicationAsync());
+
+            Assert.True(ReplaceWithGeneration(
+                holder,
+                CreateSnapshot(
+                    settings,
+                    ImmutableArray.Create("allowed.integration"),
+                    ImmutableArray.Create("POST")),
+                ready.Generation!));
+            await using var app = await StartLoopbackAsync(holder, cancellationToken);
+
+            app.Client.DefaultRequestHeaders.Host = "wrong.integration";
+            using var wrongHost = await app.Client.PostAsync(
+                "/extension",
+                new StringContent(string.Empty),
+                cancellationToken);
+            app.Client.DefaultRequestHeaders.Host = "allowed.integration";
+            using var wrongMethod = await app.Client.GetAsync("/extension", cancellationToken);
+            using var handled = await app.Client.PostAsync(
+                "/extension",
+                new StringContent(string.Empty),
+                cancellationToken);
+
+            Assert.Equal(HttpStatusCode.NotFound, wrongHost.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, wrongMethod.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, handled.StatusCode);
+            Assert.Equal("constrained-loopback:started", await handled.Content.ReadAsStringAsync(cancellationToken));
+        }
+        finally
+        {
+            await holder.DisposeAsync();
+            await manager.DisposeAsync();
+            Directory.Delete(fixtureRoot, recursive: true);
+        }
+    }
+ 
     private static async Task<LoopbackApp> StartLoopbackAsync(
         HostConfigurationSnapshotHolder holder,
         CancellationToken cancellationToken)
@@ -145,7 +216,16 @@ public sealed class HostExtensionLoopbackIntegrationTests
         }
     }
 
-    private static HostConfigurationSnapshot CreateSnapshot(ExtensionSettingsConfiguration settings)
+    private static HostConfigurationSnapshot CreateSnapshot(ExtensionSettingsConfiguration settings) =>
+        CreateSnapshot(
+            settings,
+            ImmutableArray<string>.Empty,
+            ImmutableArray<string>.Empty);
+
+    private static HostConfigurationSnapshot CreateSnapshot(
+        ExtensionSettingsConfiguration settings,
+        ImmutableArray<string> hostPatterns,
+        ImmutableArray<string> methods)
     {
         var route = new RouteConfiguration(
             Guid.CreateVersion7(),
@@ -153,8 +233,8 @@ public sealed class HostExtensionLoopbackIntegrationTests
             new RouteMatcherConfiguration(
                 RouteMatcherType.Exact,
                 "/extension",
-                ImmutableArray<string>.Empty,
-                ImmutableArray<string>.Empty),
+                hostPatterns,
+                methods),
             new ExtensionHandlerRouteTargetConfiguration(ExtensionId),
             priority: 0,
             new ForwardingConfiguration(ForwardingMode.Preserve, null),
