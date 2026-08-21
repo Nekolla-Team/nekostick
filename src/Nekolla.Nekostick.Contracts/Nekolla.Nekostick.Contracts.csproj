@@ -7,6 +7,9 @@
     <PackageVersion>1.2.0</PackageVersion>
     <Authors>Nekolla-Team</Authors>
     <PackageDescription>Stable host and extension contracts for Nekostick.</PackageDescription>
+    <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>nekostick;contracts;extensions;abi</PackageTags>
     <PackageProjectUrl>https://github.com/Nekolla-Team/nekostick</PackageProjectUrl>
