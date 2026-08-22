@@ -119,7 +119,7 @@ The Compose example requires `NEKOSTICK_CONNECTION_STRING` and a stable, unique 
 - [Extension API guide](docs/extension-api.md)
 - [Contracts package README](src/Nekolla.Nekostick.Contracts/README.md)
 
-Extensions are trusted in-process code. A collectible `AssemblyLoadContext` provides dependency isolation and unloadability; it is not a security sandbox. Manifest validation, capability boundaries, lifecycle behavior, handler semantics, and configuration rules are defined by the [Extension API guide](docs/extension-api.md).
+Extensions are trusted in-process code. A collectible `AssemblyLoadContext` provides dependency isolation and unloadability; it is not a security sandbox. Manifest validation, capability boundaries, lifecycle behavior, handler semantics, and configuration rules are defined by the [Extension API guide](docs/extension-api.md) and its versioned detail documents.
 
 ### Consume the Contracts package
 
