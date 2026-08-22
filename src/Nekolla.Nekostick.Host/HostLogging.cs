@@ -17,7 +17,7 @@ internal static class HostEventIds
     internal static readonly EventId RouteOutcomeSummary = new(1011, "RouteOutcomeSummary");
     internal static readonly EventId StaticRejection = new(1012, "StaticRejection");
     internal static readonly EventId ProxyFailure = new(1013, "ProxyFailure");
-
+    internal static readonly EventId ExtensionText = new(1014, "ExtensionText");
 }
 
 internal static class HostLoggerCategory
@@ -25,6 +25,7 @@ internal static class HostLoggerCategory
     internal const string Startup = "Nekolla.Nekostick.Host.Startup";
     internal const string Routing = "Nekolla.Nekostick.Host.Routing";
     internal const string Supervision = "Nekolla.Nekostick.Host.Supervision";
+    internal const string Extensions = "Nekolla.Nekostick.Host.Extensions";
 }
 
 internal static partial class HostLogMessages
@@ -147,7 +148,7 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull =>
             NullScope.Instance;
         public bool IsEnabled(LogLevel logLevel) =>
-            (_categoryName == HostLoggerCategory.Supervision && logLevel >= LogLevel.Information) ||
+            ((_categoryName is HostLoggerCategory.Supervision or HostLoggerCategory.Extensions) && logLevel >= LogLevel.Information) ||
             (logLevel >= LogLevel.Warning &&
                 (_categoryName is HostLoggerCategory.Startup or HostLoggerCategory.Routing));
 

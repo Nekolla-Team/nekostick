@@ -2,7 +2,7 @@
 
 本文是可信、同进程 extension 的稳定 API 参考。稳定 ABI 位于 `Nekolla.Nekostick.Contracts`；extension 只应依赖该 Contracts 程序集和自己声明的独立 shared-contract 程序集，不应引用 Host、Persistence、ASP.NET、EF Core 或其他 extension 的实现程序集。
 
-当前 Host API 和 ABI 版本均为 **1.2.0**（`HostApiVersion.Current`、`ExtensionAbi.Version`）。本文只记录已经实现并经最终验证的公开 surface；没有为尚未实现的 manifest event declaration、event filter 或通用 endpoint 保留接口。API 1.2 新增的 `FullConfiguration` 是可信的完整持久化业务/configuration-data capability；它仍不是 runtime handle 或 HTTP pipeline 的入口。
+当前 Host API 和 ABI 版本均为 **1.3.0**（`HostApiVersion.Current`、`ExtensionAbi.Version`、`ExtensionAbi.Api13Version`）。本文只记录当前公开 API surface；没有为尚未实现的 manifest event declaration、event filter 或通用 endpoint 保留接口。API 1.2 新增的 `FullConfiguration` 是可信的完整持久化业务/configuration-data capability；它仍不是 runtime handle 或 HTTP pipeline 的入口。API 1.3 通过不改变旧 bridge 的 sibling capability 增加 supervisor telemetry、route observations/hooks 和 Host-attributed text logging。
 
 ## 1. 信任边界与 capability 边界
 
@@ -17,7 +17,7 @@ extension 是宿主进程内的**受信代码**。collectible ALC 用于生命�
 - 请求自身的 staged reload/unload；观察自身的安全生命周期状态。
 - 运行有数量上限、停止时取消的 extension-owned task。
 - 发布/订阅 extension-local event，并接收 Host 发布的既有 node-local core event。
-- 报告安全 status code、日志 category，并在启动期按 manifest 声明做 typed contract export/import。
+- 在 API 1.3（通过可选 `IExtensionHostBridge13` sibling）读取 Host-wide service runtime telemetry，观察所有 route 的 trigger/return observation，注册对所有 route 生效的有界 route hooks，并写入由 Host 绑定 extension identity 的 custom text log。
 
 ### 1.2 刻意不可用的能力
 
@@ -88,13 +88,15 @@ JSON 和 YAML 同时存在时拒绝该目录。JSON 使用严格解析：不接�
 
 `SemVersionRange` 支持比较符（如 `>=1.0.0 <2.0.0`）、`||` alternative、wildcard、`^` 和 `~` 等已实现形式；无效版本或 range 在 discovery 阶段拒绝。contract 的 assembly/type identity 必须与 Host 批准的 identity 完全相容；重复声明、缺 provider、版本不满足或 identity 不匹配都拒绝加载。
 
-### 2.4 1.0/1.1/1.2 兼容
+### 2.4 1.0/1.1/1.2/1.3 兼容
 
 - 当前 manifest schema 是 `1`；“1.0 manifest”指面向 Host API 1.0 的既有 manifest/extension，不是 `schemaVersion: 1.0`。
 - 1.0 manifest 仍可加载。`requiredHostApiVersion` 满足 Host 后，旧 ABI 的 extension 可继续使用旧成员。
 - `ConfigurationApi`、`Routes`、`Services`、`Endpoints`、`Lifecycle` 等成员属于 Host API 1.1；`FullConfiguration` 属于 Host API 1.2。只有 `ApiVersion` 达到相应版本时才调用它们；旧 extension 不应假设 1.1/1.2 成员在较低版本 Host 上可用。旧的 `Configuration` 属性保持不变。
-- 若 extension **必须**使用完整数据能力，应在 manifest 声明 `"requiredHostApiVersion": ">=1.2.0 <2.0.0"`；若该能力是可选的，则在运行时用 `context.Host.ApiVersion >= new HostApiVersion(1, 2, 0)` 做 feature detection，低版本走 owner-scoped/legacy 路径或跳过该功能。不要仅以 Contracts 程序集版本推断 Host capability。
-- `HostApiVersion` 是不可变语义版本：`new HostApiVersion(major, minor, patch)` 拒绝负数；`ToString()` 为 `major.minor.patch`；`ExtensionAbi.IsCompatible(required, host)` 要求 major 相同且 Host 不低于 required。
+- API 1.3 不修改 `IExtensionHostBridge`。`IExtensionHostBridge13 : IExtensionHostBridge` 是可选 sibling capability，新增 `Supervisor`、`RouteEvents`、`LogWriter`。extension 先测试 `context.Host is IExtensionHostBridge13 host13`，再以 `ExtensionAbi.IsApi13Supported(context.Host.ApiVersion)`（或等价的 `ApiVersion >= new HostApiVersion(1, 3, 0)` 且 major 兼容性检查）决定是否使用这些成员。外部 API 1.2 bridge implementer 不需要实现 sibling。
+- 内置 bridge 即使 negotiated version 低于 1.3，也可能实现 `IExtensionHostBridge13` 类型；此时 API 1.3 capability 使用显式 unsupported 行为：`Supervisor` 的读操作返回 `ConfigurationErrorCode.Unsupported`，`RouteEvents.TrySubscribe`/`TryRegisterHook` 返回 `false`，`LogWriter.WriteText` 丢弃文本。不要把 sibling 类型发现本身当作 1.3 协商成功。
+- 若 extension **必须**使用完整数据能力，应在 manifest 声明 `"requiredHostApiVersion": ">=1.2.0 <2.0.0"`；若必须使用 API 1.3 sibling，应声明 `">=1.3.0 <2.0.0"`。可选 capability 则运行时 feature-detect，低版本走旧路径或跳过该功能。不要仅以 Contracts 程序集或 package 版本推断 Host capability。
+- `HostApiVersion` 是不可变语义版本：`new HostApiVersion(major, minor, patch)` 拒绝负数；`ToString()` 为 `major.minor.patch`；`ExtensionAbi.IsCompatible(required, host)` 要求 major 相同且 Host 不低于 required；`ExtensionAbi.IsApi13Supported(host)` 等价于对 `ExtensionAbi.Api13Version` 的兼容性检查。
 
 ## 3. Discovery、加载、staged reload 和卸载
 
@@ -206,28 +208,21 @@ public interface IExtensionStartContext
 }
 ```
 
-`Reloading` 仅表示本次 start 是 replacement reload。`Contracts` 和 `Host.Contracts` 都是 startup-only typed registry；`Registration` 是当前 extension 私有的 handler/fallback 注册面。`StartAsync` 必须在返回前完成需要的初始注册；Host 只有在 start 成功后才将该 generation 置于 serving 状态。
+### 4.2 完整 `IExtensionHostBridge` 与 API 1.3 sibling
 
-### 4.2 完整 `IExtensionHostBridge`
+API 1.2 的完整 legacy bridge shape 保持不变：
 
 ```csharp
 public interface IExtensionHostBridge
 {
     HostApiVersion ApiVersion { get; }
-
-    // 旧 ABI：只读 settings view，保持不变
     IExtensionSettingsReader Configuration { get; }
-
-    // API 1.1：owner-scoped compatibility/convenience facades
     IExtensionConfigurationApi ConfigurationApi { get; }
+    IExtensionFullConfigurationApi FullConfiguration { get; }
     IExtensionRouteApi Routes { get; }
     IExtensionServiceApi Services { get; }
     IExtensionEndpointApi Endpoints { get; }
     IExtensionLifecycleApi Lifecycle { get; }
-
-    // API 1.2：trusted, unfiltered full persisted business/configuration data
-    IExtensionFullConfigurationApi FullConfiguration { get; }
-
     IExtensionContractRegistry Contracts { get; }
     IExtensionTaskScheduler Tasks { get; }
     IExtensionEventPublisher Events { get; }
@@ -236,7 +231,19 @@ public interface IExtensionHostBridge
 }
 ```
 
-旧的 `Configuration` 是 `IExtensionSettingsReader`，只有 `ExtensionSettingsConfiguration? Settings { get; }`；它不是新的 CRUD facade，保持 1.0 ABI 兼容。`ExtensionSettingsConfiguration.SettingsJson` 是已验证的 JSON 文档，使用者仍应按敏感数据处理，不得写入日志。API 1.1 的 `ConfigurationApi`、`Routes` 和 `Services` 是 owner-scoped compatibility/convenience surfaces；它们只返回/修改 caller-owned 数据，且 owner service DTO 不含 `Environment`。API 1.2 的 `FullConfiguration` 才是完整持久化 business/configuration-data boundary：它返回五个集合以及其中的敏感 DTO 字段，且没有 owner 参数或 owner 过滤（详见 §5.2–§5.4）。
+API 1.3 是 additive，不要求既有 `IExtensionHostBridge` implementers 改动：
+
+```csharp
+public interface IExtensionHostBridge13 : IExtensionHostBridge
+{
+    IExtensionSupervisorApi Supervisor { get; }
+    IExtensionRouteEvents RouteEvents { get; }
+    IExtensionLogWriter LogWriter { get; }
+}
+```
+
+`IExtensionStartContext.Host` 的静态类型仍是 `IExtensionHostBridge`。在使用 API 1.3 前先做 sibling cast 和版本检查；不要把 `Host.ApiVersion` 或 Contracts package 版本当成 capability 对象本身。旧的 `Configuration` 是 `IExtensionSettingsReader`，只有 `ExtensionSettingsConfiguration? Settings { get; }`；它不是新的 CRUD facade，保持 1.0 ABI 兼容。`ExtensionSettingsConfiguration.SettingsJson` 是已验证的 JSON 文档，使用者仍应按敏感数据处理，不得写入日志。API 1.1 的 `ConfigurationApi`、`Routes` 和 `Services` 是 owner-scoped compatibility/convenience surfaces；它们只返回/修改 caller-owned 数据，且 owner service DTO 不含 `Environment`。API 1.2 的 `FullConfiguration` 才是完整持久化 business/configuration-data boundary：它返回五个集合以及其中的敏感 DTO 字段，且没有 owner 参数或 owner 过滤（详见 §5.2–§5.4）。
+
 
 ## 5. 配置、route 和 service API
 
@@ -532,6 +539,7 @@ public interface IExtensionEndpointApi
 
 `Port` 是 Host 分配的 loopback port，`ExpiresAt` 统一为 UTC。`Current` 和 `ResolveAsync` 只显示**调用 extension 自己拥有且当前 active、未过期的 lease**：
 
+
 - Host-owned/null owner lease 隐藏；
 - foreign extension lease 隐藏；
 - 不存在、过期或不可用的 lease 不出现在 `Current`，`ResolveAsync` 返回 `null`；
@@ -539,6 +547,27 @@ public interface IExtensionEndpointApi
 - `Current` 是原子发布的 immutable snapshot，同步 getter 不查询 EF、数据库或新建 DI scope。
 
 Host 将 service ownership map 与 endpoint snapshot 一起原子发布，facade 在创建时绑定 extension identity。因此不要通过猜 service ID 或读取全局 endpoint resolver 绕过 owner 边界。
+### 6.1 API 1.3 全局 Supervisor telemetry
+
+`IExtensionHostBridge13.Supervisor` 是只读的 Host-wide capability：
+
+```csharp
+public interface IExtensionSupervisorApi
+{
+    ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadAsync(
+        CancellationToken cancellationToken = default);
+
+    ValueTask<ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>> GetAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default);
+}
+```
+
+API 1.3 Supervisor 提供当前 Host-wide runtime snapshot 集合的只读观测。`ReadAsync` 返回集合快照；`GetAsync` 按 service resource ID 查询对应 snapshot，在该 ID 当前不可用时返回安全的 unavailable/not-found 结果。service ID 是资源身份，不能用于取得 lifecycle-control handle。
+
+`ExtensionServiceRuntimeSnapshot` 是 immutable Contracts DTO，包含 `ServiceId`、可空的 `ProcessId`、UTC 的可空 `StartedAt`、可空 `Uptime`、`ExtensionServiceLifecycleState LifecycleState`、`ExtensionServiceHealthState HealthState`、累计 `ForwardedRequestCount`、`ActiveForwardedRequestCount`、UTC 的可空 `LastUpdatedAt` 和可空 `LastHealthAt`。存在时 `ProcessId` 必须为正数；`Uptime` 不能为负；counter 不能为负，active count 不能超过 cumulative count；timestamp 会规范为 UTC，且两者同时存在时 `StartedAt`/`LastHealthAt` 不能晚于 `LastUpdatedAt`。snapshot 是不可变的瞬时观测值，不是 live supervisor object。
+
+该 telemetry surface 只暴露安全的 lifecycle/health state（`Unknown`、`Disabled`、`Starting`、`Running`、`Stopping`、`Failed`；以及 `Unknown`、`Healthy`、`Unhealthy`）和 forwarding counter。它不会暴露 `ServiceRuntime`、`Node`、supervisor/process/socket handle、environment secret 或可变 Host state。snapshot 可能立即过期，不得据此推断 control authority，也不得把 process ID 当作 handle。
 
 ## 7. Lifecycle、状态和 registration
 
@@ -677,7 +706,50 @@ Host 已有 core event 种类为：
 - stop/dispose 后继续 publish/subscribe 返回 `false`。
 - `IExtensionEventPublisher` 没有单独的 unsubscribe API；subscription 随当前 extension generation 的 stop/dispose 清理。
 
-### 8.3 Status 和 logger
+### 8.3 API 1.3 全局 route observations and hooks
+
+API 1.3 的 route surface 通过 `IExtensionHostBridge13.RouteEvents` 暴露：
+
+```csharp
+public interface IExtensionRouteEvents
+{
+    bool TrySubscribe(
+        Func<ExtensionEvent, CancellationToken, ValueTask> callback);
+
+    bool TryRegisterHook(
+        ExtensionRouteEventStage stage,
+        Func<ExtensionRouteHookContext, CancellationToken, ValueTask<ExtensionRouteHookResult>> callback);
+}
+```
+
+#### Ordinary route observations
+
+- `TrySubscribe` 注册 Host-wide ordinary observation，成功后观察所有 route 的 observation；事件中的 route ID 是 routing identity。注册受 callback 合法性、generation 状态和全局 subscription cap 约束。
+- 每个 matched route 在 forwarding 前产生 trigger observation，在 forwarding 后产生 return observation。标准 event type 是 `ExtensionRouteEventTypes.Trigger`（`"route.trigger"`）和 `ExtensionRouteEventTypes.Return`（`"route.return"`），schema version 都是 `1`。
+- 每个 observation 都是 immutable `ExtensionRouteEvent`，包含 `RouteId`、`CorrelationId`、`Stage`、bounded request snapshot、可选 bounded response snapshot 和 UTC `OccurredAt`；`ToExtensionEvent()` 会把该 DTO 序列化到 `ExtensionEvent.PayloadJson`。
+- Ordinary observation 通过标准 extension event queue 发布。发布相对于 route execution 是 best-effort 且 nonblocking：队列满时丢弃 newest event，`TryPublish` 返回 `false` 并计入 dropped count；queue delivery 在 node-local、内存内、每个 extension generation 内有序且串行。subscriber failure 会被隔离。ordinary observation 不会改变 request/response forwarding 或 route selection。
+- 没有 per-route unsubscribe API。subscription 属于当前 extension generation，在 generation stop、retire 或 dispose 时清理。
+
+#### Action-capable route hooks
+
+`TryRegisterHook` 只接受 `ExtensionRouteEventStage.Trigger` 或 `.Return`。成功注册的 hook 会在对应 stage 对所有 route 执行。一个 generation 最多接受 **256** 个 ordinary subscription 和 **128** 个 hook（`ExtensionRouteHookLimits.MaximumSubscriptionRegistrations` 与 `MaximumHookRegistrations`）。Hooks 按 registration sequence 顺序串行执行。
+
+Callback 接收 immutable `ExtensionRouteHookContext`，其中包含 `RouteId`、`CorrelationId`、`Stage`、`Request` 以及 return stage 的 `Response`。Request/response snapshot 都是 bounded copy：request method 最多 32 个字符，path/query 最多 8192 个字符，host 最多 256 个字符，每侧最多 128 个 header pair、每个 header 最多 64 个 value，每个 header value 最多 16 KiB，header text 合计最多 64 KiB，每个 body 最多 64 KiB。Snapshot construction 会拒绝 invalid/control text 和 invalid HTTP status；没有 mutable `HttpContext`、stream 或 Host object 跨过 ABI。
+
+Callback 返回 immutable `ExtensionRouteHookResult`：
+
+| Action | Legal stage | Payload |
+| --- | --- | --- |
+| `Continue` | trigger or return | no replacement |
+| `ReplaceRequest` | trigger only | one replacement `Request` snapshot |
+| `ReplaceResponse` | return only | one replacement `Response` snapshot |
+| `CancelForwarding` | trigger or return | no replacement；canonical `FailClosed` result |
+
+Host 会把 request cancellation token 与 generation-retirement token 链接，并对每个 callback 执行 `ExtensionRouteHookLimits.MaximumCallbackDuration`（**250 ms**）hard deadline。Callback exception、timeout、cancellation/retirement、null 或 invalid result、illegal stage/action combination、invalid replacement 都 fail-closed。Trigger 阶段的 fail-closed 会取消 forwarding；return 阶段会阻止 response delivery 并安全 abort。deadline 之后到达的 callback result 永远不会应用。
+
+生命周期结束时，route subscription/hook 随 generation 清理；取消中的 hook 不得再改变 route result，迟到 result 不得生效。Hook action 可以按上表改变 forwarding；ordinary route event 不能改变 request/response forwarding 或 route selection。Route ID、correlation ID、immutable DTO snapshot 和 cancellation token 是 route-hook boundary 的全部数据；没有 Host-internal supervisor、process、socket、request/response pipeline 或 generation handle 跨 ABI。
+
+### 8.4 Status、logger 和 Host-attributed text
 
 ```csharp
 public enum ExtensionStatusKind
@@ -709,7 +781,16 @@ public interface IExtensionLogger
 
 status/logger 只接受安全 category code（最多 128 字符），不接受 arbitrary extension text；不要把 secret、路径、命令或请求内容放进 code。回调失败、失败阈值、队列 drop 等 runtime 观察通过 `ExtensionLifecycleStatus` 的计数和安全 failure category 暴露。
 
-### 8.4 Startup-only typed contracts
+```csharp
+public interface IExtensionLogWriter
+{
+    void WriteText(ExtensionLogLevel level, string text);
+}
+```
+
+`IExtensionLogger.Report(ExtensionLogLevel level, string code)` remains the safe category logger and accepts a nonblank category code up to 128 characters. API 1.3 `IExtensionLogWriter.WriteText` is separate: the caller supplies only `level` and `text`; it does not accept an extension ID, category, logger, provider, or Host handle. `text` must be nonblank, contain no control characters, and be at most `ExtensionLogLimits.MaximumTextLength` (4096 characters). The Host binds the extension identity when creating the writer and emits structured fields `ExtensionId`, `Level`, and `Text`. Do not place secrets, credentials, request bodies, paths, commands, or other sensitive data in either logging surface.
+
+### 8.5 Startup-only typed contracts
 
 ```csharp
 public interface IExtensionContractRegistry
@@ -738,7 +819,8 @@ public interface IExtensionContractRegistry
 6. **Host-owned revision/timestamp。** Full DTO 的 route/service/extension-record/settings timestamps 和 entity versions 是 Host 返回的权威值；existing entity 的 Host metadata 会被保留/更新，new entity 的 creation metadata 按当前 Host mapping 处理。owner `ExtensionRouteConfiguration` 不暴露 route version；`ExtensionServiceConfiguration.Version` 和 `ExtensionSettingsConfiguration.Version` 仍是服务器返回的并发字段。客户端不得自行推进 server revision/version，也不能把这些 entity fields 当作 Host-global control。
 7. **Fresh scope 与 read-only。** FullConfiguration facade 每次操作都创建并释放新的 async DI scope，不跨调用保留 scoped `IHostConfigApi`/`DbContext`；因此应在每次提交后重新读取 snapshot。read-only Host 可以继续读取已接受 snapshot，但 write 返回 safe `ConfigurationErrorCode.Unsupported`。
 8. **Endpoint owner visibility。** endpoint snapshot 中的 owner metadata 是 Host 内部绑定信息；extension lease DTO 只露 `ServiceId`、`Port`、`ExpiresAt`，并且只对 exact caller-owned active lease 输出。Host-owned/null 和 foreign 永远不能通过 `Current` 或 `ResolveAsync` 观察。
-
+9. **API 1.3 的全局边界与 generation 边界。** `Supervisor` 提供 Host-wide read-only runtime observation，`GetAsync` 按 service resource ID 查询；`RouteEvents` 的 registration 对所有 route 生效，RouteId 作为 event/context routing identity。Telemetry 是 immutable observation，route registrations/hooks 仍属于当前 generation。停止、retire 或 dispose 的 generation 不能继续 publish 或执行旧 registration，replacement generation 也不会继承可变 callback state。
+10. **ABI 不传递内部 handle。** API DTO 可以包含稳定 UUIDv7 identifier、诊断用 process ID、timestamp、counter 和 bounded request/response copy，但不会包含 `HttpContext`、`ServiceRuntime`、`Node`、`PortLease`、supervisor/process/socket handle、DI scope、ALC/load handle、stream 或可变 Host object。process ID 或其他 ID 字段仅用于观测，不构成控制能力。
 ## 10. Failure、reentrancy 和 unregister 语义
 
 ### 10.1 Callback failure isolation
@@ -802,6 +884,19 @@ public sealed class ExampleEntrypoint : IExtensionEntry
         context.Host.Status.Report(
             new ExtensionStatus(ExtensionStatusKind.Healthy, "started"));
         context.Host.Logger.Report(ExtensionLogLevel.Information, "started");
+
+        // API 1.3 is additive: cast the legacy bridge, then verify negotiation.
+        if (context.Host is IExtensionHostBridge13 host13 &&
+            ExtensionAbi.IsApi13Supported(context.Host.ApiVersion))
+        {
+            host13.LogWriter.WriteText(ExtensionLogLevel.Information, "started");
+            var telemetry = await host13.Supervisor.ReadAsync(cancellationToken);
+            if (!telemetry.IsSuccess)
+            {
+                context.Host.Status.Report(
+                    new ExtensionStatus(ExtensionStatusKind.Degraded, telemetry.Errors[0].Code.ToString()));
+            }
+        }
 
         if (!context.Registration.TryRegisterHandler(new HelloHandler()))
         {
@@ -915,27 +1010,3 @@ static async ValueTask<ConfigurationWriteResult?> WriteSettingsAsync(
         .WriteSettingsAsync(current.Version, next, cancellationToken)
         .ConfigureAwait(false);
 }
-```
-
-并发冲突时重新读取 snapshot/settings version、重新构造完整 candidate，再重试；不要用旧 `NewVersion` 或客户端自增的 route/service metadata 猜测提交结果。
-
-## 12. 最终验证证据与实现定位
-
-本页依据最终 Contracts/runtime 实现和 follow-up oracle gate 编写。Phase 2 remediation 的实际 focused evidence 为：
-
-- `dotnet build src/Nekolla.Nekostick.Host/Nekolla.Nekostick.Host.csproj --configuration Release --no-restore --nologo --verbosity minimal`：通过，0 warnings/errors。
-- `dotnet test tests/Nekolla.Nekostick.UnitTests/Nekolla.Nekostick.UnitTests.csproj --configuration Release --no-restore --nologo --logger "console;verbosity=minimal"`：468/468 passed，failed 0，skipped 0。
-- 以 process-local `NEKOSTICK_TEST_PG` 提供的隔离测试 PostgreSQL 环境运行当前源码的 filtered integration coverage（`HostExtensionLoopbackIntegrationTests`、`PostgresMigrationArtifactContractTests`、`PersistenceMigrationTests`、`PostgresExtensionCapabilityIntegrationTests`）：11/11 passed，failed 0，且没有残留 `nekostick_it_*` schema。连接串值不在本文重复，避免把凭据写入文档。
-- follow-up oracle 已确认 endpoint identity filtering/no-scope getter、Start/PreviousStopped/Stop 三类 entrypoint callback guard、gated immutable registry/tombstone、staged reload/failure isolation、additive ABI、owner transaction/migration boundary 均通过审查。
-
-本文 lane 按任务要求没有重新运行 build/test/formatter/linter；上列是最终 remediation verification 的实际结果，不是对本次文档写入的重新执行声明。
-
-对应实现入口：
-
-- 稳定 ABI/DTO：`src/Nekolla.Nekostick.Contracts/ExtensionAbi.cs`、`HostApiVersion.cs`、`ExtensionContracts.cs`、`ExtensionConfigurationApi.cs`、`ExtensionFullConfigurationApi.cs`、`ExtensionCapabilityApis.cs`、`ConfigurationContracts.cs`、`ExtensionCapabilityFactory.cs`；
-- manifest/discovery/ALC：`src/Nekolla.Nekostick.Extensions/ExtensionManifestContracts.cs`、`ExtensionManifestJsonParser.cs`、`ExtensionManifestYamlParser.cs`、`ManifestParserCore.cs`、`CollectibleExtensionLoader.cs`；
-- bridge/registry/queue/task/failure：`ExtensionHostBridge.cs`、`ExtensionRuntimePrimitives.cs`、`ExtensionCapabilityRuntime.cs`；
-- staged runtime：`ExtensionRuntimeManager.cs` 及其 staged/reload implementation；
-- full/owner Host facade 与 endpoint snapshot：`src/Nekolla.Nekostick.Host/ExtensionCapabilityFacades.cs`、`src/Nekolla.Nekostick.Host/HostConfigApiReadOnlyDecorator.cs`、`src/Nekolla.Nekostick.Host/HostServiceEndpointResolver.cs`、`src/Nekolla.Nekostick.Host/HostServiceEndpointPublicationService.cs`，以及 `src/Nekolla.Nekostick.Persistence/EfHostConfigApi.cs`、`EfHostConfigEntityOperations.cs` 和 Persistence owner metadata/migration。
-
-这些路径是实现定位，不表示 extension 可以引用其中的 Host/Persistence/runtime 实现类型。

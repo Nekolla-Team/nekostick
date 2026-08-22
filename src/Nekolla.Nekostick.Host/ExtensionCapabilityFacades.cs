@@ -1,10 +1,14 @@
 using System.Collections.Immutable;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
+using Nekolla.Nekostick.Proxy;
+using Nekolla.Nekostick.Extensions;
 
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Creates identity-bound extension capability facades from host composition.</summary>
-public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory
+public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IExtensionCapabilityFactoryRouteEvents
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly HostRuntimeState _runtimeState;
@@ -22,7 +26,20 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory
     }
 
     /// <inheritdoc />
-    public ExtensionCapabilitySet Create(string extensionId, Func<string, bool> handlerIsOwned)
+    public ExtensionCapabilitySet Create(string extensionId, Func<string, bool> handlerIsOwned) =>
+        CreateCore(extensionId, handlerIsOwned, null);
+
+    /// <inheritdoc />
+    public ExtensionCapabilitySet CreateWithRouteEvents(
+        string extensionId,
+        Func<string, bool> handlerIsOwned,
+        IExtensionRouteEvents routeEvents) =>
+        CreateCore(extensionId, handlerIsOwned, routeEvents);
+
+    private ExtensionCapabilitySet CreateCore(
+        string extensionId,
+        Func<string, bool> handlerIsOwned,
+        IExtensionRouteEvents? routeEvents)
     {
         if (string.IsNullOrWhiteSpace(extensionId))
         {
@@ -34,6 +51,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory
             _scopeFactory,
             _runtimeState,
             handlerIsOwned);
+        var logger = _serviceProvider.GetService<ILoggerFactory>()?.CreateLogger(HostLoggerCategory.Extensions)
+            ?? NullLogger.Instance;
         return new ExtensionCapabilitySet(
             configuration,
             new ExtensionRouteFacade(configuration),
@@ -45,10 +64,15 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory
             new ExtensionEndpointFacade(
                 extensionId,
                 _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
-            new ExtensionFullConfigurationFacade(_scopeFactory));
-
+            new ExtensionFullConfigurationFacade(_scopeFactory),
+            new ExtensionSupervisorFacade(
+                _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>(),
+                _serviceProvider.GetService<IMicroserviceForwardingTelemetry>()),
+            routeEvents,
+            new ExtensionLogWriter(extensionId, logger));
     }
 }
+
 
 internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigurationApi
 {

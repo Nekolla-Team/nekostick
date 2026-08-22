@@ -5,22 +5,155 @@ namespace Nekolla.Nekostick.Supervision;
 
 public sealed partial class ServiceSupervisor
 {
-    /// <summary>Gets the opaque active process generation, when the adapter supplies one.</summary>
-    public ProcessInstanceId? ActiveProcessInstance => Volatile.Read(ref processInstance)?.Id;
+    /// <summary>Gets the current operating-system process ID when safely known to be running.</summary>
+    public int? ActiveProcessId => TryGetActiveProcessTelemetry(out var processId, out _) ? processId : null;
 
-    private sealed record ProcessInstanceHolder(ProcessInstanceId Id);
+    /// <summary>Gets the executor-established process start instant when safely known to be running.</summary>
+    public DateTimeOffset? ActiveProcessStartedAt => TryGetActiveProcessTelemetry(out _, out var startedAt) ? startedAt : null;
+
+    /// <summary>Gets the generation token used to match a pending exit observation.</summary>
+    public ProcessInstanceId? ActiveProcessInstance
+    {
+        get
+        {
+            lock (processHolderGate)
+            {
+                if (processInstance is { } active && processObservation is { } observation && active.Id != observation.Id)
+                {
+                    return null;
+                }
+
+                return processObservation?.Id;
+            }
+        }
+    }
+
+    /// <summary>Reads one process telemetry tuple without mixing generations during a loss race.</summary>
+    public bool TryGetActiveProcessTelemetry(out int? processId, out DateTimeOffset? startedAt) =>
+        TryGetActiveProcessTelemetry(out _, out processId, out startedAt);
+
+    /// <summary>Reads process telemetry together with the generation that established it.</summary>
+    public bool TryGetActiveProcessTelemetry(
+        out ProcessInstanceId? instanceId,
+        out int? processId,
+        out DateTimeOffset? startedAt)
+    {
+        var active = ReadTrustedProcess();
+        if (active is null)
+        {
+            instanceId = null;
+            processId = null;
+            startedAt = null;
+            return false;
+        }
+
+        instanceId = active.Id;
+        processId = active.ProcessId;
+        startedAt = active.StartedAt;
+        return true;
+    }
+
+    private readonly object processHolderGate = new();
+    private ProcessInstanceHolder? processObservation;
+
+    private sealed record ProcessInstanceHolder(
+        ProcessInstanceId Id,
+        int? ProcessId,
+        DateTimeOffset? StartedAt);
 
     private void RememberProcessInstance(ProcessOperationResult result, bool accepted)
     {
-        if (accepted && result.InstanceId is { } instanceId)
+        lock (processHolderGate)
         {
-            Volatile.Write(ref processInstance, new ProcessInstanceHolder(instanceId));
+            processInstance = null;
+            processObservation = null;
+            if (!accepted || result.InstanceId is not { } instanceId)
+            {
+                return;
+            }
+
+            var holder = new ProcessInstanceHolder(instanceId, result.ProcessId, NormalizeStartedAt(result.StartedAt));
+            processInstance = holder;
+            processObservation = holder;
+        }
+    }
+
+    private ProcessInstanceHolder? ReadTrustedProcess()
+    {
+        lock (processHolderGate)
+        {
+            return ReadTrustedProcessLocked();
+        }
+    }
+
+    private ProcessInstanceHolder? ReadTrustedProcessLocked()
+    {
+        var active = processInstance;
+        if (active is null)
+        {
+            return null;
+        }
+
+        if (processObservation is not { } observation || observation.Id != active.Id)
+        {
+            processInstance = null;
+            processObservation = null;
+            return null;
+        }
+
+        var running = processExecutor is IProcessLiveness liveness && IsRunningSafely(liveness, active);
+        if (running)
+        {
+            return active;
+        }
+
+        processInstance = null;
+        processObservation = active;
+        return null;
+    }
+
+    private bool IsRunningSafely(IProcessLiveness liveness, ProcessInstanceHolder active)
+    {
+        try
+        {
+            return liveness.IsRunning(launchSpecification.ServiceId, active.Id);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static DateTimeOffset? NormalizeStartedAt(DateTimeOffset? startedAt)
+    {
+        if (startedAt is not { } value)
+        {
+            return null;
+        }
+
+        try
+        {
+            var utc = value.ToUniversalTime();
+            var now = DateTimeOffset.UtcNow;
+            return utc > now ? now : utc;
+        }
+        catch
+        {
+            return null;
         }
     }
 
     private async ValueTask<ProcessOperationResult> StopProcessAsync(CancellationToken cancellationToken)
     {
-        var active = Volatile.Read(ref processInstance);
+        ProcessInstanceHolder? active;
+        bool hasTrackedIdentity;
+        lock (processHolderGate)
+        {
+            hasTrackedIdentity = processInstance is not null || processObservation is not null;
+            active = ReadTrustedProcessLocked();
+            hasTrackedIdentity |= processInstance is not null || processObservation is not null;
+        }
+
         ProcessOperationResult result;
         if (active is not null)
         {
@@ -30,6 +163,10 @@ public sealed partial class ServiceSupervisor
             }
 
             result = await instanceExecutor.StopAsync(active.Id, stopGracePeriod, cancellationToken).ConfigureAwait(false);
+        }
+        else if (hasTrackedIdentity)
+        {
+            return new ProcessOperationResult(ProcessOperationStatus.Rejected, ServiceStateReasonCode.StopRequested);
         }
         else
         {
@@ -41,13 +178,20 @@ public sealed partial class ServiceSupervisor
 
         if (result.Status is ProcessOperationStatus.Accepted or ProcessOperationStatus.Completed)
         {
-            Interlocked.Exchange(ref processInstance, null);
+            ClearProcessInstance();
         }
 
         return result;
     }
 
-    private void ClearProcessInstance() => Interlocked.Exchange(ref processInstance, null);
+    private void ClearProcessInstance()
+    {
+        lock (processHolderGate)
+        {
+            processInstance = null;
+            processObservation = null;
+        }
+    }
     /// <summary>Records an external process exit and produces a pure bounded restart plan.</summary>
     /// <param name="successfulExit">Whether the process exited successfully.</param>
     /// <param name="now">The exit timestamp.</param>

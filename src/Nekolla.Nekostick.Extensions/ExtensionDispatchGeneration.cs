@@ -11,11 +11,13 @@ public sealed class ExtensionRuntimeDescriptor
     /// <param name="settings">The immutable settings supplied for the manifest.</param>
     /// <param name="handlerIds">Optional route handler IDs to expose. An empty value exposes every registered handler.</param>
     /// <param name="includeFallback">Whether to expose the extension's fallback in the generation.</param>
+    /// <param name="routeIds">Optional route IDs owned by this extension in the desired Host snapshot.</param>
     public ExtensionRuntimeDescriptor(
         ExtensionManifest? manifest,
         ExtensionSettingsConfiguration? settings = null,
         IEnumerable<string>? handlerIds = null,
-        bool includeFallback = true)
+        bool includeFallback = true,
+        IEnumerable<Guid>? routeIds = null)
     {
         Manifest = manifest;
         Settings = settings;
@@ -23,7 +25,13 @@ public sealed class ExtensionRuntimeDescriptor
             ? ImmutableArray<string>.Empty
             : handlerIds.ToImmutableArray();
         IncludeFallback = includeFallback;
+        RouteIds = routeIds is null
+            ? ImmutableArray<Guid>.Empty
+            : routeIds.Distinct().ToImmutableArray();
     }
+
+    /// <summary>Gets the route IDs owned by this extension in the desired Host snapshot.</summary>
+    public ImmutableArray<Guid> RouteIds { get; }
 
     /// <summary>Gets the desired manifest, or <see langword="null" /> for a local unavailable binding.</summary>
     public ExtensionManifest? Manifest { get; }
@@ -154,7 +162,7 @@ public sealed class ExtensionGenerationCommitResult
 }
 
 /// <summary>Represents one immutable, Host-owned extension dispatch generation.</summary>
-public sealed class ExtensionDispatchGeneration : IAsyncDisposable
+public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
 {
     private readonly object _gate = new();
     private readonly ImmutableDictionary<string, ExtensionDispatchBinding> _handlers;
@@ -174,7 +182,8 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
         ExtensionDispatchBinding? fallback,
         IEnumerable<ExtensionDispatchContext> contexts,
         ImmutableArray<ExtensionGenerationBindingStatus> bindings,
-        object owner)
+        object owner,
+        ImmutableDictionary<string, ImmutableArray<Guid>>? routeIdsByExtension = null)
     {
         GenerationId = generationId;
         _handlers = handlers;
@@ -182,6 +191,8 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
         _contexts = contexts.Distinct().ToImmutableArray();
         _bindings = bindings;
         Owner = owner;
+        RouteIdsByExtension = routeIdsByExtension ?? ImmutableDictionary<string, ImmutableArray<Guid>>.Empty;
+        InitializeRouteDispatch();
         if (_activeLeases == 0)
         {
             _leasesDrained.TrySetResult(true);
@@ -362,9 +373,12 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
             .Where(id => !_handlers.ContainsKey(id))
             .ToImmutableArray();
     }
-    /// <summary>Requests bounded retirement after Host has drained old snapshot leases.</summary>
+    /// <summary>Retires this generation and waits for its active leases to drain.</summary>
+    /// <param name="cancellationToken">The token that cancels the retirement wait.</param>
+    /// <returns><see langword="true" /> if active leases drain and the generation is released; otherwise, <see langword="false" /> when the wait is canceled.</returns>
     public async ValueTask<bool> RetireAsync(CancellationToken cancellationToken = default)
     {
+        CancelRouteDispatch();
         Task leasesDrained;
         lock (_gate)
         {
@@ -438,10 +452,13 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
         {
             await context.ReleaseGenerationAsync().ConfigureAwait(false);
         }
+
+        DisposeRouteDispatch();
     }
 
-
     internal object Owner { get; }
+
+    internal ImmutableDictionary<string, ImmutableArray<Guid>> RouteIdsByExtension { get; }
 
     internal IReadOnlyDictionary<string, ExtensionDispatchBinding> HandlerBindings => _handlers;
 
@@ -473,221 +490,4 @@ public sealed class ExtensionDispatchGeneration : IAsyncDisposable
             Enumerable.Empty<ExtensionDispatchContext>(),
             ImmutableArray<ExtensionGenerationBindingStatus>.Empty,
             owner);
-}
-
-/// <summary>Tracks one Host lease over an immutable dispatch generation.</summary>
-public sealed class ExtensionDispatchLease : IDisposable, IAsyncDisposable
-{
-    private ExtensionDispatchGeneration? _generation;
-
-    internal ExtensionDispatchLease(ExtensionDispatchGeneration generation) => _generation = generation;
-
-    /// <summary>Releases the Host lease.</summary>
-    public void Dispose() => Interlocked.Exchange(ref _generation, null)?.ReleaseLease();
-
-    /// <inheritdoc />
-    public ValueTask DisposeAsync()
-    {
-        Dispose();
-        return ValueTask.CompletedTask;
-    }
-
-    /// <summary>Dispatches a handler while this Host lease remains held.</summary>
-    public ValueTask<ExtensionInvocationResult> HandleAsync(
-        string? handlerId,
-        ExtensionHandlerRequest? request,
-        CancellationToken cancellationToken = default)
-    {
-        var generation = _generation;
-        return generation is null
-            ? ValueTask.FromResult(ExtensionInvocationResult.Unavailable)
-            : generation.HandleWithLeaseAsync(handlerId, request, cancellationToken);
-    }
-
-    /// <summary>Dispatches fallback while this Host lease remains held.</summary>
-    public ValueTask<ExtensionInvocationResult> HandleFallbackAsync(
-        ExtensionHandlerRequest? request,
-        ExtensionFallbackReason reason,
-        CancellationToken cancellationToken = default)
-    {
-        var generation = _generation;
-        return generation is null
-            ? ValueTask.FromResult(ExtensionInvocationResult.NotHandled)
-            : generation.HandleFallbackWithLeaseAsync(request, reason, cancellationToken);
-    }
-}
-
-/// <summary>Owns one prepared generation until publication or abort.</summary>
-public sealed class ExtensionGenerationPreparation : IAsyncDisposable
-{
-    private readonly ExtensionRuntimeManager _manager;
-    private readonly ExtensionDispatchGeneration? _previous;
-    private readonly ExtensionDispatchGeneration _generation;
-    private readonly ImmutableArray<ExtensionInstance> _candidates;
-    private readonly ImmutableArray<ExtensionInstance> _changedPrevious;
-    private readonly ImmutableArray<ExtensionInstance> _detachedPrevious;
-    private readonly ImmutableArray<ExtensionDispatchContext> _contexts;
-    private readonly SemaphoreSlim _operationGate = new(1, 1);
-    private int _state;
-
-    internal ExtensionGenerationPreparation(
-        ExtensionRuntimeManager manager,
-        ExtensionDispatchGeneration? previous,
-        ExtensionDispatchGeneration generation,
-        ImmutableArray<ExtensionInstance> candidates,
-        ImmutableArray<ExtensionInstance> changedPrevious,
-        ImmutableArray<ExtensionInstance> detachedPrevious,
-        ImmutableArray<ExtensionDispatchContext> contexts)
-    {
-        _manager = manager;
-        _previous = previous;
-        _generation = generation;
-        _candidates = candidates;
-        _changedPrevious = changedPrevious;
-        _detachedPrevious = detachedPrevious;
-        _contexts = contexts;
-    }
-
-    /// <summary>Gets the immutable generation prepared for Host publication.</summary>
-    public ExtensionDispatchGeneration Generation => _generation;
-
-    /// <summary>Aborts candidates and restores the previous generation before publication.</summary>
-    public async ValueTask AbortAsync()
-    {
-        _ = await _manager.AbortPreparationAsync(this).ConfigureAwait(false);
-    }
-
-    /// <summary>Performs changed-binding stop/drain and candidate activation without publishing.</summary>
-    public ValueTask<ExtensionGenerationCommitResult> ReadyToPublishAsync(
-        CancellationToken cancellationToken = default) =>
-        _manager.ReadyToPublishAsync(this, cancellationToken);
-
-    /// <summary>Marks this preparation published after Host atomically exchanges its holder.</summary>
-    public ValueTask<bool> CompletePublicationAsync() =>
-        _manager.CompletePublicationAsync(this);
-
-
-    /// <inheritdoc />
-    public ValueTask DisposeAsync() => AbortAsync();
-
-    internal ExtensionDispatchGeneration? Previous => _previous;
-
-    internal ImmutableArray<ExtensionInstance> Candidates => _candidates;
-
-    internal ImmutableArray<ExtensionInstance> ChangedPrevious => _changedPrevious;
-
-    internal ImmutableArray<ExtensionInstance> DetachedPrevious => _detachedPrevious;
-
-    internal ImmutableArray<ExtensionDispatchContext> Contexts => _contexts;
-    internal ValueTask EnterOperationAsync() => new(_operationGate.WaitAsync());
-
-    internal void ExitOperation() => _operationGate.Release();
-
-    internal bool TryTransition(int expected, int next) => Interlocked.CompareExchange(ref _state, next, expected) == expected;
-
-    internal int State => Volatile.Read(ref _state);
-}
-
-internal sealed class ExtensionDispatchBinding
-{
-    internal ExtensionDispatchBinding(
-        ExtensionDispatchContext context,
-        IExtensionHandler? handler,
-        IExtensionFallback? fallback)
-    {
-        Context = context;
-        Handler = handler;
-        Fallback = fallback;
-    }
-
-    internal ExtensionDispatchContext Context { get; }
-
-    internal IExtensionHandler? Handler { get; }
-
-    internal IExtensionFallback? Fallback { get; }
-}
-
-internal sealed class ExtensionDispatchContext
-{
-    private readonly object _gate = new();
-    internal ExtensionInstance Instance { get; }
-    internal ExtensionSettingsConfiguration? Settings { get; }
-    private int _generationReferences = 1;
-    private bool _released;
-
-    internal ExtensionDispatchContext(
-        ExtensionInstance instance,
-        ExtensionSettingsConfiguration? settings)
-    {
-        Instance = instance;
-        Settings = settings;
-    }
-    internal bool TryRetainGeneration()
-    {
-        lock (_gate)
-        {
-            if (_released)
-            {
-                return false;
-            }
-
-            _generationReferences++;
-            return true;
-        }
-    }
-
-    internal void RetainGeneration()
-    {
-        if (!TryRetainGeneration())
-        {
-            throw new InvalidOperationException("The extension dispatch context was released.");
-        }
-    }
-
-    internal async ValueTask ReleaseGenerationAsync()
-    {
-        var release = false;
-        lock (_gate)
-        {
-            if (_generationReferences > 0)
-            {
-                _generationReferences--;
-            }
-
-            if (_generationReferences == 0 && !_released)
-            {
-                _released = true;
-                release = true;
-            }
-        }
-
-        if (release)
-        {
-            await Instance.StopForReplacementAsync(ExtensionRuntimeManager.LifecycleTimeout)
-                .ConfigureAwait(false);
-            await Instance.ReleaseAsync().ConfigureAwait(false);
-        }
-    }
-
-    internal async ValueTask AbortCandidateAsync()
-    {
-        var release = false;
-        lock (_gate)
-        {
-            if (!_released)
-            {
-                _released = true;
-                _generationReferences = 0;
-                release = true;
-            }
-        }
-
-        if (release)
-        {
-            await Instance.AbortAsync(ExtensionRuntimeManager.LifecycleTimeout).ConfigureAwait(false);
-        }
-    }
-
-    internal ValueTask RecordFailureAsync(ExtensionFailureCode category, Exception exception) =>
-        Instance.NotifyExternalFailureAsync(category, exception);
 }

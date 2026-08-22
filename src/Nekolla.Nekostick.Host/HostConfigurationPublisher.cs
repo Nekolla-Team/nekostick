@@ -8,7 +8,7 @@ using Nekolla.Nekostick.Extensions;
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Serializes configuration publication with staged extension generation handoff.</summary>
-public sealed class HostConfigurationPublisher : IAsyncDisposable
+public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 {
     private readonly HostConfigurationSnapshotHolder _snapshotHolder;
     private readonly ExtensionRuntimeManager _runtimeManager;
@@ -16,6 +16,7 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
     private readonly ILogger<HostConfigurationPublisher> _logger;
     private readonly IDbContextFactory<NekostickDbContext>? _dbContextFactory;
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
+    private ImmutableDictionary<Guid, string?> _routeOwners = ImmutableDictionary<Guid, string?>.Empty;
     private int _disposed;
 
     /// <summary>Creates a configuration publisher for the supplied snapshot and extension runtime state.</summary>
@@ -55,8 +56,9 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
             {
                 return false;
             }
-            var serviceOwners = await ReadServiceOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
 
+            var serviceOwners = await ReadServiceOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
+            _routeOwners = await ReadRouteOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
             var previousSnapshot = _snapshotHolder.RoutingSnapshot;
             var previousGeneration = previousSnapshot?.DispatchGeneration;
             var desiredSet = BuildDesired(snapshot);
@@ -215,6 +217,40 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
             return ImmutableDictionary<Guid, string?>.Empty;
         }
     }
+    private async ValueTask<ImmutableDictionary<Guid, string?>> ReadRouteOwnersAsync(
+        HostConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (_dbContextFactory is null)
+        {
+            return ImmutableDictionary<Guid, string?>.Empty;
+        }
+
+        try
+        {
+            await using var db = await _dbContextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var routeIds = snapshot.Routes.Select(static value => value.Id).ToArray();
+            var rows = await db.Routes
+                .AsNoTracking()
+                .Where(value => routeIds.Contains(value.Id))
+                .Select(value => new { value.Id, value.OwnerExtensionId })
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return rows.ToImmutableDictionary(
+                static value => value.Id,
+                static value => value.OwnerExtensionId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return ImmutableDictionary<Guid, string?>.Empty;
+        }
+    }
 
     private void PublishSnapshotEvents(
         HostConfigurationSnapshot snapshot,
@@ -279,208 +315,6 @@ public sealed class HostConfigurationPublisher : IAsyncDisposable
         }
     }
 
-    private readonly record struct DesiredExtensionSet(
-        ImmutableArray<ExtensionRuntimeDescriptor> Descriptors,
-        bool HasUnavailableLoadedRecord);
-
-    private readonly record struct ExtensionSettingsIdentity(
-        int SchemaVersion,
-        string SettingsJson,
-        long Version);
-
-    private readonly record struct LoadedExtensionIdentity(
-        string Version,
-        long RecordVersion,
-        ExtensionSettingsIdentity? Settings);
-
-    private DesiredExtensionSet BuildDesired(HostConfigurationSnapshot snapshot)
-    {
-        if (_nodeOptions.SkipExtensions)
-        {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, false);
-        }
-
-        var loadedRecords = snapshot.ExtensionRecords
-            .Where(static record => record is not null && record.LoadState == ExtensionLoadState.Loaded)
-            .GroupBy(static record => record.ExtensionId, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
-        var bootstrap = snapshot.ExtensionRecords.Length == 0;
-        var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
-        if (!Directory.Exists(installRoot))
-        {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, loadedRecords.Count != 0);
-        }
-
-        var discoveredById = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
-        var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
-        string[] directories;
-        try
-        {
-            directories = Directory
-                .EnumerateDirectories(installRoot)
-                .OrderBy(static path => path, StringComparer.Ordinal)
-                .ToArray();
-        }
-        catch
-        {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, loadedRecords.Count != 0);
-        }
-
-        foreach (var directory in directories)
-        {
-            ManifestDiscoveryResult result;
-            try
-            {
-                result = ExtensionManifestDiscovery.Discover(directory);
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (!result.Succeeded || result.Manifest is null)
-            {
-                continue;
-            }
-
-            var manifest = result.Manifest;
-            if (duplicateIds.Contains(manifest.Id))
-            {
-                continue;
-            }
-
-            if (!discoveredById.TryAdd(manifest.Id, manifest))
-            {
-                discoveredById.Remove(manifest.Id);
-                duplicateIds.Add(manifest.Id);
-            }
-        }
-
-        var localFailure = duplicateIds.Any(loadedRecords.ContainsKey) ||
-            loadedRecords.Any(pair => pair.Value.Length != 1 ||
-                !discoveredById.TryGetValue(pair.Key, out var manifest) ||
-                !string.Equals(pair.Value[0].Version, manifest.Version.ToString(), StringComparison.Ordinal));
-        if (discoveredById.Count == 0)
-        {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, localFailure);
-        }
-
-        var matchedManifests = bootstrap
-            ? discoveredById.Values.ToImmutableArray()
-            : discoveredById.Values
-                .Where(manifest => loadedRecords.TryGetValue(manifest.Id, out var records) &&
-                    records.Length == 1 &&
-                    string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal))
-                .ToImmutableArray();
-        var graph = ExtensionManifestGraph.ValidateAndOrder(
-            matchedManifests,
-            new SemVersion(
-                HostApiVersion.Current.Major,
-                HostApiVersion.Current.Minor,
-                HostApiVersion.Current.Patch));
-        if (!graph.Succeeded)
-        {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, true);
-        }
-
-        var requestedHandlerIds = snapshot.Routes
-            .Select(static route => route?.Target)
-            .OfType<ExtensionHandlerRouteTargetConfiguration>()
-            .Select(static target => target.HandlerId)
-            .Distinct(StringComparer.Ordinal)
-            .ToImmutableArray();
-        var settingsById = snapshot.ExtensionSettings
-            .Where(static setting => setting is not null)
-            .ToDictionary(static setting => setting.ExtensionId, StringComparer.Ordinal);
-        var desired = ImmutableArray.CreateBuilder<ExtensionRuntimeDescriptor>();
-
-        foreach (var manifest in graph.OrderedManifests)
-        {
-            if (!bootstrap &&
-                (!loadedRecords.TryGetValue(manifest.Id, out var records) ||
-                 records.Length != 1 ||
-                 !string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal)))
-            {
-                continue;
-            }
-
-            settingsById.TryGetValue(manifest.Id, out var settings);
-            desired.Add(new ExtensionRuntimeDescriptor(
-                manifest,
-                settings,
-                requestedHandlerIds,
-                includeFallback: true));
-
-        }
-
-        return new(desired.ToImmutable(), localFailure);
-    }
-
-    private static bool HasUnsafeUnavailableBinding(ExtensionDispatchGeneration generation) =>
-        generation.Bindings.Any(static binding =>
-            !binding.Available &&
-            binding.FailureCode is not ExtensionFailureCode.None and
-                not ExtensionFailureCode.HandlerUnavailable and
-                not ExtensionFailureCode.FallbackConflict);
-
-    private static bool CanReusePriorLoadedIdentities(
-        HostRoutingSnapshot previousSnapshot,
-        HostConfigurationSnapshot nextSnapshot)
-    {
-        var previous = BuildLoadedIdentities(previousSnapshot.Configuration);
-        var next = BuildLoadedIdentities(nextSnapshot);
-        return previous is not null &&
-            next is not null &&
-            previous.All(pair => next.TryGetValue(pair.Key, out var identity) &&
-                identity.Equals(pair.Value));
-    }
-
-    private static Dictionary<string, LoadedExtensionIdentity>? BuildLoadedIdentities(
-        HostConfigurationSnapshot snapshot)
-    {
-        var records = new Dictionary<string, ExtensionRecordConfiguration>(StringComparer.Ordinal);
-        foreach (var record in snapshot.ExtensionRecords)
-        {
-            if (record is null ||
-                record.LoadState != ExtensionLoadState.Loaded ||
-                !records.TryAdd(record.ExtensionId, record))
-            {
-                if (record is null || record.LoadState != ExtensionLoadState.Loaded)
-                {
-                    continue;
-                }
-
-                return null;
-            }
-        }
-
-        var settings = new Dictionary<string, ExtensionSettingsConfiguration>(StringComparer.Ordinal);
-        foreach (var setting in snapshot.ExtensionSettings)
-        {
-            if (setting is null || !records.ContainsKey(setting.ExtensionId))
-            {
-                continue;
-            }
-
-            if (!settings.TryAdd(setting.ExtensionId, setting))
-            {
-                return null;
-            }
-        }
-
-        return records.ToDictionary(
-            static pair => pair.Key,
-            pair => new LoadedExtensionIdentity(
-                pair.Value.Version,
-                pair.Value.RecordVersion,
-                settings.TryGetValue(pair.Key, out var setting)
-                    ? new ExtensionSettingsIdentity(
-                        setting.SchemaVersion,
-                        setting.SettingsJson,
-                        setting.Version)
-                    : null),
-            StringComparer.Ordinal);
-    }
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {

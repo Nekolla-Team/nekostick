@@ -69,6 +69,14 @@ public sealed class HostDurableStoreOutageTests
         await fixture.Manager.NotifyProcessExitAsync(ServiceId, successfulExit: false);
 
         Assert.Single(fixture.Executor.StartedServices);
+        Assert.Single(fixture.Publisher.Current);
+
+        await fixture.Manager.NotifyProcessExitAsync(
+            ServiceId,
+            fixture.Executor.LastStartedInstanceId!.Value,
+            successfulExit: false);
+
+        Assert.Single(fixture.Executor.StartedServices);
         Assert.Single(fixture.LeaseStore.AcquireIntents);
         Assert.Equal(0, fixture.LeaseStore.RenewCalls);
         Assert.Empty(fixture.Publisher.Current);
@@ -239,16 +247,19 @@ public sealed class HostDurableStoreOutageTests
     private sealed class RecordingExecutor : IProcessExecutor
     {
         public List<Guid> StartedServices { get; } = [];
+        public ProcessInstanceId? LastStartedInstanceId { get; private set; }
 
         public ValueTask<ProcessOperationResult> StartAsync(
             ProcessLaunchSpecification specification,
             CancellationToken cancellationToken = default)
         {
             StartedServices.Add(specification.ServiceId);
+            var instanceId = new ProcessInstanceId(Guid.CreateVersion7());
+            LastStartedInstanceId = instanceId;
             return ValueTask.FromResult(new ProcessOperationResult(
                 ProcessOperationStatus.Accepted,
                 ServiceStateReasonCode.StartAccepted,
-                new ProcessInstanceId(Guid.CreateVersion7())));
+                instanceId));
         }
 
         public ValueTask<ProcessOperationResult> StopAsync(

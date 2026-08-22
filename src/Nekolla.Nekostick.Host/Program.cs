@@ -302,6 +302,8 @@ internal static class Program
                     serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());
                 builder.Services.AddSingleton<IHostServiceLifecycleCoordinator>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
+                builder.Services.AddSingleton<IHostServiceRuntimeSnapshotAccessor>(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
                 builder.Services.AddHostedService(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
                 builder.Services.AddHostedService<HostNodeRegistrationService>();
