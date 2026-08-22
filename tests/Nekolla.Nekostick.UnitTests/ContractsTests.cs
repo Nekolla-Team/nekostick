@@ -4,7 +4,7 @@ using Xunit;
 
 namespace Nekolla.Nekostick.UnitTests;
 
-public sealed class ContractsTests
+public sealed partial class ContractsTests
 {
     private static readonly Guid StableId =
         Guid.Parse("018f3a52-4cde-7abc-8def-0123456789ab");
@@ -190,16 +190,20 @@ public sealed class ContractsTests
     public void HostApiVersionProvidesComparableCompatibilityComponents()
     {
         var current = HostApiVersion.Current;
+        var legacyCompatible = new HostApiVersion(1, 2, 0);
         var compatibleFeature = new HostApiVersion(current.Major, current.Minor + 1, 0);
         var compatibleFix = new HostApiVersion(current.Major, current.Minor, current.Patch + 1);
         var incompatible = new HostApiVersion(current.Major + 1, 0, 0);
 
-        Assert.Equal(new HostApiVersion(1, 2, 0), current);
-        Assert.Equal("1.2.0", current.ToString());
+        Assert.Equal(new HostApiVersion(1, 3, 0), current);
+        Assert.Equal("1.3.0", current.ToString());
+        Assert.True(legacyCompatible < current);
+        Assert.True(ExtensionAbi.IsCompatible(legacyCompatible, current));
+        Assert.False(ExtensionAbi.IsApi13Supported(legacyCompatible));
         Assert.True(compatibleFeature.CompareTo(current) > 0);
         Assert.True(compatibleFix.CompareTo(current) > 0);
         Assert.True(incompatible.CompareTo(current) > 0);
-        Assert.Equal(0, current.CompareTo(new HostApiVersion(1, 2, 0)));
+        Assert.Equal(0, current.CompareTo(new HostApiVersion(1, 3, 0)));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(-1, 0, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(0, -1, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(0, 0, -1));
@@ -389,129 +393,46 @@ public sealed class ContractsTests
     }
 
     [Fact]
-    public void ServiceContractsValidateHealthAndNormalizeServiceValues()
+    public void Api13ContractsUseGlobalSupervisorAndRouteEventRegistrations()
     {
-        var root = Path.GetTempPath();
-        var health = new ServiceHealthCheckConfiguration(
-            ServiceHealthCheckType.Http,
-            "/health",
-            TimeSpan.FromSeconds(4));
-        var service = new ServiceConfiguration(
-            StableId,
-            true,
-            Path.Combine(root, "service-bin"),
-            default,
-            root,
-            null!,
-            ServiceStartMode.Lazy,
-            ServiceRestartPolicy.Always,
-            health,
-            new DateTimeOffset(2026, 8, 16, 10, 0, 0, TimeSpan.FromHours(5)),
-            new DateTimeOffset(2026, 8, 16, 10, 1, 0, TimeSpan.FromHours(5)),
-            2);
+        var supervisor = typeof(IExtensionSupervisorApi);
+        var read = supervisor.GetMethod(nameof(IExtensionSupervisorApi.ReadAsync));
+        var get = supervisor.GetMethod(nameof(IExtensionSupervisorApi.GetAsync));
 
-        Assert.Empty(service.ArgumentList);
-        Assert.Empty(service.Environment);
-        Assert.Equal(ServiceStartMode.Lazy, service.StartMode);
-        Assert.Equal(ServiceRestartPolicy.Always, service.RestartPolicy);
-        Assert.Equal("/health", service.HealthCheck.HttpPath);
-        Assert.Equal(TimeSpan.Zero, service.CreatedAt.Offset);
-        Assert.Equal(TimeSpan.Zero, service.UpdatedAt.Offset);
-        Assert.Equal(2L, service.Version);
+        Assert.NotNull(read);
+        Assert.NotNull(get);
+        Assert.Single(read!.GetParameters(), parameter => parameter.ParameterType == typeof(CancellationToken));
+        Assert.Collection(
+            get!.GetParameters(),
+            parameter => Assert.Equal(typeof(Guid), parameter.ParameterType),
+            parameter => Assert.Equal(typeof(CancellationToken), parameter.ParameterType));
+        Assert.DoesNotContain("Owned", string.Join(',', supervisor.GetMethods().Select(method => method.Name)));
 
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ServiceHealthCheckConfiguration(
-                ServiceHealthCheckType.Process,
-                null,
-                TimeSpan.Zero));
-        Assert.Throws<ArgumentException>(
-            () => new ServiceHealthCheckConfiguration(
-                ServiceHealthCheckType.Http,
-                null,
-                TimeSpan.FromSeconds(1)));
-        Assert.Throws<ArgumentException>(
-            () => new ServiceConfiguration(
-                Guid.Empty,
-                true,
-                Path.Combine(root, "service-bin"),
-                default,
-                root,
-                null!,
-                ServiceStartMode.Eager,
-                ServiceRestartPolicy.Never,
-                health,
-                DateTimeOffset.UnixEpoch,
-                DateTimeOffset.UnixEpoch,
-                0));
-        Assert.Throws<ArgumentException>(
-            () => new ServiceConfiguration(
-                Version4Id,
-                true,
-                Path.Combine(root, "service-bin"),
-                default,
-                root,
-                null!,
-                ServiceStartMode.Eager,
-                ServiceRestartPolicy.Never,
-                health,
-                DateTimeOffset.UnixEpoch,
-                DateTimeOffset.UnixEpoch,
-                0));
-        Assert.Throws<ArgumentException>(
-            () => new ServiceConfiguration(
-                InvalidVariantVersion7Id,
-                true,
-                Path.Combine(root, "service-bin"),
-                default,
-                root,
-                null!,
-                ServiceStartMode.Eager,
-                ServiceRestartPolicy.Never,
-                health,
-                DateTimeOffset.UnixEpoch,
-                DateTimeOffset.UnixEpoch,
-                0));
+        var routeEvents = typeof(IExtensionRouteEvents);
+        var subscribe = routeEvents.GetMethod(nameof(IExtensionRouteEvents.TrySubscribe));
+        var hook = routeEvents.GetMethod(nameof(IExtensionRouteEvents.TryRegisterHook));
+
+        Assert.NotNull(subscribe);
+        Assert.NotNull(hook);
+        Assert.Single(
+            subscribe!.GetParameters(),
+            parameter => parameter.ParameterType == typeof(Func<ExtensionEvent, CancellationToken, ValueTask>));
+        Assert.Collection(
+            hook!.GetParameters(),
+            parameter => Assert.Equal(typeof(ExtensionRouteEventStage), parameter.ParameterType),
+            parameter => Assert.Equal(
+                typeof(Func<ExtensionRouteHookContext, CancellationToken, ValueTask<ExtensionRouteHookResult>>),
+                parameter.ParameterType));
+        Assert.DoesNotContain(
+            "routeId",
+            string.Join(',', routeEvents.GetMethods().SelectMany(method => method.GetParameters()).Select(parameter => parameter.Name)),
+            StringComparison.OrdinalIgnoreCase);
+
+        var legacyMethods = typeof(IExtensionOwnedConfigurationApi).GetMethods().Select(method => method.Name).ToArray();
+        Assert.Contains(nameof(IExtensionOwnedConfigurationApi.ReadOwnedAsync), legacyMethods);
+        Assert.Contains(nameof(IExtensionOwnedConfigurationApi.ApplyOwnedAsync), legacyMethods);
+        Assert.Contains(nameof(IExtensionOwnedConfigurationApi.ReadOwnedSettingsAsync), legacyMethods);
+        Assert.Contains(nameof(IExtensionOwnedConfigurationApi.WriteOwnedSettingsAsync), legacyMethods);
     }
 
-    [Fact]
-    public void ExtensionContractsValidateRecordsAndSettings()
-    {
-        var createdAt = new DateTimeOffset(2026, 8, 16, 10, 0, 0, TimeSpan.FromHours(5));
-        var record = new ExtensionRecordConfiguration(
-            "sample.extension",
-            "1.2.3",
-            ExtensionLoadState.Loaded,
-            createdAt,
-            createdAt.AddMinutes(1),
-            3);
-        var settings = new ExtensionSettingsConfiguration(
-            "sample.extension",
-            2,
-            "{}",
-            4);
-
-        Assert.Equal("sample.extension", record.ExtensionId);
-        Assert.Equal("1.2.3", record.Version);
-        Assert.Equal(ExtensionLoadState.Loaded, record.LoadState);
-        Assert.Equal(TimeSpan.Zero, record.CreatedAt.Offset);
-        Assert.Equal(TimeSpan.Zero, record.UpdatedAt.Offset);
-        Assert.Equal(3L, record.RecordVersion);
-        Assert.Equal(2, settings.SchemaVersion);
-        Assert.Equal("{}", settings.SettingsJson);
-        Assert.Equal(4L, settings.Version);
-
-        Assert.Throws<ArgumentException>(
-            () => new ExtensionRecordConfiguration(
-                " ", "1.0.0", ExtensionLoadState.Discovered, createdAt, createdAt, 0));
-        Assert.Throws<ArgumentException>(
-            () => new ExtensionRecordConfiguration(
-                "sample.extension", " ", ExtensionLoadState.Discovered, createdAt, createdAt, 0));
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ExtensionRecordConfiguration(
-                "sample.extension", "1.0.0", ExtensionLoadState.Discovered, createdAt, createdAt, -1));
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ExtensionSettingsConfiguration("sample.extension", -1, "{}", 0));
-        Assert.Throws<ArgumentNullException>(
-            () => new ExtensionSettingsConfiguration("sample.extension", 0, null!, 0));
-    }
 }

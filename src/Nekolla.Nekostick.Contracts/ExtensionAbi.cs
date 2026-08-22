@@ -6,8 +6,11 @@ namespace Nekolla.Nekostick.Contracts;
 /// <summary>Identifies the stable in-process extension ABI generation.</summary>
 public static class ExtensionAbi
 {
+    /// <summary>Gets the minimum host API version that exposes the API 1.3 sibling bridge.</summary>
+    public static HostApiVersion Api13Version { get; } = new(1, 3, 0);
+
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
-    public static HostApiVersion Version { get; } = new(1, 2, 0);
+    public static HostApiVersion Version { get; } = Api13Version;
 
     /// <summary>Determines whether a host API version can satisfy an extension ABI requirement.</summary>
     /// <param name="required">The required version.</param>
@@ -15,7 +18,13 @@ public static class ExtensionAbi
     /// <returns><see langword="true" /> when the major generation matches and the host is not older.</returns>
     public static bool IsCompatible(HostApiVersion required, HostApiVersion host) =>
         required.Major == host.Major && host >= required;
+
+    /// <summary>Determines whether the negotiated host exposes the API 1.3 sibling bridge.</summary>
+    /// <param name="host">The negotiated host API version.</param>
+    /// <returns><see langword="true" /> only for a compatible API 1.3-or-later host in major generation 1.</returns>
+    public static bool IsApi13Supported(HostApiVersion host) => IsCompatible(Api13Version, host);
 }
+
 
 /// <summary>Describes the reason supplied to the sole extension fallback.</summary>
 public enum ExtensionFallbackReason
@@ -405,6 +414,20 @@ public interface IExtensionLogger
     void Report(ExtensionLogLevel level, string code);
 }
 
+/// <summary>Writes bounded custom text attributed to the calling extension by the Host.</summary>
+/// <remarks>
+/// The extension supplies only level and text. It cannot supply or impersonate an extension ID;
+/// the Host binds identity at the implementation boundary and may emit structured attribution.
+/// </remarks>
+public interface IExtensionLogWriter
+{
+    /// <summary>Writes one bounded custom text message.</summary>
+    /// <param name="level">The safe logger severity.</param>
+    /// <param name="text">The non-sensitive custom text.</param>
+    void WriteText(ExtensionLogLevel level, string text);
+}
+
+
 /// <summary>Registers stable handler IDs during extension startup.</summary>
 public interface IExtensionRegistration
 {
@@ -426,64 +449,6 @@ public interface IExtensionRegistration
     bool TryUnregisterFallback();
 }
 
-/// <summary>Provides lifecycle state, typed contracts, and registration to an extension entrypoint.</summary>
-public interface IExtensionStartContext
-{
-    /// <summary>Gets whether this start is part of replacement reload.</summary>
-    bool Reloading { get; }
-
-    /// <summary>Gets the startup-only typed shared-contract registry.</summary>
-    IExtensionContractRegistry Contracts { get; }
-
-    /// <summary>Gets the narrow host bridge.</summary>
-    IExtensionHostBridge Host { get; }
-
-    /// <summary>Gets the private registration surface.</summary>
-    IExtensionRegistration Registration { get; }
-}
-
-/// <summary>Exposes only explicitly approved host capabilities to an extension.</summary>
-public interface IExtensionHostBridge
-{
-    /// <summary>Gets the host API version used for compatibility checks.</summary>
-    HostApiVersion ApiVersion { get; }
-
-    /// <summary>Gets the legacy read-only versioned extension settings view.</summary>
-    IExtensionSettingsReader Configuration { get; }
-
-    /// <summary>Gets the full owned configuration and settings facade introduced in API 1.1.</summary>
-    IExtensionConfigurationApi ConfigurationApi { get; }
-
-    /// <summary>Gets trusted full Host business and configuration data access.</summary>
-    IExtensionFullConfigurationApi FullConfiguration { get; }
-
-    /// <summary>Gets owned route configuration operations.</summary>
-    IExtensionRouteApi Routes { get; }
-
-    /// <summary>Gets owned service configuration and lifecycle operations.</summary>
-    IExtensionServiceApi Services { get; }
-
-    /// <summary>Gets read-only published endpoint lease information.</summary>
-    IExtensionEndpointApi Endpoints { get; }
-
-    /// <summary>Gets self-scoped lifecycle status and requests.</summary>
-    IExtensionLifecycleApi Lifecycle { get; }
-
-    /// <summary>Gets the startup-only typed shared-contract registry.</summary>
-    IExtensionContractRegistry Contracts { get; }
-
-    /// <summary>Gets the bounded extension task scheduler.</summary>
-    IExtensionTaskScheduler Tasks { get; }
-
-    /// <summary>Gets the ordered best-effort event publisher.</summary>
-    IExtensionEventPublisher Events { get; }
-
-    /// <summary>Gets the safe status sink.</summary>
-    IExtensionStatusSink Status { get; }
-
-    /// <summary>Gets the safe logger.</summary>
-    IExtensionLogger Logger { get; }
-}
 
 /// <summary>Defines the stable extension lifecycle entrypoint.</summary>
 public interface IExtensionEntrypoint

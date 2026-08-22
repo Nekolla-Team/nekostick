@@ -2,7 +2,7 @@ using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Extensions;
 
-internal sealed class ExtensionHostBridge : IExtensionHostBridge
+internal sealed class ExtensionHostBridge : IExtensionHostBridge13
 {
     internal ExtensionHostBridge(
         HostApiVersion apiVersion,
@@ -17,17 +17,33 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
     {
         ApiVersion = apiVersion;
         Configuration = new ExtensionSettingsReader(settings);
-        ConfigurationApi = capabilities.ConfigurationApi;
-        FullConfiguration = capabilities.FullConfiguration;
-        Routes = capabilities.Routes;
-        Services = capabilities.Services;
-        Endpoints = capabilities.Endpoints;
-        Lifecycle = lifecycle;
+        var api11Supported = ExtensionApiCapabilityGate.IsApi11Supported(apiVersion);
+        var api12Supported = ExtensionApiCapabilityGate.IsApi12Supported(apiVersion);
+        var unsupported = UnsupportedExtensionCapabilities.Create(apiVersion);
+        ConfigurationApi = api11Supported ? capabilities.ConfigurationApi : unsupported.ConfigurationApi;
+        FullConfiguration = api12Supported ? capabilities.FullConfiguration : unsupported.FullConfiguration;
+        Routes = api11Supported ? capabilities.Routes : unsupported.Routes;
+        Services = api11Supported ? capabilities.Services : unsupported.Services;
+        Endpoints = api11Supported ? capabilities.Endpoints : unsupported.Endpoints;
+        Lifecycle = api11Supported
+            ? lifecycle
+            : UnsupportedExtensionCapabilities.CreateLifecycle();
         Contracts = contracts;
         Tasks = tasks;
         Events = events;
         Status = new ExtensionStatusSink(reportStatus);
         Logger = new ExtensionLogger(reportLog);
+
+        var api13Supported = ExtensionAbi.IsApi13Supported(apiVersion);
+        Supervisor = api13Supported
+            ? capabilities.Supervisor ?? UnsupportedExtensionCapabilities.CreateSupervisor()
+            : UnsupportedExtensionCapabilities.CreateSupervisor();
+        RouteEvents = api13Supported
+            ? capabilities.RouteEvents ?? UnsupportedExtensionCapabilities.CreateRouteEvents()
+            : UnsupportedExtensionCapabilities.CreateRouteEvents();
+        LogWriter = api13Supported
+            ? capabilities.LogWriter ?? UnsupportedExtensionCapabilities.CreateLogWriter()
+            : UnsupportedExtensionCapabilities.CreateLogWriter();
     }
 
     public HostApiVersion ApiVersion { get; }
@@ -48,6 +64,11 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge
     public IExtensionStatusSink Status { get; }
 
     public IExtensionLogger Logger { get; }
+    public IExtensionSupervisorApi Supervisor { get; }
+
+    public IExtensionRouteEvents RouteEvents { get; }
+
+    public IExtensionLogWriter LogWriter { get; }
 }
 
 internal sealed class ExtensionStartContext : IExtensionStartContext

@@ -7,6 +7,9 @@ namespace Nekolla.Nekostick.Supervision;
 internal interface IProcessLiveness
 {
     bool IsRunning(Guid serviceId);
+
+    // Implementations that cannot bind a service check to the requested process generation fail closed.
+    bool IsRunning(Guid serviceId, ProcessInstanceId instanceId) => false;
 }
 
 /// <summary>Receives bounded structured output from a supervised child process.</summary>

@@ -126,7 +126,7 @@ Extensions are trusted in-process code. A collectible `AssemblyLoadContext` prov
 The stable Host and extension contract surface is distributed as the `Nekolla.Nekostick.Contracts` NuGet package:
 
 ```sh
-dotnet add package Nekolla.Nekostick.Contracts --version 1.2.0
+dotnet add package Nekolla.Nekostick.Contracts --version 1.3.0
 ```
 
 Extension projects should reference Contracts and their explicitly declared shared-contract assemblies only. They should not reference Host, Persistence, ASP.NET, EF Core, or another extension's implementation assembly.
@@ -146,13 +146,13 @@ Operational constraints include:
 
 ```text
 src/
-  Nekolla.Nekostick.Contracts/     Stable Host and extension ABI and DTOs.
+  Nekolla.Nekostick.Contracts/      Stable Host and extension ABI and DTOs.
   Nekolla.Nekostick.Domain/         Route and bootstrap domain models.
   Nekolla.Nekostick.Routing/        Immutable matching and dispatch snapshots.
   Nekolla.Nekostick.Proxy/          HTTP/WebSocket proxy and static targets.
-  Nekolla.Nekostick.Supervision/   Child-process lifecycle and health.
-  Nekolla.Nekostick.Extensions/    Manifest, ALC, lifecycle, and capabilities.
-  Nekolla.Nekostick.Persistence/   PostgreSQL, EF Core, and migrations.
+  Nekolla.Nekostick.Supervision/    Child-process lifecycle and health.
+  Nekolla.Nekostick.Extensions/     Manifest, ALC, lifecycle, and capabilities.
+  Nekolla.Nekostick.Persistence/    PostgreSQL, EF Core, and migrations.
   Nekolla.Nekostick.Host/           Executable composition root.
 
 tests/                              Unit, integration, and process fixtures.

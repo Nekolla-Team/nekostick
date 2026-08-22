@@ -130,6 +130,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             {
                 return Rejected();
             }
+            var processStartedAt = DateTimeOffset.UtcNow;
 
             var launchRequest = new HelperLaunchRequest(
                 specification.FileName,
@@ -149,10 +150,12 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             }
 
             var instanceId = new ProcessInstanceId(Guid.NewGuid());
+            var processId = process.Id;
             var lease = new ProcessLease(
                 instanceId,
                 specification.ServiceId,
                 process,
+                processStartedAt,
                 new ProcessOutputBudget(MaximumOutputLinesPerSecond, MaximumOutputBytesPerSecond));
             if (!leases.TryAdd(instanceId, lease))
             {
@@ -167,7 +170,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 return new(ProcessOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled);
             }
 
-            return new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted, instanceId);
+            return new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted, instanceId, processId, processStartedAt);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -365,6 +368,10 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     bool IProcessLiveness.IsRunning(Guid serviceId) =>
         leases.Values.Any(lease => lease.ServiceId == serviceId && !lease.Exited.Task.IsCompleted);
 
+    bool IProcessLiveness.IsRunning(Guid serviceId, ProcessInstanceId instanceId) =>
+        leases.TryGetValue(instanceId, out var lease) &&
+        lease.ServiceId == serviceId &&
+        !lease.Exited.Task.IsCompleted;
 
     private Process CreateHelperProcess(ProcessLaunchSpecification specification)
     {
@@ -427,12 +434,18 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
     private sealed class ProcessLease
     {
-        internal ProcessLease(ProcessInstanceId instanceId, Guid serviceId, Process process, ProcessOutputBudget budget)
+        internal ProcessLease(
+            ProcessInstanceId instanceId,
+            Guid serviceId,
+            Process process,
+            DateTimeOffset startedAt,
+            ProcessOutputBudget budget)
         {
             InstanceId = instanceId;
             ServiceId = serviceId;
             Process = process;
             ProcessId = process.Id;
+            StartedAt = startedAt.ToUniversalTime();
             Budget = budget;
         }
 
@@ -440,6 +453,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         internal Guid ServiceId { get; }
         internal Process Process { get; }
         internal int ProcessId { get; }
+        internal DateTimeOffset StartedAt { get; }
         internal ProcessOutputBudget Budget { get; }
         internal Task? Monitor { get; set; }
         internal int StopRequested;

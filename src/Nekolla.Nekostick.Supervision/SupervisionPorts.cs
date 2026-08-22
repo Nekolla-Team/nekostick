@@ -47,14 +47,25 @@ public sealed record ProcessOperationResult
     /// <param name="status">The fixed status.</param>
     /// <param name="reason">The safe reason code.</param>
     /// <param name="instanceId">The opaque process generation, when a start was accepted.</param>
+    /// <param name="processId">The operating-system process ID, when safely known.</param>
+    /// <param name="startedAt">The executor-established UTC process start instant, when known.</param>
     public ProcessOperationResult(
         ProcessOperationStatus status,
         ServiceStateReasonCode reason,
-        ProcessInstanceId? instanceId = null)
+        ProcessInstanceId? instanceId = null,
+        int? processId = null,
+        DateTimeOffset? startedAt = null)
     {
+        if (processId is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(processId));
+        }
+
         Status = status;
         Reason = reason;
         InstanceId = instanceId;
+        ProcessId = processId;
+        StartedAt = startedAt?.ToUniversalTime();
     }
 
     /// <summary>Gets the fixed process operation status.</summary>
@@ -65,7 +76,14 @@ public sealed record ProcessOperationResult
 
     /// <summary>Gets the opaque process generation when a start was accepted.</summary>
     public ProcessInstanceId? InstanceId { get; }
+
+    /// <summary>Gets the operating-system process ID when safely known.</summary>
+    public int? ProcessId { get; }
+
+    /// <summary>Gets the executor-established UTC process start instant when safely known.</summary>
+    public DateTimeOffset? StartedAt { get; }
 }
+
 /// <summary>Contains one safe observation for a tracked process generation exit.</summary>
 public sealed record ProcessExitObservation
 {
