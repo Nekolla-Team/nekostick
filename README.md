@@ -116,8 +116,8 @@ The Compose example requires `NEKOSTICK_CONNECTION_STRING` and a stable, unique 
 
 ## Extension API
 
-- [Extension API guide](docs/extension-api.md)
-- [Contracts package README](src/Nekolla.Nekostick.Contracts/README.md)
+- [Extension API guide](docs/extension-api/)
+- [Contracts package README](src/Nekolla.Nekostick.Contracts/)
 
 Extensions are trusted in-process code. A collectible `AssemblyLoadContext` provides dependency isolation and unloadability; it is not a security sandbox. Manifest validation, capability boundaries, lifecycle behavior, handler semantics, and configuration rules are defined by the [Extension API guide](docs/extension-api.md) and its versioned detail documents.
 
@@ -163,9 +163,9 @@ docs/                               Technical design and extension API guides.
 ## Documentation
 
 - [Technical design](docs/technical-design.md)
-- [Extension API guide](docs/extension-api.md)
-- [Deployment artifacts](deploy/README.md)
-- [Contracts package](src/Nekolla.Nekostick.Contracts/README.md)
+- [Extension API guide](docs/extension-api/)
+- [Deployment artifacts](deploy/)
+- [Contracts package](src/Nekolla.Nekostick.Contracts/)
 
 ## Development
 
