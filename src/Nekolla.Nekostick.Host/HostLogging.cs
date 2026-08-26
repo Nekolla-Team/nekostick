@@ -166,6 +166,10 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
 
             var safeMessage = formatter(state, null);
             Console.Error.WriteLine($"HOST_EVENT {eventId.Id}: {safeMessage}");
+            if (exception is not null)
+            {
+                Console.Error.WriteLine(exception.ToString());
+            }
         }
     }
 

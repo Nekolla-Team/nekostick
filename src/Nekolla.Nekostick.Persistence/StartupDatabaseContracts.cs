@@ -25,9 +25,11 @@ public sealed record StartupDatabaseError
 {
     /// <summary>Creates a safe startup database error.</summary>
     /// <param name="code">The stable failure category.</param>
-    public StartupDatabaseError(StartupDatabaseErrorCode code)
+    /// <param name="detail">The optional operator-facing diagnostic detail, or <see langword="null"/>.</param>
+    public StartupDatabaseError(StartupDatabaseErrorCode code, string? detail = null)
     {
         Code = code;
+        Detail = string.IsNullOrWhiteSpace(detail) ? null : detail;
         Message = code switch
         {
             StartupDatabaseErrorCode.AdvisoryLockUnavailable => "The database migration lock is unavailable.",
@@ -43,6 +45,9 @@ public sealed record StartupDatabaseError
 
     /// <summary>Gets the fixed safe message.</summary>
     public string Message { get; }
+
+    /// <summary>Gets the optional diagnostic detail for stderr output.</summary>
+    public string? Detail { get; }
 }
 
 /// <summary>Contains a safe migration and validation result.</summary>
@@ -67,9 +72,10 @@ public sealed class StartupDatabaseResult
 
     /// <summary>Creates a failed result.</summary>
     /// <param name="code">The safe failure category.</param>
+    /// <param name="detail">The optional operator-facing diagnostic detail.</param>
     /// <returns>A failed startup result.</returns>
-    public static StartupDatabaseResult Failure(StartupDatabaseErrorCode code) =>
-        new(new StartupDatabaseError(code));
+    public static StartupDatabaseResult Failure(StartupDatabaseErrorCode code, string? detail = null) =>
+        new(new StartupDatabaseError(code, detail));
 }
 
 /// <summary>Contains the result of checking the required PostgreSQL schema.</summary>

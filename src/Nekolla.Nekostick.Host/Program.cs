@@ -69,14 +69,16 @@ internal static class Program
 
             return 0;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             if (diagnosticCommand is { } failedDiagnosticCommand)
             {
+                Console.Error.WriteLine(exception.ToString());
                 return WriteDiagnosticFailure(failedDiagnosticCommand);
             }
 
             Console.Error.WriteLine($"HOST_EVENT {HostEventIds.HostStartupFailed.Id}: {HostStartupFailureMessage}");
+            Console.Error.WriteLine(exception.ToString());
             return 1;
         }
         finally
@@ -100,7 +102,10 @@ internal static class Program
         if (!inspection.Migration.IsSuccess)
         {
             var error = inspection.Migration.Error!;
-
+            if (error.Detail is { } detail)
+            {
+                Console.Error.WriteLine(detail);
+            }
             if (command.Kind == CliCommandKind.Status)
             {
                 var report = CreateStatusFailureReport(error.Code);
@@ -134,6 +139,13 @@ internal static class Program
                 else
                 {
                     HostLogMessages.ConfigurationSnapshotRejected(logger);
+                }
+
+                foreach (var configurationError in snapshotResult.Errors)
+                {
+                    Console.Error.WriteLine(
+                        $"HOST_EVENT {HostEventIds.ConfigurationSnapshotRejected.Id}: " +
+                        $"{configurationError.Code}: {configurationError.Message}");
                 }
 
                 return 1;

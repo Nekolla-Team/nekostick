@@ -62,17 +62,23 @@ public sealed class PostgresMigrationCoordinator : IStartupDatabaseProbe
         {
             throw;
         }
-        catch (PostgresException)
+        catch (PostgresException exception)
         {
-            return StartupDatabaseResult.Failure(StartupDatabaseErrorCode.MigrationFailed);
+            return StartupDatabaseResult.Failure(
+                StartupDatabaseErrorCode.MigrationFailed,
+                exception.ToString());
         }
-        catch (DbException)
+        catch (DbException exception)
         {
-            return StartupDatabaseResult.Failure(StartupDatabaseErrorCode.AdvisoryLockUnavailable);
+            return StartupDatabaseResult.Failure(
+                StartupDatabaseErrorCode.AdvisoryLockUnavailable,
+                exception.ToString());
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            return StartupDatabaseResult.Failure(StartupDatabaseErrorCode.MigrationFailed);
+            return StartupDatabaseResult.Failure(
+                StartupDatabaseErrorCode.MigrationFailed,
+                exception.ToString());
         }
     }
 }
