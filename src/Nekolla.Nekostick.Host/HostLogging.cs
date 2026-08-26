@@ -128,12 +128,30 @@ internal static partial class HostLogMessages
         RouteTargetType targetType,
         RouteTargetExecutionResult outcome,
         int statusCode);
+
+    [LoggerMessage(
+        EventId = 1015,
+        Level = LogLevel.Information,
+        Message = "Now listening on: {ListenUrl}")]
+    internal static partial void NowListening(ILogger logger, string listenUrl);
+
+    [LoggerMessage(
+        EventId = 1016,
+        Level = LogLevel.Information,
+        Message = "Application started. Press Ctrl+C to shut down.")]
+    internal static partial void ApplicationStarted(ILogger logger);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
 {
+    private readonly LogLevel _minimumLevel;
+
+    /// <summary>Creates the stderr sink with the configured minimum level.</summary>
+    public SafeConsoleLoggerProvider(LogLevel minimumLevel = LogLevel.Information) =>
+        _minimumLevel = minimumLevel;
+
     public ILogger CreateLogger(string categoryName) =>
-        new SafeConsoleLogger(categoryName);
+        new SafeConsoleLogger(categoryName, _minimumLevel);
 
     public void Dispose()
     {
@@ -142,15 +160,23 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
     private sealed class SafeConsoleLogger : ILogger
     {
         private readonly string _categoryName;
+        private readonly LogLevel _minimumLevel;
 
-        public SafeConsoleLogger(string categoryName) => _categoryName = categoryName;
+        public SafeConsoleLogger(string categoryName, LogLevel minimumLevel)
+        {
+            _categoryName = categoryName;
+            _minimumLevel = minimumLevel;
+        }
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull =>
             NullScope.Instance;
-        public bool IsEnabled(LogLevel logLevel) =>
-            ((_categoryName is HostLoggerCategory.Supervision or HostLoggerCategory.Extensions) && logLevel >= LogLevel.Information) ||
-            (logLevel >= LogLevel.Warning &&
-                (_categoryName is HostLoggerCategory.Startup or HostLoggerCategory.Routing));
+
+        public bool IsEnabled(LogLevel logLevel)
+        {
+            // Category policy is decided by the factory-level filters; the provider only
+            // enforces the configured minimum.
+            return logLevel >= _minimumLevel && logLevel != LogLevel.None;
+        }
 
         public void Log<TState>(
             LogLevel logLevel,

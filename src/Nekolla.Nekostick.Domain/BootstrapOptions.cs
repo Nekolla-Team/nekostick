@@ -15,6 +15,9 @@ public enum BootstrapErrorCode
     /// <summary>The node identifier was empty, too long, or unsafe.</summary>
     InvalidNodeId,
 
+    /// <summary>The requested log level was not a supported name.</summary>
+    InvalidLogLevel,
+
     /// <summary>An option was repeated.</summary>
     DuplicateOption,
 
@@ -52,12 +55,18 @@ public sealed record BootstrapParseError
 /// <summary>Contains the validated startup values required before database access.</summary>
 public sealed record BootstrapOptions
 {
-    private BootstrapOptions(string connectionString, string listenAddress, int listenPort, string nodeId)
+    private BootstrapOptions(
+        string connectionString,
+        string listenAddress,
+        int listenPort,
+        string nodeId,
+        string minimumLevel)
     {
         ConnectionString = connectionString;
         ListenAddress = listenAddress;
         ListenPort = listenPort;
         NodeId = nodeId;
+        MinimumLevel = minimumLevel;
     }
 
     /// <summary>Gets the PostgreSQL connection string. Callers must treat it as secret.</summary>
@@ -72,11 +81,15 @@ public sealed record BootstrapOptions
     /// <summary>Gets the stable node identifier.</summary>
     public string NodeId { get; }
 
+    /// <summary>Gets the canonical minimum log level name accepted by the .NET LogLevel enum.</summary>
+    public string MinimumLevel { get; }
+
     internal static BootstrapOptions CreateValidated(
         string connectionString,
         string listenAddress,
         int listenPort,
-        string nodeId) => new(connectionString, listenAddress, listenPort, nodeId);
+        string nodeId,
+        string minimumLevel) => new(connectionString, listenAddress, listenPort, nodeId, minimumLevel);
 }
 
 /// <summary>Registers bootstrap environment names and safe defaults.</summary>
@@ -94,6 +107,9 @@ public static class BootstrapDefaults
     /// <summary>The environment variable for the node identifier.</summary>
     public const string NodeIdEnvironmentVariable = "NEKOSTICK_NODE_ID";
 
+    /// <summary>The environment variable for the minimum log level.</summary>
+    public const string LogLevelEnvironmentVariable = "NEKOSTICK_LOG_LEVEL";
+
     /// <summary>The CLI option for the database connection string.</summary>
     public const string ConnectionStringOption = "--connection-string";
 
@@ -106,6 +122,9 @@ public static class BootstrapDefaults
     /// <summary>The CLI option for the node identifier.</summary>
     public const string NodeIdOption = "--node-id";
 
+    /// <summary>The CLI option for the minimum log level.</summary>
+    public const string LogLevelOption = "--log-level";
+
     /// <summary>The default loopback listen address.</summary>
     public const string DefaultListenAddress = "127.0.0.1";
 
@@ -114,6 +133,9 @@ public static class BootstrapDefaults
 
     /// <summary>The default single-node identifier.</summary>
     public const string DefaultNodeId = "0";
+
+    /// <summary>The default minimum log level name.</summary>
+    public const string DefaultLogLevel = "Information";
 
     /// <summary>The maximum node identifier length in UTF-16 characters.</summary>
     public const int MaxNodeIdLength = 128;

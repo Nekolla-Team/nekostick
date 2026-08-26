@@ -162,6 +162,14 @@ internal static class Program
 
             app.Services.GetRequiredService<HostRuntimeState>().MarkSnapshotAccepted();
             ConfigureRunPipeline(app);
+            var startupLogger = app.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger(HostLoggerCategory.Startup);
+            var listenUrl = $"http://{options.ListenAddress}:{options.ListenPort}";
+            app.Lifetime.ApplicationStarted.Register(() =>
+            {
+                HostLogMessages.NowListening(startupLogger, listenUrl);
+                HostLogMessages.ApplicationStarted(startupLogger);
+            });
             await app.RunAsync(cancellationToken);
             return 0;
         }
@@ -207,7 +215,20 @@ internal static class Program
         // business settings to this host.
         builder.Configuration.Sources.Clear();
         builder.Logging.ClearProviders();
-        builder.Logging.AddProvider(new SafeConsoleLoggerProvider());
+        var minimumLevel = Enum.TryParse<LogLevel>(
+            command.BootstrapOptions.MinimumLevel, ignoreCase: true, out var parsedLevel)
+            ? parsedLevel
+            : LogLevel.Information;
+
+        // The factory-level filter decides what reaches the provider. Application output
+        // follows the configured level; framework categories stay at Warning unless Debug
+        // or Trace was requested. The startup banner is emitted by the host itself so it
+        // remains visible at Information.
+        builder.Logging.SetMinimumLevel(minimumLevel);
+        var frameworkLevel = minimumLevel <= LogLevel.Debug ? minimumLevel : LogLevel.Warning;
+        builder.Logging.AddFilter("Microsoft", frameworkLevel);
+        builder.Logging.AddFilter("System", frameworkLevel);
+        builder.Logging.AddProvider(new SafeConsoleLoggerProvider(minimumLevel));
         builder.Host.UseConsoleLifetime();
 
         var bootstrap = command.BootstrapOptions;
@@ -436,7 +457,8 @@ internal static class Program
         BootstrapDefaults.ConnectionStringOption or
         BootstrapDefaults.ListenAddressOption or
         BootstrapDefaults.ListenPortOption or
-        BootstrapDefaults.NodeIdOption;
+        BootstrapDefaults.NodeIdOption or
+        BootstrapDefaults.LogLevelOption;
 
     private static Dictionary<string, string?> ReadBootstrapEnvironment() =>
         new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -448,7 +470,9 @@ internal static class Program
             [BootstrapDefaults.ListenPortEnvironmentVariable] =
                 Environment.GetEnvironmentVariable(BootstrapDefaults.ListenPortEnvironmentVariable),
             [BootstrapDefaults.NodeIdEnvironmentVariable] =
-                Environment.GetEnvironmentVariable(BootstrapDefaults.NodeIdEnvironmentVariable)
+                Environment.GetEnvironmentVariable(BootstrapDefaults.NodeIdEnvironmentVariable),
+            [BootstrapDefaults.LogLevelEnvironmentVariable] =
+                Environment.GetEnvironmentVariable(BootstrapDefaults.LogLevelEnvironmentVariable)
         };
 
     private sealed record DatabaseInspection(

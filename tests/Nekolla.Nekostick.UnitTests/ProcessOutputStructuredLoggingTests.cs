@@ -116,16 +116,40 @@ public sealed class ProcessOutputStructuredLoggingTests
     }
 
     [Fact]
-    public void SafeConsoleEnablesInformationOnlyForSupervision()
+    public void SafeConsoleEnforcesConfiguredLevelAcrossCategories()
     {
         using var provider = new SafeConsoleLoggerProvider();
         var supervision = provider.CreateLogger(HostLoggerCategory.Supervision);
         var startup = provider.CreateLogger(HostLoggerCategory.Startup);
+        var framework = provider.CreateLogger("Microsoft.AspNetCore");
 
         Assert.True(supervision.IsEnabled(LogLevel.Information));
         Assert.False(supervision.IsEnabled(LogLevel.Debug));
-        Assert.False(startup.IsEnabled(LogLevel.Information));
+        Assert.True(startup.IsEnabled(LogLevel.Information));
         Assert.True(startup.IsEnabled(LogLevel.Warning));
+        Assert.True(framework.IsEnabled(LogLevel.Information));
+    }
+
+    [Fact]
+    public void SafeConsoleFollowsConfiguredMinimumLevel()
+    {
+        using var debugProvider = new SafeConsoleLoggerProvider(LogLevel.Debug);
+        Assert.True(debugProvider
+            .CreateLogger(HostLoggerCategory.Startup)
+            .IsEnabled(LogLevel.Debug));
+
+        using var warningProvider = new SafeConsoleLoggerProvider(LogLevel.Warning);
+        Assert.False(warningProvider
+            .CreateLogger(HostLoggerCategory.Startup)
+            .IsEnabled(LogLevel.Information));
+        Assert.True(warningProvider
+            .CreateLogger(HostLoggerCategory.Startup)
+            .IsEnabled(LogLevel.Warning));
+
+        using var noneProvider = new SafeConsoleLoggerProvider(LogLevel.None);
+        Assert.False(noneProvider
+            .CreateLogger(HostLoggerCategory.Startup)
+            .IsEnabled(LogLevel.Critical));
     }
 
     private static void AssertLine(

@@ -124,7 +124,8 @@ public static class CliCommandParser
         BootstrapDefaults.ConnectionStringOption,
         BootstrapDefaults.ListenAddressOption,
         BootstrapDefaults.ListenPortOption,
-        BootstrapDefaults.NodeIdOption
+        BootstrapDefaults.NodeIdOption,
+        BootstrapDefaults.LogLevelOption
     ];
 
     /// <summary>Parses arguments against an explicit environment map.</summary>
@@ -239,7 +240,15 @@ public static class CliCommandParser
             return Failure(BootstrapErrorCode.InvalidNodeId, "The node identifier is invalid.");
         }
 
-        var options = BootstrapOptions.CreateValidated(connectionString, listenAddress, listenPort, nodeId);
+        var logLevel = Resolve(optionValues, environment, BootstrapDefaults.LogLevelOption,
+            BootstrapDefaults.LogLevelEnvironmentVariable) ?? BootstrapDefaults.DefaultLogLevel;
+        if (!TryNormalizeLogLevel(logLevel, out var normalizedLogLevel))
+        {
+            return Failure(BootstrapErrorCode.InvalidLogLevel, "The log level is invalid.");
+        }
+
+        var options = BootstrapOptions.CreateValidated(
+            connectionString, listenAddress, listenPort, nodeId, normalizedLogLevel);
         var runOptions = new RunOptions(
             flags.Contains("--skip-extensions"),
             flags.Contains("--disable-supervisor"),
@@ -294,6 +303,31 @@ public static class CliCommandParser
 
     private static bool IsValidNodeId(string? value) =>
         IsSafeText(value) && value!.Length <= BootstrapDefaults.MaxNodeIdLength;
+
+    private static bool TryNormalizeLogLevel(string? value, out string normalized)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            normalized = string.Empty;
+            return false;
+        }
+
+        normalized = value.Trim() switch
+        {
+            var text when text.Equals("trace", StringComparison.OrdinalIgnoreCase) => "Trace",
+            var text when text.Equals("debug", StringComparison.OrdinalIgnoreCase) => "Debug",
+            var text when text.Equals("information", StringComparison.OrdinalIgnoreCase) ||
+                text.Equals("info", StringComparison.OrdinalIgnoreCase) => "Information",
+            var text when text.Equals("warning", StringComparison.OrdinalIgnoreCase) ||
+                text.Equals("warn", StringComparison.OrdinalIgnoreCase) => "Warning",
+            var text when text.Equals("error", StringComparison.OrdinalIgnoreCase) => "Error",
+            var text when text.Equals("critical", StringComparison.OrdinalIgnoreCase) => "Critical",
+            var text when text.Equals("none", StringComparison.OrdinalIgnoreCase) => "None",
+            _ => string.Empty
+        };
+        return normalized.Length > 0;
+    }
+
 
     private static CliParseResult Failure(BootstrapErrorCode code, string message) =>
         CliParseResult.Failure(new BootstrapParseError(code, message));
