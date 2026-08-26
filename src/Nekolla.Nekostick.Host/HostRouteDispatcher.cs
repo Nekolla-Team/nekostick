@@ -145,8 +145,9 @@ internal sealed partial class HostRouteDispatcher
         {
             return;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.GlobalAdmission");
             await WriteResponseAsync(
                 context,
                 StatusCodes.Status503ServiceUnavailable,
@@ -186,8 +187,9 @@ internal sealed partial class HostRouteDispatcher
                     context.Request.Method);
                 result = snapshot.Matcher.Match(input);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.Match");
                 await WriteResponseAsync(
                     context,
                     StatusCodes.Status503ServiceUnavailable,
@@ -258,8 +260,9 @@ internal sealed partial class HostRouteDispatcher
         {
             return;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.RouteAdmission");
             await WriteResponseAsync(context, StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage);
             return;
         }
@@ -289,8 +292,9 @@ internal sealed partial class HostRouteDispatcher
                 admissionContext,
                 routeConfiguration);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.RequestPreparation");
             await WriteResponseAsync(context, StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage);
             return;
         }
@@ -339,6 +343,7 @@ internal sealed partial class HostRouteDispatcher
             }
             catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.TargetExecution");
                 if (!context.Response.HasStarted &&
                     HostRequestAdmission.TryGetProtocolFailure(exception) is { } protocolFailure)
                 {

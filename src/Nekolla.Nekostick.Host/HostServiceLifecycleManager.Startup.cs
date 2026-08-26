@@ -61,6 +61,7 @@ public sealed partial class HostServiceLifecycleManager
             {
                 if (!IsStopping)
                 {
+                    HostLogMessages.ServiceLaunchRejected(_logger, service.Id, snapshot.Version);
                     PublishServiceState(service.Id, snapshot.Version, "unavailable");
                 }
 
@@ -93,6 +94,7 @@ public sealed partial class HostServiceLifecycleManager
             }
 
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
+            HostLogMessages.ServiceReady(_logger, service.Id, candidate.SnapshotVersion);
             PublishServiceState(service.Id, candidate.SnapshotVersion, "ready");
             if (old is not null && !ReferenceEquals(old, candidate))
             {
@@ -113,8 +115,10 @@ public sealed partial class HostServiceLifecycleManager
         {
             return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StartOrSwitchAsync));
+            HostLogMessages.ServiceLaunchRejected(_logger, service.Id, snapshot.Version);
             PublishServiceState(service.Id, snapshot.Version, "unavailable");
             return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
         }
@@ -153,12 +157,9 @@ public sealed partial class HostServiceLifecycleManager
                 PortLeaseIntent.Acquire(request),
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (Exception exception)
         {
-            return null;
-        }
-        catch
-        {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
             _runtimeState.MarkDatabaseUnavailable();
             return null;
         }
@@ -196,8 +197,9 @@ public sealed partial class HostServiceLifecycleManager
                     supervisor = CreateSupervisor(service, acquired.Port, acquired, now);
                     startTask = supervisor.StartAsync(now, _shutdownCts.Token).AsTask();
                 }
-                catch
+                catch (Exception exception)
                 {
+                    HostLogMessages.FailureDetails(_logger, exception, nameof(CreateSupervisor));
                     startTask = null;
                 }
             }
@@ -220,8 +222,9 @@ public sealed partial class HostServiceLifecycleManager
         {
             started = await startTask.ConfigureAwait(false);
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
             await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
             return null;
         }

@@ -25,17 +25,29 @@ internal static class MicroserviceProxyTelemetry
             AttemptFailedEvent,
             "Proxy attempt failed. RouteId: {RouteId}. ServiceId: {ServiceId}. Attempt: {Attempt}. FailureStage: {FailureStage}. ElapsedMilliseconds: {ElapsedMilliseconds}.");
 
+    private static readonly Action<ILogger, Guid?, Guid, int, MicroserviceProxyFailureStage, long, Exception?> LogAttemptDetails =
+        LoggerMessage.Define<Guid?, Guid, int, MicroserviceProxyFailureStage, long>(
+            LogLevel.Debug,
+            new EventId(2002, "ProxyAttemptFailureDetails"),
+            "Proxy attempt failure details. RouteId: {RouteId}. ServiceId: {ServiceId}. Attempt: {Attempt}. FailureStage: {FailureStage}. ElapsedMilliseconds: {ElapsedMilliseconds}.");
+
     internal static void AttemptFailed(
         ILogger logger,
         Guid? routeId,
         Guid serviceId,
         int attempt,
         MicroserviceProxyFailureStage stage,
-        long elapsedMilliseconds)
+        long elapsedMilliseconds,
+        Exception? exception = null)
     {
         if (logger.IsEnabled(LogLevel.Warning))
         {
             LogAttempt(logger, routeId, serviceId, attempt, stage, elapsedMilliseconds, null);
+        }
+
+        if (exception is not null && logger.IsEnabled(LogLevel.Debug))
+        {
+            LogAttemptDetails(logger, routeId, serviceId, attempt, stage, elapsedMilliseconds, exception);
         }
     }
 }

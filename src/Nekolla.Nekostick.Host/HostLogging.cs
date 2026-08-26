@@ -130,6 +130,69 @@ internal static partial class HostLogMessages
         int statusCode);
 
     [LoggerMessage(
+        EventId = 1099,
+        Level = LogLevel.Debug,
+        Message = "Failure details. Operation: {Operation}.")]
+    internal static partial void FailureDetails(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1101,
+        Level = LogLevel.Information,
+        Message = "Service launch accepted. ServiceId: {ServiceId}. InstanceId: {InstanceId}. ProcessId: {ProcessId}.")]
+    internal static partial void ServiceLaunchAccepted(ILogger logger, Guid serviceId, Guid instanceId, int processId);
+
+    [LoggerMessage(
+        EventId = 1102,
+        Level = LogLevel.Warning,
+        Message = "Service startup failed. ServiceId: {ServiceId}. Version: {Version}.")]
+    internal static partial void ServiceLaunchRejected(ILogger logger, Guid serviceId, long version);
+
+    [LoggerMessage(
+        EventId = 1103,
+        Level = LogLevel.Information,
+        Message = "Service ready. ServiceId: {ServiceId}. Version: {Version}.")]
+    internal static partial void ServiceReady(ILogger logger, Guid serviceId, long version);
+
+    [LoggerMessage(
+        EventId = 1104,
+        Level = LogLevel.Information,
+        Message = "Service process exited successfully. ServiceId: {ServiceId}.")]
+    internal static partial void ServiceExitedSuccessfully(ILogger logger, Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 1105,
+        Level = LogLevel.Warning,
+        Message = "Service process exited unexpectedly. ServiceId: {ServiceId}.")]
+    internal static partial void ServiceExitedUnexpectedly(ILogger logger, Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 1106,
+        Level = LogLevel.Information,
+        Message = "Service stopped. ServiceId: {ServiceId}.")]
+    internal static partial void ServiceStopped(ILogger logger, Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 1107,
+        Level = LogLevel.Warning,
+        Message = "Service restart scheduled. ServiceId: {ServiceId}.")]
+    internal static partial void ServiceRestartScheduled(ILogger logger, Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 1108,
+        Level = LogLevel.Information,
+        Message = "Node registered. NodeId: {NodeId}.")]
+    internal static partial void NodeRegistered(ILogger logger, string nodeId);
+
+    [LoggerMessage(
+        EventId = 1109,
+        Level = LogLevel.Information,
+        Message = "Configuration snapshot applied. Version: {Version}.")]
+    internal static partial void ConfigurationSnapshotApplied(ILogger logger, long version);
+
+    [LoggerMessage(
         EventId = 1015,
         Level = LogLevel.Information,
         Message = "Now listening on: {ListenUrl}")]

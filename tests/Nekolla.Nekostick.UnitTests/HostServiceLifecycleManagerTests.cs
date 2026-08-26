@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Extensions;
@@ -116,6 +117,7 @@ public sealed class HostServiceLifecycleManagerTests
             endpointPublisher,
             runtimeState,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance,
             extensions);
 
         var ready = await manager.EnsureReadyAsync(
@@ -159,7 +161,8 @@ public sealed class HostServiceLifecycleManagerTests
             holder,
             publisher,
             runtime,
-            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false));
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance);
 
         var ready = await manager.EnsureReadyAsync(snapshot, service.Id, TestContext.Current.CancellationToken);
         Assert.Equal(HostServiceReadinessStatus.Ready, ready.Status);
@@ -375,7 +378,8 @@ public sealed class HostServiceLifecycleManagerTests
             holder,
             publisher,
             runtime,
-            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false));
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance);
     }
 
     private static HostRuntimeState CreateRuntimeState(

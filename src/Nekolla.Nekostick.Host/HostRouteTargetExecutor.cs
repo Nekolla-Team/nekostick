@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Http;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Proxy;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Routing;
 
 namespace Nekolla.Nekostick.Host;
@@ -11,14 +13,17 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
 {
     private readonly MicroserviceHttpExecutor _microserviceExecutor;
     private readonly IHostServiceLifecycleCoordinator? _lifecycleCoordinator;
+    private readonly ILogger _logger;
 
     internal HostRouteTargetExecutor(
         MicroserviceHttpExecutor microserviceExecutor,
-        IHostServiceLifecycleCoordinator? lifecycleCoordinator = null)
+        IHostServiceLifecycleCoordinator? lifecycleCoordinator = null,
+        ILogger? logger = null)
     {
         _microserviceExecutor = microserviceExecutor
             ?? throw new ArgumentNullException(nameof(microserviceExecutor));
         _lifecycleCoordinator = lifecycleCoordinator;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public ValueTask<RouteTargetExecutionResult> ExecuteAsync(
@@ -103,8 +108,9 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
 
             return RouteTargetExecutionResult.Cancelled;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteTarget.Execution");
             HostRouteEvents.RestoreResponseBody(context, routeSession);
             if (context.Response.HasStarted)
             {
@@ -115,7 +121,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
         }
     }
 
-    private static async ValueTask<RouteTargetExecutionResult> ExecuteExtensionAsync(
+    private async ValueTask<RouteTargetExecutionResult> ExecuteExtensionAsync(
         HttpContext context,
         HostRoutingSnapshot snapshot,
         string handlerId,
@@ -169,8 +175,9 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
         {
             return RouteTargetExecutionResult.Cancelled;
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteTarget.Extension");
             return RouteTargetExecutionResult.InternalServerError;
         }
         finally

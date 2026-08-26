@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Routing;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
@@ -196,7 +197,8 @@ public sealed class HostDurableStoreOutageTests
             holder,
             publisher,
             runtime,
-            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false));
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance);
         return new Fixture(manager, snapshot, holder, runtime, executor, leaseStore, publisher);
     }
 

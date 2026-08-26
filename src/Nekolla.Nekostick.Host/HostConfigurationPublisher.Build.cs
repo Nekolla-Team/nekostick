@@ -47,8 +47,9 @@ public sealed partial class HostConfigurationPublisher
                 .OrderBy(static path => path, StringComparer.Ordinal)
                 .ToArray();
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.EnumerateExtensions");
             return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, loadedRecords.Count != 0);
         }
 
@@ -56,7 +57,11 @@ public sealed partial class HostConfigurationPublisher
         {
             ManifestDiscoveryResult result;
             try { result = ExtensionManifestDiscovery.Discover(directory); }
-            catch { continue; }
+            catch (Exception exception)
+            {
+                HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.ManifestDiscovery");
+                continue;
+            }
             if (!result.Succeeded || result.Manifest is null) continue;
             var manifest = result.Manifest;
             if (duplicateIds.Contains(manifest.Id)) continue;

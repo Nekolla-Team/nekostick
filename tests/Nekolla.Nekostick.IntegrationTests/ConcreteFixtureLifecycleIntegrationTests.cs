@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Host;
@@ -950,7 +951,8 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
                 holder,
                 publisher,
                 runtimeState,
-                new HostRuntimeOptions("Host=integration-only", nodeId, false));
+                new HostRuntimeOptions("Host=integration-only", nodeId, false),
+                NullLogger<HostServiceLifecycleManager>.Instance);
             await fixture.DisposeAsync().ConfigureAwait(false);
             var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(20));

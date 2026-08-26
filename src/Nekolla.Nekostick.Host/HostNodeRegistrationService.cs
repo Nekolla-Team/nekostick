@@ -47,8 +47,9 @@ public sealed class HostNodeRegistrationService : BackgroundService
                 cancellationToken);
             await base.StartAsync(cancellationToken);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StartAsync));
             await DisposeResourcesAsync();
             throw;
         }
@@ -70,14 +71,16 @@ public sealed class HostNodeRegistrationService : BackgroundService
                 {
                     return;
                 }
-                catch (HostNodeActivityLostException)
+                catch (HostNodeActivityLostException exception)
                 {
+                    HostLogMessages.FailureDetails(_logger, exception, nameof(RegisterOrHeartbeatAsync));
                     _runtimeState.MarkDatabaseUnavailable();
                     HostLogMessages.NodeHeartbeatUnavailable(_logger);
                     return;
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
+                    HostLogMessages.FailureDetails(_logger, exception, nameof(RegisterOrHeartbeatAsync));
                     _runtimeState.MarkDatabaseUnavailable();
                     _dbContext?.ChangeTracker.Clear();
                     HostLogMessages.NodeHeartbeatUnavailable(_logger);
@@ -127,8 +130,10 @@ public sealed class HostNodeRegistrationService : BackgroundService
         var node = await dbContext.Nodes
             .SingleOrDefaultAsync(value => value.NodeId == _options.NodeId, cancellationToken);
         var now = DateTimeOffset.UtcNow;
+        var registered = false;
         if (node is null)
         {
+            registered = true;
             node = new Node
             {
                 Id = Guid.CreateVersion7(),
@@ -154,6 +159,10 @@ public sealed class HostNodeRegistrationService : BackgroundService
         await transaction.CommitAsync(cancellationToken);
         await _activityLease.EnsureHeldAsync(cancellationToken);
         _runtimeState.MarkDatabaseAvailable();
+        if (registered)
+        {
+            HostLogMessages.NodeRegistered(_logger, _options.NodeId);
+        }
     }
 
     private async ValueTask DisposeResourcesAsync()

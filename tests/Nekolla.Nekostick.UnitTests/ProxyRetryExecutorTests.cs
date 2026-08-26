@@ -198,8 +198,8 @@ public sealed class ProxyRetryExecutorTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(MicroserviceProxyExecutionDisposition.BadGateway, result.Disposition);
-        var entry = Assert.Single(logger.Entries);
-        Assert.Equal(2001, entry.EventId.Id);
+        var entry = Assert.Single(logger.Entries, value => value.EventId.Id == 2001);
+        var detail = Assert.Single(logger.Entries, value => value.EventId.Id == 2002);
         Assert.Equal(routeId, entry.Fields["RouteId"]);
         Assert.Equal(ServiceId, entry.Fields["ServiceId"]);
         Assert.Equal(1, entry.Fields["Attempt"]);
@@ -207,6 +207,12 @@ public sealed class ProxyRetryExecutorTests
         Assert.DoesNotContain(
             sensitive,
             string.Join("|", entry.Fields.Values.Select(value => value?.ToString())),
+            StringComparison.Ordinal);
+        Assert.NotNull(detail.Message);
+        Assert.DoesNotContain(sensitive, detail.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            sensitive,
+            string.Join("|", detail.Fields.Values.Select(value => value?.ToString())),
             StringComparison.Ordinal);
     }
 

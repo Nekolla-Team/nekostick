@@ -26,15 +26,31 @@ public sealed partial class ExtensionRuntimeManager
         var loaded = _loader.Load(manifest);
         if (!loaded.Succeeded || loaded.Handle is null)
         {
+            var loadFailureCode = loaded.FailureCode.ToString();
+            if (_logger is { } loadLogger)
+            {
+                if (loaded.Exception is not null)
+                {
+                    ExtensionLogMessages.ExtensionFailureDetails(
+                        loadLogger,
+                        loaded.Exception,
+                        manifest.Id,
+                        loadFailureCode);
+                }
+
+                ExtensionLogMessages.ExtensionCandidateFailed(loadLogger, manifest.Id, loadFailureCode);
+            }
+
             return CandidateResult.Failure(loaded.FailureCode);
         }
 
+        var loadedHandle = loaded.Handle;
         ExtensionInstance? instance = null;
         try
         {
             instance = new ExtensionInstance(
                 manifest,
-                loaded.Handle,
+                loadedHandle,
                 _hostApiVersion,
                 settings,
                 ResolveContractProvider,
@@ -51,12 +67,17 @@ public sealed partial class ExtensionRuntimeManager
             if (!await instance.StartAsync(reloading, LifecycleTimeout, cancellationToken).ConfigureAwait(false))
             {
                 await instance.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                if (_logger is { } lifecycleLogger)
+                {
+                    ExtensionLogMessages.ExtensionCandidateFailed(lifecycleLogger, manifest.Id, ExtensionFailureCode.LifecycleFailed.ToString());
+                }
+
                 return CandidateResult.Failure(ExtensionFailureCode.LifecycleFailed);
             }
 
             return CandidateResult.Success(instance);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             if (instance is not null)
             {
@@ -65,6 +86,20 @@ public sealed partial class ExtensionRuntimeManager
             else
             {
                 loaded.Handle.Unload();
+            }
+
+            if (_logger is { } constructorLogger)
+            {
+                var failureCode = ExtensionFailureCode.EntryConstructorFailed.ToString();
+                ExtensionLogMessages.ExtensionFailureDetails(
+                    constructorLogger,
+                    exception,
+                    manifest.Id,
+                    failureCode);
+                ExtensionLogMessages.ExtensionCandidateFailed(
+                    constructorLogger,
+                    manifest.Id,
+                    failureCode);
             }
 
             return CandidateResult.Failure(ExtensionFailureCode.EntryConstructorFailed);
@@ -300,7 +335,18 @@ public sealed partial class ExtensionRuntimeManager
 
         instance.MarkServing();
         PublishExtensionState(instance, ExtensionLoadState.Loaded);
+        if (_logger is { } loadedLogger)
+        {
+            var version = instance.Manifest.Version.ToString();
+            ExtensionLogMessages.ExtensionLoaded(
+                loadedLogger,
+                instance.Manifest.Id,
+                version,
+                instance.Handlers.Count,
+                instance.Fallback is not null);
+        }
     }
+
     private void PublishExtensionState(ExtensionInstance instance, ExtensionLoadState state)
     {
         try
@@ -368,6 +414,16 @@ public sealed partial class ExtensionRuntimeManager
         ExtensionFailureCode category,
         Exception exception)
     {
+        if (_logger is { } failureLogger && instance is not null)
+        {
+            var failureCode = category.ToString();
+            ExtensionLogMessages.ExtensionFailureDetails(
+                failureLogger,
+                exception,
+                instance.Manifest.Id,
+                failureCode);
+        }
+
         if (instance is null || instance.RecordFailure(category))
         {
             if (instance is not null)
@@ -407,6 +463,15 @@ public sealed partial class ExtensionRuntimeManager
             if (!shouldStop)
             {
                 return;
+            }
+
+            if (_logger is { } failureLogger)
+            {
+                var version = instance.Manifest.Version.ToString();
+                ExtensionLogMessages.ExtensionStoppedAfterFailures(
+                    failureLogger,
+                    instance.Manifest.Id,
+                    version);
             }
 
             await instance.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);

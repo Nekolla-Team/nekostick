@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence;
@@ -21,10 +23,16 @@ public interface IHostConfigurationSnapshotReader
 public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapshotReader
 {
     private readonly IDbContextFactory<NekostickDbContext> _dbContextFactory;
+    private readonly ILogger<EfHostConfigurationSnapshotReader> _logger;
 
     /// <summary>Creates a complete snapshot reader.</summary>
-    public EfHostConfigurationSnapshotReader(IDbContextFactory<NekostickDbContext> dbContextFactory) =>
+    public EfHostConfigurationSnapshotReader(
+        IDbContextFactory<NekostickDbContext> dbContextFactory,
+        ILogger<EfHostConfigurationSnapshotReader>? logger = null)
+    {
         _dbContextFactory = dbContextFactory ?? throw new ArgumentNullException(nameof(dbContextFactory));
+        _logger = logger ?? NullLogger<EfHostConfigurationSnapshotReader>.Instance;
+    }
 
     /// <inheritdoc />
     public async Task<ConfigurationReadResult<HostConfigurationSnapshot>> ReadCompleteAsync(
@@ -71,8 +79,9 @@ public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapsh
                     : ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                         new ConfigurationError(ConfigurationErrorCode.Validation));
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, "ReadComplete.Mapping");
                 return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.Validation));
             }
@@ -81,8 +90,9 @@ public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapsh
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(ReadCompleteAsync));
             return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
         }

@@ -282,6 +282,15 @@ public sealed partial class ExtensionRuntimeManager
             await instance.ReleaseAsync().ConfigureAwait(false);
             instance.MarkStopped();
             PublishExtensionState(instance, ExtensionLoadState.Stopped);
+            if (_logger is { } unloadedLogger)
+            {
+                var version = instance.Manifest.Version.ToString();
+                ExtensionLogMessages.ExtensionUnloaded(
+                    unloadedLogger,
+                    instance.Manifest.Id,
+                    version);
+            }
+
             return stopped
                 ? ExtensionRuntimeOperationResult.Success(instance.GetStatus())
                 : ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.StopFailed, instance.GetStatus());

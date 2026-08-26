@@ -8,5 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="../Nekolla.Nekostick.Contracts/Nekolla.Nekostick.Contracts.csproj" />
     <PackageReference Include="YamlDotNet" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 </Project>

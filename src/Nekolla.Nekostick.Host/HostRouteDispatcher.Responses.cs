@@ -16,7 +16,7 @@ internal sealed partial class HostRouteDispatcher
         await WriteResponseAsync(context, failure.StatusCode, failure.Message, failure.RetryAfterSeconds);
     }
 
-    private static async Task<bool> WriteResponseAsync(
+    private async Task<bool> WriteResponseAsync(
         HttpContext context,
         int statusCode,
         string message,
@@ -51,8 +51,9 @@ internal sealed partial class HostRouteDispatcher
 
             return false;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.ResponseWrite");
             if (context.Response.HasStarted)
             {
                 context.Abort();

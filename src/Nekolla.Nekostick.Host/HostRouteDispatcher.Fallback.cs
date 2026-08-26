@@ -23,6 +23,7 @@ internal sealed partial class HostRouteDispatcher
         }
         catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.DrainRequestBody");
             var failure = admissionContext.Failure ?? HostRequestAdmission.TryGetProtocolFailure(exception);
             if (failure is not null)
             {
@@ -51,8 +52,9 @@ internal sealed partial class HostRouteDispatcher
         {
             preparation = _admission.PrepareRequest(publicationLease.Snapshot, context, admissionContext);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.FallbackPreparation");
             await WriteResponseAsync(context, StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage);
             return;
         }
@@ -121,8 +123,9 @@ internal sealed partial class HostRouteDispatcher
 
             return false;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.Fallback");
             if (context.Response.HasStarted)
             {
                 context.Abort();

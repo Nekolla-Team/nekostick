@@ -120,6 +120,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
+            HostLogMessages.ConfigurationSnapshotApplied(_logger, snapshot.Version);
             PublishSnapshotEvents(snapshot, previousSnapshot?.Configuration);
             return true;
         }
@@ -127,8 +128,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(PublishAsync));
             HostLogMessages.ConfigurationSnapshotRejected(_logger);
             return false;
         }
@@ -212,8 +214,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(ReadServiceOwnersAsync));
             return ImmutableDictionary<Guid, string?>.Empty;
         }
     }
@@ -246,8 +249,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(ReadRouteOwnersAsync));
             return ImmutableDictionary<Guid, string?>.Empty;
         }
     }

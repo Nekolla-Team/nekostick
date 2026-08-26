@@ -250,14 +250,20 @@ internal static class Program
         builder.Services.AddSingleton<ExtensionRuntimeManager>(serviceProvider =>
             new ExtensionRuntimeManager(
                 HostApiVersion.Current,
-                capabilityFactory: serviceProvider.GetService<IExtensionCapabilityFactory>()));
+                capabilityFactory: serviceProvider.GetService<IExtensionCapabilityFactory>(),
+                logger: serviceProvider
+                    .GetRequiredService<ILoggerFactory>()
+                    .CreateLogger(HostLoggerCategory.Extensions)));
         builder.Services.AddSingleton<HostConfigurationPublisher>();
         builder.Services.AddSingleton<IRouteFallbackDispatcher, ExtensionRouteFallbackDispatcher>();
         builder.Services.AddMicroserviceProxy();
         builder.Services.AddSingleton<IRouteTargetExecutor>(serviceProvider =>
             new HostRouteTargetExecutor(
                 serviceProvider.GetRequiredService<MicroserviceHttpExecutor>(),
-                serviceProvider.GetService<IHostServiceLifecycleCoordinator>()));
+                serviceProvider.GetService<IHostServiceLifecycleCoordinator>(),
+                serviceProvider
+                    .GetRequiredService<ILoggerFactory>()
+                    .CreateLogger(HostLoggerCategory.Routing)));
         builder.Services.AddSingleton<HostRouteDispatcher>(serviceProvider =>
             new HostRouteDispatcher(
                 serviceProvider.GetRequiredService<IHostRoutingSnapshotAccessor>(),
@@ -320,7 +326,8 @@ internal static class Program
                 builder.Services.AddSingleton<HostPortLeaseStoreAdapter>(serviceProvider =>
                     new HostPortLeaseStoreAdapter(
                         serviceProvider.GetRequiredService<IDbContextFactory<NekostickDbContext>>(),
-                        serviceProvider.GetRequiredService<HostRuntimeState>()));
+                        serviceProvider.GetRequiredService<HostRuntimeState>(),
+                        serviceProvider.GetRequiredService<ILogger<HostPortLeaseStoreAdapter>>()));
                 builder.Services.AddSingleton<HostServiceLifecycleManager>(serviceProvider =>
                     new HostServiceLifecycleManager(
                         serviceProvider.GetRequiredService<IProcessExecutor>(),
@@ -330,6 +337,7 @@ internal static class Program
                         serviceProvider.GetRequiredService<HostServiceEndpointSnapshotPublisher>(),
                         serviceProvider.GetRequiredService<HostRuntimeState>(),
                         serviceProvider.GetRequiredService<HostRuntimeOptions>(),
+                        serviceProvider.GetRequiredService<ILogger<HostServiceLifecycleManager>>(),
                         serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
                 builder.Services.AddSingleton<IPortLeaseStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());

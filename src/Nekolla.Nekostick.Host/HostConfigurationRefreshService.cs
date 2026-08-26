@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence;
@@ -19,12 +20,17 @@ public sealed class PostgresConfigurationChangeSignal : IConfigurationChangeSign
 {
     private readonly HostRuntimeOptions _options;
     private readonly HostRuntimeState? _runtimeState;
+    private readonly ILogger<PostgresConfigurationChangeSignal> _logger;
 
     /// <summary>Creates a PostgreSQL notification listener.</summary>
-    public PostgresConfigurationChangeSignal(HostRuntimeOptions options, HostRuntimeState? runtimeState = null)
+    public PostgresConfigurationChangeSignal(
+        HostRuntimeOptions options,
+        HostRuntimeState? runtimeState = null,
+        ILogger<PostgresConfigurationChangeSignal>? logger = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _runtimeState = runtimeState;
+        _logger = logger ?? NullLogger<PostgresConfigurationChangeSignal>.Instance;
     }
 
     /// <inheritdoc />
@@ -49,8 +55,9 @@ public sealed class PostgresConfigurationChangeSignal : IConfigurationChangeSign
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(PostgresConfigurationChangeSignal.WaitForHintAsync));
                 _runtimeState?.MarkDatabaseUnavailable();
                 var delay = HostRetryPolicy.GetDelay(
                     _options.ReconnectInitialDelay,
@@ -119,8 +126,9 @@ public sealed class HostConfigurationRefreshService : BackgroundService
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(PollLoopAsync));
                 _runtimeState.MarkDatabaseUnavailable();
                 HostLogMessages.ConfigurationRefreshUnavailable(_logger);
             }
@@ -140,8 +148,9 @@ public sealed class HostConfigurationRefreshService : BackgroundService
             {
                 return;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(HintLoopAsync));
                 _runtimeState.MarkDatabaseUnavailable();
                 HostLogMessages.ConfigurationRefreshUnavailable(_logger);
             }

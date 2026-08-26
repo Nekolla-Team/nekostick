@@ -247,8 +247,16 @@ public sealed partial class MicroserviceHttpExecutor
         {
             return ResultForCancellation(cancellationScope.FirstCause);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            MicroserviceProxyTelemetry.AttemptFailed(
+                _logger,
+                request.RouteId,
+                request.ServiceId,
+                attempt: 0,
+                MicroserviceProxyFailureStage.Unknown,
+                elapsedMilliseconds: 0,
+                exception);
             return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.Unavailable);
         }
 
@@ -298,7 +306,7 @@ public sealed partial class MicroserviceHttpExecutor
                             error,
                             errorFeature?.Exception,
                             retryPolicy);
-                    LogFailure(request, attempt, failureStage, startedAt);
+                    LogFailure(request, attempt, failureStage, startedAt, errorFeature?.Exception);
                     if (!canRetry)
                     {
                         return MapForwarderError(error, cancellationScope.FirstCause);
@@ -311,9 +319,9 @@ public sealed partial class MicroserviceHttpExecutor
                 {
                     return ResultForCancellation(cancellationScope.FirstCause);
                 }
-                catch (InvalidOperationException)
+                catch (InvalidOperationException exception)
                 {
-                    LogFailure(request, attempt, MicroserviceProxyFailureStage.Request, startedAt);
+                    LogFailure(request, attempt, MicroserviceProxyFailureStage.Request, startedAt, exception);
                     return MicroserviceProxyExecutionResult.For(
                         MicroserviceProxyExecutionDisposition.BadRequest);
                 }
@@ -325,7 +333,7 @@ public sealed partial class MicroserviceHttpExecutor
                         && cancellationScope.FirstCause == MicroserviceCancellationCause.None
                         && attempt <= retryPolicy.MaxRetries
                         && IsRetryableException(exception, retryPolicy);
-                    LogFailure(request, attempt, failureStage, startedAt);
+                    LogFailure(request, attempt, failureStage, startedAt, exception);
                     if (!canRetry)
                     {
                         return MicroserviceProxyExecutionResult.For(

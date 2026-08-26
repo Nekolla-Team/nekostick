@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
@@ -902,7 +903,8 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                         snapshotHolder,
                         endpointPublisher,
                         runtimeState,
-                        runtimeOptions);
+                        runtimeOptions,
+                        provider.GetRequiredService<ILogger<HostServiceLifecycleManager>>());
                     return manager;
                 });
                 serviceCollection.AddSingleton<ExtensionRuntimeManager>(provider =>

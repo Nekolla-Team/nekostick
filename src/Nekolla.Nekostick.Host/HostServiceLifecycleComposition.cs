@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Extensions;
@@ -86,6 +87,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly HostRuntimeState _runtimeState;
     private readonly HostRuntimeOptions _options;
     private readonly ExtensionRuntimeManager? _runtimeManager;
+    private readonly ILogger _logger;
     private readonly NodeIdentifier _nodeId;
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
@@ -102,6 +104,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         HostServiceEndpointSnapshotPublisher endpointPublisher,
         HostRuntimeState runtimeState,
         HostRuntimeOptions options,
+        ILogger<HostServiceLifecycleManager> logger,
         ExtensionRuntimeManager? runtimeManager = null)
     {
         _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
@@ -112,6 +115,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _runtimeManager = runtimeManager;
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _nodeId = new NodeIdentifier(options.NodeId);
         if (processExecutor is IProcessExitObserver observer)
         {

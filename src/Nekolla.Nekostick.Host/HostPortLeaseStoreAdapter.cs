@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Supervision;
 
@@ -10,21 +12,28 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
     private readonly IPersistencePortLeaseStore? _store;
     private readonly IDbContextFactory<NekostickDbContext>? _dbContextFactory;
     private readonly HostRuntimeState _runtimeState;
+    private readonly ILogger<HostPortLeaseStoreAdapter> _logger;
 
     /// <summary>Creates an adapter over a caller-owned Persistence lease implementation.</summary>
-    public HostPortLeaseStoreAdapter(IPersistencePortLeaseStore store, HostRuntimeState runtimeState)
+    public HostPortLeaseStoreAdapter(
+        IPersistencePortLeaseStore store,
+        HostRuntimeState runtimeState,
+        ILogger<HostPortLeaseStoreAdapter>? logger = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
+        _logger = logger ?? NullLogger<HostPortLeaseStoreAdapter>.Instance;
     }
 
     /// <summary>Creates a singleton-safe adapter that scopes each mutation to one DbContext.</summary>
     public HostPortLeaseStoreAdapter(
         IDbContextFactory<NekostickDbContext> dbContextFactory,
-        HostRuntimeState runtimeState)
+        HostRuntimeState runtimeState,
+        ILogger<HostPortLeaseStoreAdapter>? logger = null)
     {
         _dbContextFactory = dbContextFactory ?? throw new ArgumentNullException(nameof(dbContextFactory));
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
+        _logger = logger ?? NullLogger<HostPortLeaseStoreAdapter>.Instance;
     }
 
     /// <inheritdoc />
@@ -49,8 +58,9 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
         {
             return new PortLeaseOperationResult(PortLeaseOperationStatus.Cancelled);
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(ApplyAsync));
             _runtimeState.MarkDatabaseUnavailable();
             return new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable);
         }
@@ -172,8 +182,9 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
                     lease.ExpiresAt,
                     lease.Version));
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(Map));
             _runtimeState.MarkDatabaseUnavailable();
             return new PortLeaseOperationResult(PortLeaseOperationStatus.Rejected);
         }

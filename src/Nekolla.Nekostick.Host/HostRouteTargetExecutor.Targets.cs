@@ -19,7 +19,7 @@ internal sealed partial class HostRouteTargetExecutor
         "Range"
     ];
 
-    private static async ValueTask<RouteTargetExecutionResult> ExecuteStaticAsync(
+    private async ValueTask<RouteTargetExecutionResult> ExecuteStaticAsync(
         HttpContext context,
         RouteMatch match,
         ExecutableRoute executable,
@@ -70,8 +70,9 @@ internal sealed partial class HostRouteTargetExecutor
 
             return RouteTargetExecutionResult.Cancelled;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteTarget.StaticResponse");
             if (context.Response.HasStarted)
             {
                 context.Abort();
@@ -147,8 +148,9 @@ internal sealed partial class HostRouteTargetExecutor
         {
             return RouteTargetExecutionResult.Cancelled;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, "RouteTarget.Microservice");
             return RouteTargetExecutionResult.SafeFailure;
         }
     }

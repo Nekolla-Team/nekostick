@@ -82,8 +82,9 @@ public sealed partial class HostServiceLifecycleManager
                     new PortLeaseRelease(request.NodeId, request.ServiceId, lease.Port, lease.Version)),
                 CancellationToken.None).ConfigureAwait(false);
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(ReleaseAutomaticLeaseBestEffortAsync));
         }
     }
     private bool IsStopping => Volatile.Read(ref _stopping) != 0;
@@ -118,6 +119,15 @@ public sealed partial class HostServiceLifecycleManager
 
             generation.Ready = false;
         }
+        if (successfulExit)
+        {
+            HostLogMessages.ServiceExitedSuccessfully(_logger, serviceId);
+        }
+        else
+        {
+            HostLogMessages.ServiceExitedUnexpectedly(_logger, serviceId);
+        }
+
         PublishServiceState(
             generation.Configuration.Id,
             generation.SnapshotVersion,
@@ -162,6 +172,7 @@ public sealed partial class HostServiceLifecycleManager
 
         if (!IsStopping)
         {
+            HostLogMessages.ServiceRestartScheduled(_logger, serviceId);
             PublishServiceState(
                 generation.Configuration.Id,
                 generation.SnapshotVersion,
@@ -198,8 +209,9 @@ public sealed partial class HostServiceLifecycleManager
             {
                 return;
             }
-            catch
+            catch (Exception exception)
             {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(ObserveReadyHealthAsync));
                 continue;
             }
 
@@ -284,12 +296,13 @@ public sealed partial class HostServiceLifecycleManager
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
     }
 
-    private static async Task StopGenerationAsync(
+    private async Task StopGenerationAsync(
         ServiceSlot slot,
         ServiceGeneration generation,
         CancellationToken cancellationToken)
     {
         generation.Ready = false;
+        HostLogMessages.ServiceStopped(_logger, generation.Configuration.Id);
         try
         {
             await generation.Supervisor.StopAsync(DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
@@ -297,8 +310,9 @@ public sealed partial class HostServiceLifecycleManager
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StopGenerationAsync));
         }
     }
 

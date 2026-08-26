@@ -63,6 +63,7 @@ public sealed partial class HostServiceLifecycleManager
 
         if (result.Restart is { ShouldRestart: true, NotBefore: { } notBefore } && !IsStopping)
         {
+            HostLogMessages.ServiceRestartScheduled(_logger, generation.Configuration.Id);
             _ = RestartAfterAsync(slot, generation, notBefore, CancellationToken.None);
             PublishServiceState(
                 generation.Configuration.Id,
@@ -167,6 +168,7 @@ public sealed partial class HostServiceLifecycleManager
                 if (!IsStopping)
                 {
                     await PublishReadyEndpointsAsync().ConfigureAwait(false);
+                    HostLogMessages.ServiceReady(_logger, generation.Configuration.Id, generation.SnapshotVersion);
                     PublishServiceState(
                         generation.Configuration.Id,
                         generation.SnapshotVersion,

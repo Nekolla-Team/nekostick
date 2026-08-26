@@ -27,27 +27,34 @@ public sealed class ExtensionLoadResult
     private ExtensionLoadResult(
         bool succeeded,
         ExtensionFailureCode failureCode,
-        ExtensionLoadHandle? handle)
+        ExtensionLoadHandle? handle,
+        Exception? exception)
     {
         Succeeded = succeeded;
         FailureCode = failureCode;
         Handle = handle;
+        Exception = exception;
     }
 
     /// <summary>Gets whether loading succeeded.</summary>
     public bool Succeeded { get; }
 
-    /// <summary>Gets the safe failure category.</summary>
+    /// <summary>Gets the safe load failure category.</summary>
     public ExtensionFailureCode FailureCode { get; }
 
-    /// <summary>Gets the lifecycle handle on success.</summary>
+    /// <summary>Gets the loaded extension handle when successful.</summary>
     public ExtensionLoadHandle? Handle { get; }
 
-    internal static ExtensionLoadResult Success(ExtensionLoadHandle handle) =>
-        new(true, ExtensionFailureCode.None, handle);
+    /// <summary>Gets the original load exception for optional debug diagnostics.</summary>
+    internal Exception? Exception { get; }
 
-    internal static ExtensionLoadResult Failure(ExtensionFailureCode code) =>
-        new(false, code, null);
+    internal static ExtensionLoadResult Success(ExtensionLoadHandle handle) =>
+        new(true, ExtensionFailureCode.None, handle, null);
+
+    internal static ExtensionLoadResult Failure(
+        ExtensionFailureCode code,
+        Exception? exception = null) =>
+        new(false, code, null, exception);
 }
 
 /// <summary>Represents the bounded result of a collectible context unload request.</summary>
@@ -344,15 +351,15 @@ public sealed class CollectibleExtensionLoader
             loadContext = null;
             return ExtensionLoadResult.Success(handle);
         }
-        catch (ContractsIdentityException)
+        catch (ContractsIdentityException exception)
         {
             loadContext?.Unload();
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractsIdentityMismatch);
+            return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractsIdentityMismatch, exception);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             loadContext?.Unload();
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.LoadFailed);
+            return ExtensionLoadResult.Failure(ExtensionFailureCode.LoadFailed, exception);
         }
     }
 }

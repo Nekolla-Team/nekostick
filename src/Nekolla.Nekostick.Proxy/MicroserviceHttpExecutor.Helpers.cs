@@ -140,7 +140,8 @@ public sealed partial class MicroserviceHttpExecutor
         MicroserviceProxyRequest request,
         int attempt,
         MicroserviceProxyFailureStage stage,
-        long startedAt)
+        long startedAt,
+        Exception? exception = null)
     {
         var elapsed = Math.Max(0, (long)Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
         MicroserviceProxyTelemetry.AttemptFailed(
@@ -149,7 +150,8 @@ public sealed partial class MicroserviceHttpExecutor
             request.ServiceId,
             attempt,
             stage,
-            elapsed);
+            elapsed,
+            exception);
     }
 
     internal static MicroserviceProxyExecutionResult MapForwarderError(
