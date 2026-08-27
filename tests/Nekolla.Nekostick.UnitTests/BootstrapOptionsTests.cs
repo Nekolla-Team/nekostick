@@ -21,6 +21,7 @@ public sealed class BootstrapOptionsTests
         Assert.False(result.Command.RunOptions.SkipExtensions);
         Assert.False(result.Command.RunOptions.DisableSupervisor);
         Assert.False(result.Command.RunOptions.ReadOnly);
+        Assert.False(result.Command.BootstrapOptions.IncludeEfLogs);
     }
 
     [Fact]
@@ -82,6 +83,7 @@ public sealed class BootstrapOptionsTests
         Assert.Equal("192.0.2.10", result.Options.ListenAddress);
         Assert.Equal(9001, result.Options.ListenPort);
         Assert.Equal("environment-node", result.Options.NodeId);
+        Assert.False(result.Options!.IncludeEfLogs);
     }
 
     [Theory]
@@ -148,6 +150,72 @@ public sealed class BootstrapOptionsTests
         Assert.Equal(BootstrapDefaults.DefaultListenAddress, result.Options!.ListenAddress);
         Assert.Equal(BootstrapDefaults.DefaultListenPort, result.Options.ListenPort);
         Assert.Equal(BootstrapDefaults.DefaultNodeId, result.Options.NodeId);
+    }
+    [Fact]
+    public void IncludeEfLogsDefaultsToDisabled()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>());
+
+        Assert.True(result.IsSuccess);
+        Assert.False(result.Options!.IncludeEfLogs);
+    }
+
+    [Fact]
+    public void IncludeEfLogsCanBeEnabledByCliSwitch()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret", "--include-ef-logs"],
+            new Dictionary<string, string?>());
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.Options!.IncludeEfLogs);
+    }
+
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("TRUE", true)]
+    [InlineData("false", false)]
+    public void IncludeEfLogsCanBeConfiguredByEnvironment(string value, bool expected)
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.IncludeEfLogsEnvironmentVariable] = value
+            });
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(expected, result.Options!.IncludeEfLogs);
+    }
+
+    [Fact]
+    public void InvalidIncludeEfLogsEnvironmentValueIsRejected()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.IncludeEfLogsEnvironmentVariable] = "sometimes"
+            });
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(BootstrapErrorCode.InvalidIncludeEfLogs, result.Error!.Code);
+    }
+
+    [Fact]
+    public void CliIncludeEfLogsSwitchTakesPrecedenceOverInvalidEnvironmentValue()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret", "--include-ef-logs"],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.IncludeEfLogsEnvironmentVariable] = "sometimes"
+            });
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.Options!.IncludeEfLogs);
     }
 
     [Fact]

@@ -18,6 +18,7 @@ public enum BootstrapErrorCode
     /// <summary>The requested log level was not a supported name.</summary>
     InvalidLogLevel,
 
+
     /// <summary>An option was repeated.</summary>
     DuplicateOption,
 
@@ -28,7 +29,10 @@ public enum BootstrapErrorCode
     UnsupportedArgument,
 
     /// <summary>The argument collection was invalid.</summary>
-    InvalidArguments
+    InvalidArguments,
+
+    /// <summary>The EF log inclusion switch was not a supported Boolean value.</summary>
+    InvalidIncludeEfLogs
 }
 
 /// <summary>Contains a bootstrap error without echoing supplied values.</summary>
@@ -60,13 +64,15 @@ public sealed record BootstrapOptions
         string listenAddress,
         int listenPort,
         string nodeId,
-        string minimumLevel)
+        string minimumLevel,
+        bool includeEfLogs)
     {
         ConnectionString = connectionString;
         ListenAddress = listenAddress;
         ListenPort = listenPort;
         NodeId = nodeId;
         MinimumLevel = minimumLevel;
+        IncludeEfLogs = includeEfLogs;
     }
 
     /// <summary>Gets the PostgreSQL connection string. Callers must treat it as secret.</summary>
@@ -83,13 +89,17 @@ public sealed record BootstrapOptions
 
     /// <summary>Gets the canonical minimum log level name accepted by the .NET LogLevel enum.</summary>
     public string MinimumLevel { get; }
+    /// <summary>Gets whether Entity Framework Core logs are included at the configured framework level.</summary>
+    public bool IncludeEfLogs { get; }
 
     internal static BootstrapOptions CreateValidated(
         string connectionString,
         string listenAddress,
         int listenPort,
         string nodeId,
-        string minimumLevel) => new(connectionString, listenAddress, listenPort, nodeId, minimumLevel);
+        string minimumLevel,
+        bool includeEfLogs) => new(
+            connectionString, listenAddress, listenPort, nodeId, minimumLevel, includeEfLogs);
 }
 
 /// <summary>Registers bootstrap environment names and safe defaults.</summary>
@@ -109,6 +119,8 @@ public static class BootstrapDefaults
 
     /// <summary>The environment variable for the minimum log level.</summary>
     public const string LogLevelEnvironmentVariable = "NEKOSTICK_LOG_LEVEL";
+    /// <summary>The environment variable controlling EF log inclusion.</summary>
+    public const string IncludeEfLogsEnvironmentVariable = "NEKOSTICK_INCLUDE_EF_LOGS";
 
     /// <summary>The CLI option for the database connection string.</summary>
     public const string ConnectionStringOption = "--connection-string";
@@ -124,6 +136,8 @@ public static class BootstrapDefaults
 
     /// <summary>The CLI option for the minimum log level.</summary>
     public const string LogLevelOption = "--log-level";
+    /// <summary>The CLI switch controlling EF log inclusion.</summary>
+    public const string IncludeEfLogsOption = "--include-ef-logs";
 
     /// <summary>The default loopback listen address.</summary>
     public const string DefaultListenAddress = "127.0.0.1";

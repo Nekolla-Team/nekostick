@@ -129,6 +129,23 @@ public sealed class ProcessOutputStructuredLoggingTests
         Assert.True(startup.IsEnabled(LogLevel.Warning));
         Assert.True(framework.IsEnabled(LogLevel.Information));
     }
+    [Fact]
+    public void EntityFrameworkDebugLogsRequireExplicitOptIn()
+    {
+        using var excludedApplication = BuildApplication(disableSupervisor: true, includeEfLogs: false, logLevel: "debug");
+        using var includedApplication = BuildApplication(disableSupervisor: true, includeEfLogs: true, logLevel: "debug");
+
+        var excludedLogger = excludedApplication.Services
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger("Microsoft.EntityFrameworkCore.Database.Command");
+        var includedLogger = includedApplication.Services
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger("Microsoft.EntityFrameworkCore.Database.Command");
+
+        Assert.False(excludedLogger.IsEnabled(LogLevel.Debug));
+        Assert.True(includedLogger.IsEnabled(LogLevel.Debug));
+    }
+
 
     [Fact]
     public void SafeConsoleFollowsConfiguredMinimumLevel()
@@ -152,6 +169,46 @@ public sealed class ProcessOutputStructuredLoggingTests
             .IsEnabled(LogLevel.Critical));
     }
 
+    private static WebApplication BuildApplication(
+        bool disableSupervisor,
+        bool includeEfLogs = false,
+        string logLevel = "information")
+    {
+        var buildApplication = typeof(Program).GetMethod(
+            "BuildApplication",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("The host application builder is required.");
+        var arguments = new List<string>
+        {
+            "run",
+            "--connection-string",
+            "Host=127.0.0.1;Database=process_output_tests",
+            "--log-level",
+            logLevel
+        };
+        if (includeEfLogs)
+        {
+            arguments.Add(BootstrapDefaults.IncludeEfLogsOption);
+        }
+
+        var command = CliCommandParser.Parse(
+            arguments,
+            new Dictionary<string, string?>()).Command
+            ?? throw new InvalidOperationException("The test run command must parse.");
+
+        return Assert.IsType<WebApplication>(buildApplication.Invoke(
+            null,
+            [
+                new CliCommand(
+                    CliCommandKind.Run,
+                    command.BootstrapOptions,
+                    new RunOptions(
+                        skipExtensions: true,
+                        disableSupervisor: disableSupervisor,
+                        readOnly: true)),
+                IPAddress.Loopback
+            ]));
+    }
     private static void AssertLine(
         CapturedLog entry,
         LogLevel expectedLevel,
@@ -195,30 +252,6 @@ public sealed class ProcessOutputStructuredLoggingTests
             ?? throw new InvalidOperationException("The executor must retain an output sink.");
     }
 
-    private static WebApplication BuildApplication(bool disableSupervisor)
-    {
-        var buildApplication = typeof(Program).GetMethod(
-            "BuildApplication",
-            BindingFlags.Static | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("The host application builder is required.");
-        var command = CliCommandParser.Parse(
-            ["run", "--connection-string", "Host=127.0.0.1;Database=process_output_tests"],
-            new Dictionary<string, string?>()).Command
-            ?? throw new InvalidOperationException("The test run command must parse.");
-
-        return Assert.IsType<WebApplication>(buildApplication.Invoke(
-            null,
-            [
-                new CliCommand(
-                    CliCommandKind.Run,
-                    command.BootstrapOptions,
-                    new RunOptions(
-                        skipExtensions: true,
-                        disableSupervisor: disableSupervisor,
-                        readOnly: true)),
-                IPAddress.Loopback
-            ]));
-    }
 
     private sealed class DiscardingOutputSink : IProcessOutputSink
     {

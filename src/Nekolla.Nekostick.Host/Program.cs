@@ -222,12 +222,15 @@ internal static class Program
 
         // The factory-level filter decides what reaches the provider. Application output
         // follows the configured level; framework categories stay at Warning unless Debug
-        // or Trace was requested. The startup banner is emitted by the host itself so it
-        // remains visible at Information.
+        // or Trace was requested. EF logs use the configured level only with explicit opt-in.
         builder.Logging.SetMinimumLevel(minimumLevel);
         var frameworkLevel = minimumLevel <= LogLevel.Debug ? minimumLevel : LogLevel.Warning;
         builder.Logging.AddFilter("Microsoft", frameworkLevel);
         builder.Logging.AddFilter("System", frameworkLevel);
+        var entityFrameworkLevel = command.BootstrapOptions.IncludeEfLogs
+            ? minimumLevel
+            : LogLevel.Warning;
+        builder.Logging.AddFilter("Microsoft.EntityFrameworkCore", entityFrameworkLevel);
         builder.Logging.AddProvider(new SafeConsoleLoggerProvider(minimumLevel));
         builder.Host.UseConsoleLifetime();
 

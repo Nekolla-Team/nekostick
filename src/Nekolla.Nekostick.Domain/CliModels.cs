@@ -247,8 +247,18 @@ public static class CliCommandParser
             return Failure(BootstrapErrorCode.InvalidLogLevel, "The log level is invalid.");
         }
 
+        var includeEfLogs = flags.Contains(BootstrapDefaults.IncludeEfLogsOption);
+        if (!includeEfLogs && !TryParseBoolean(
+                environment.TryGetValue(BootstrapDefaults.IncludeEfLogsEnvironmentVariable, out var includeEfLogsValue)
+                    ? includeEfLogsValue
+                    : null,
+                out includeEfLogs))
+        {
+            return Failure(BootstrapErrorCode.InvalidIncludeEfLogs, "The EF log inclusion switch is invalid.");
+        }
+
         var options = BootstrapOptions.CreateValidated(
-            connectionString, listenAddress, listenPort, nodeId, normalizedLogLevel);
+            connectionString, listenAddress, listenPort, nodeId, normalizedLogLevel, includeEfLogs);
         var runOptions = new RunOptions(
             flags.Contains("--skip-extensions"),
             flags.Contains("--disable-supervisor"),
@@ -272,7 +282,8 @@ public static class CliCommandParser
             : null;
     }
 
-    private static bool IsFlag(string name) => name is "--skip-extensions" or "--disable-supervisor" or "--read-only";
+    private static bool IsFlag(string name) => name is "--skip-extensions" or "--disable-supervisor" or
+        "--read-only" or BootstrapDefaults.IncludeEfLogsOption;
 
     private static bool IsValidListenAddress(string? value)
     {
@@ -326,6 +337,16 @@ public static class CliCommandParser
             _ => string.Empty
         };
         return normalized.Length > 0;
+    }
+    private static bool TryParseBoolean(string? value, out bool result)
+    {
+        if (value is null)
+        {
+            result = false;
+            return true;
+        }
+
+        return bool.TryParse(value.Trim(), out result);
     }
 
 
