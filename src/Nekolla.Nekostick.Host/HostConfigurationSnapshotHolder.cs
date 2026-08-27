@@ -487,13 +487,9 @@ internal static class HostConfigurationSnapshotValidator
                         }
 
                         break;
-                    case ExtensionHandlerRouteTargetConfiguration extension:
-                        if (!extensionIds.Contains(extension.HandlerId))
-                        {
-                            return false;
-                        }
-
-                        break;
+                    // Handler identifiers are runtime registration names, not extension identifiers;
+                    // ownership is enforced when the route is written, and dispatch fails closed.
+                    case ExtensionHandlerRouteTargetConfiguration:
                     case StaticFileRouteTargetConfiguration:
                         break;
                     case null:

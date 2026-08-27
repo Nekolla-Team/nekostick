@@ -86,7 +86,7 @@ public sealed class HostConfigurationSnapshotTests
     }
 
     [Fact]
-    public void ValidatorRejectsUnknownServiceExtensionAndSettingsReferences()
+    public void ValidatorRejectsUnknownServiceAndExtensionSettingsReferences()
     {
         var unknownServiceRoute = CreateSnapshot(
             1,
@@ -95,21 +95,36 @@ public sealed class HostConfigurationSnapshotTests
                     UnknownRouteId,
                     new MicroserviceRouteTargetConfiguration(UnknownServiceId),
                     1)));
-        var unknownExtensionRoute = CreateSnapshot(
-            1,
-            routes: ImmutableArray.Create(
-                CreateRoute(
-                    UnknownRouteId,
-                    new ExtensionHandlerRouteTargetConfiguration("missing.extension"),
-                    1)));
         var unknownExtensionSettings = CreateSnapshot(
             1,
             extensionSettings: ImmutableArray.Create(
                 new ExtensionSettingsConfiguration("missing.extension", 0, "{}", 1)));
 
         Assert.False(HostConfigurationSnapshotValidator.IsComplete(unknownServiceRoute));
-        Assert.False(HostConfigurationSnapshotValidator.IsComplete(unknownExtensionRoute));
         Assert.False(HostConfigurationSnapshotValidator.IsComplete(unknownExtensionSettings));
+    }
+
+    [Fact]
+    public void ValidatorAcceptsNamespacedExtensionHandlerRouteTargets()
+    {
+        var withRecord = CreateSnapshot(
+            1,
+            routes: ImmutableArray.Create(
+                CreateRoute(
+                    ExtensionRouteId,
+                    new ExtensionHandlerRouteTargetConfiguration("sample.extension.management"),
+                    1)),
+            extensionRecords: ImmutableArray.Create(CreateExtensionRecord("sample.extension", 1)));
+        var withoutRecord = CreateSnapshot(
+            1,
+            routes: ImmutableArray.Create(
+                CreateRoute(
+                    ExtensionRouteId,
+                    new ExtensionHandlerRouteTargetConfiguration("missing.extension.management"),
+                    1)));
+
+        Assert.True(HostConfigurationSnapshotValidator.IsComplete(withRecord));
+        Assert.True(HostConfigurationSnapshotValidator.IsComplete(withoutRecord));
     }
 
     [Fact]

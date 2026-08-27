@@ -96,6 +96,71 @@ public sealed class HostPostgresAcceptanceTests
         Assert.Equal(TimeSpan.FromSeconds(5), route.RequestReadTimeout);
     }
 
+    /// <summary>Verifies an extension-owned handler route keeps persisted snapshots readable.</summary>
+    [Fact]
+    public async Task HostSnapshotReaderAcceptsExtensionOwnedHandlerRoutes()
+    {
+        var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        await using var migrationContext = database.CreateContext();
+        await MigrateAsync(database, migrationContext);
+
+        const string extensionId = "sample.controller";
+        const string handlerId = "sample.controller.management";
+        await using (var apiContext = database.CreateContext())
+        await using (var api = new EfHostConfigApi(apiContext))
+        {
+            var initial = await api.ReadSnapshotAsync(TestContext.Current.CancellationToken);
+            Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(initial.Value);
+
+            var now = DateTimeOffset.UtcNow;
+            var bootstrap = await api.PersistDiscoveredExtensionRecordsAsync(
+                initial.Value!.Version,
+                ImmutableArray.Create(new ExtensionRecordConfiguration(
+                    extensionId, "1.0.0", ExtensionLoadState.Loaded, now, now, 0)),
+                TestContext.Current.CancellationToken);
+            Assert.True(bootstrap.IsSuccess, bootstrap.Errors.FirstOrDefault()?.Message);
+
+            var owned = new EfExtensionOwnedConfigurationApi(api);
+            var ownedRead = await owned.ReadOwnedAsync(extensionId, TestContext.Current.CancellationToken);
+            Assert.True(ownedRead.IsSuccess, ownedRead.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(ownedRead.Value);
+
+            var route = new ExtensionRouteConfiguration(
+                Guid.CreateVersion7(),
+                true,
+                new RouteMatcherConfiguration(
+                    RouteMatcherType.Prefix,
+                    "/controller76480110",
+                    ImmutableArray<string>.Empty,
+                    ImmutableArray<string>.Empty),
+                new ExtensionHandlerRouteTarget(handlerId),
+                int.MaxValue);
+            var apply = await owned.ApplyOwnedAsync(
+                extensionId,
+                ownedRead.Value!.Version,
+                new ExtensionConfigurationChangeSet(
+                    ImmutableArray.Create(route),
+                    ImmutableArray<Guid>.Empty,
+                    ImmutableArray<ExtensionServiceConfiguration>.Empty,
+                    ImmutableArray<Guid>.Empty,
+                    new ExtensionSettingsConfiguration(extensionId, 1, "{}", 0)),
+                handlerIsOwned: static id => string.Equals(id, handlerId, StringComparison.Ordinal),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(apply.IsSuccess, apply.Errors.FirstOrDefault()?.Message);
+        }
+
+        var reader = new EfHostConfigurationSnapshotReader(new TestDbContextFactory(database));
+        var snapshot = await reader.ReadCompleteAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(snapshot.IsSuccess, snapshot.Errors.FirstOrDefault()?.Message);
+        var persistedRoute = Assert.Single(snapshot.Value!.Routes);
+        var target = Assert.IsType<ExtensionHandlerRouteTargetConfiguration>(persistedRoute.Target);
+        Assert.Equal(handlerId, target.HandlerId);
+        Assert.Equal(int.MaxValue, persistedRoute.Priority);
+    }
+
     /// <summary>Verifies invalid persisted route matchers are rejected before publication.</summary>
     [Fact]
     public async Task HostSnapshotReaderRejectsInvalidPersistedMatcherWithoutPublishingIt()
