@@ -195,13 +195,13 @@ internal static partial class HostLogMessages
     [LoggerMessage(
         EventId = 1015,
         Level = LogLevel.Information,
-        Message = "Now listening on: {ListenUrl}")]
+        Message = "Host listening on: {ListenUrl}")]
     internal static partial void NowListening(ILogger logger, string listenUrl);
 
     [LoggerMessage(
         EventId = 1016,
         Level = LogLevel.Information,
-        Message = "Application started. Press Ctrl+C to shut down.")]
+        Message = "Nekostick initialization finished. Press Ctrl+C to shutdown.")]
     internal static partial void ApplicationStarted(ILogger logger);
 }
 
