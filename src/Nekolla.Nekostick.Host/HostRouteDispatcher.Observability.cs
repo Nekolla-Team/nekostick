@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Routing;
 
@@ -50,13 +51,19 @@ internal sealed partial class HostRouteDispatcher
             }
         }
 
+        if (!_logger.IsEnabled(LogLevel.Debug))
+        {
+            return;
+        }
+
+        var summaryServiceId = GetServiceId(route, match);
         HostLogMessages.RouteOutcomeSummary(
             _logger,
             routeId,
             selectedTargetType,
             outcome,
             statusCode,
-            GetServiceId(route, match));
+            summaryServiceId);
     }
 
     private static Guid? GetServiceId(RouteConfiguration? route, RouteMatch match) =>

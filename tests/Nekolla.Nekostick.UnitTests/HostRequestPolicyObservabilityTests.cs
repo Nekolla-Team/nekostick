@@ -198,7 +198,7 @@ public sealed class HostRequestPolicyObservabilityTests
         Assert.Equal(handledRoute.Id, summary.Fields["RouteId"]);
         Assert.Equal(RouteTargetExecutionResult.Handled, summary.Fields["Outcome"]);
         Assert.Equal(StatusCodes.Status202Accepted, summary.Fields["StatusCode"]);
-        Assert.Equal(LogLevel.Warning, summary.Level);
+        Assert.Equal(LogLevel.Debug, summary.Level);
         AssertSafe(handledLogger, sensitive);
 
         var staticLogger = new CapturingLogger();

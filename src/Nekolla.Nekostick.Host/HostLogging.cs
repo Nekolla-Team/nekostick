@@ -101,7 +101,7 @@ internal static partial class HostLogMessages
 
     [LoggerMessage(
         EventId = 1011,
-        Level = LogLevel.Warning,
+        Level = LogLevel.Debug,
         Message = "Matched route target completed. RouteId: {RouteId}. TargetType: {TargetType}. Outcome: {Outcome}. StatusCode: {StatusCode}. ServiceId: {ServiceId}.")]
     internal static partial void RouteOutcomeSummary(
         ILogger logger,
