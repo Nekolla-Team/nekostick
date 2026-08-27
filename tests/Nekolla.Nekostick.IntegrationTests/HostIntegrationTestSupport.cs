@@ -213,12 +213,20 @@ internal static class HostIntegrationTestSupport
             .Single(value =>
             {
                 var parameters = value.GetParameters();
-                return parameters.Length == 2
+                return parameters.Length >= 2
                     && parameters[0].ParameterType == typeof(MicroserviceHttpExecutor)
                     && parameters[1].ParameterType == typeof(IHostServiceLifecycleCoordinator)
-                    && !parameters[1].ParameterType.IsValueType;
+                    && parameters.Skip(2).All(parameter => parameter.HasDefaultValue);
             });
-        return constructor.Invoke([executor, null]);
+        var arguments = new object?[constructor.GetParameters().Length];
+        arguments[0] = executor;
+        arguments[1] = null;
+        for (var index = 2; index < arguments.Length; index++)
+        {
+            arguments[index] = null;
+        }
+
+        return constructor.Invoke(arguments);
     }
 
     internal static async Task<IntegrationStageEvidence> ExecuteMatchedTargetAsync(
