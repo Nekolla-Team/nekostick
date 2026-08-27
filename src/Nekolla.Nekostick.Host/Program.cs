@@ -249,7 +249,7 @@ internal static class Program
         builder.Services.AddSingleton<IHostRoutingSnapshotAccessor>(serviceProvider =>
             new HostRoutingSnapshotAccessor(
                 serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>()));
-        builder.Services.AddSingleton<HostRequestAdmission>();
+        builder.Services.AddSingleton<HostRequestAdmission>(_ => new HostRequestAdmission());
         builder.Services.AddSingleton<ExtensionRuntimeManager>(serviceProvider =>
             new ExtensionRuntimeManager(
                 HostApiVersion.Current,
