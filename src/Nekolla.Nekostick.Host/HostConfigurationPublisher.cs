@@ -91,7 +91,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     return false;
                 }
 
-                PublishSnapshotEvents(snapshot, previousSnapshot!.Configuration);
+                // TryReplace consumed the staged snapshot; it is now the live
+                // publication, so staging cleanup and rejection no longer apply.
+                staged = false;
+                DeliverPublicationEvents(snapshot, previousSnapshot!.Configuration);
                 published = true;
                 return true;
             }
@@ -159,17 +162,19 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
+            // TryReplace makes the prepared generation the live publication. It
+            // must not be aborted or marked rejected when manager completion or
+            // event delivery fails afterwards.
+            staged = false;
+            activePreparation = null;
             if (!await preparation.CompletePublicationAsync().ConfigureAwait(false))
             {
-                HostLogMessages.ConfigurationSnapshotRejected(_logger);
+                HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);
                 return false;
             }
 
-            // CompletePublicationAsync is the irrevocable manager handoff. Do not
-            // abort this preparation if later event/log delivery fails.
-            activePreparation = null;
             HostLogMessages.ConfigurationSnapshotApplied(_logger, publicationSnapshot.Version);
-            PublishSnapshotEvents(publicationSnapshot, previousSnapshot?.Configuration);
+            DeliverPublicationEvents(publicationSnapshot, previousSnapshot?.Configuration);
             published = true;
             return true;
         }
@@ -203,7 +208,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 if (staged)
                 {
                     _snapshotHolder.ClearStaged(stagedSnapshot);
-                    if (!published)
+                    if (!published && !ReferenceEquals(_snapshotHolder.Current, stagedSnapshot))
                     {
                         _runtimeState?.MarkSnapshotRejected();
                     }
@@ -250,7 +255,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
-            PublishSnapshotEvents(publicationSnapshot, previousSnapshot);
+            DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
             return true;
         }
 
@@ -273,13 +278,17 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
+            // TryReplace makes the prepared generation the live publication. It
+            // must not be aborted when manager completion or event delivery
+            // fails afterwards.
+            completed = true;
             if (!await emptyPreparation.CompletePublicationAsync().ConfigureAwait(false))
             {
+                HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);
                 return false;
             }
 
-            completed = true;
-            PublishSnapshotEvents(publicationSnapshot, previousSnapshot);
+            DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
             return true;
         }
         finally
@@ -393,6 +402,22 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(ReadRouteOwnersAsync));
             return ImmutableDictionary<Guid, string?>.Empty;
+        }
+    }
+
+    private void DeliverPublicationEvents(
+        HostConfigurationSnapshot snapshot,
+        HostConfigurationSnapshot? previous)
+    {
+        try
+        {
+            PublishSnapshotEvents(snapshot, previous);
+        }
+        catch (Exception exception)
+        {
+            // Event delivery happens after the snapshot is already live; a
+            // listener failure must not misreport the publication as rejected.
+            HostLogMessages.FailureDetails(_logger, exception, nameof(DeliverPublicationEvents));
         }
     }
 

@@ -268,6 +268,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     private readonly object _replacementGate = new();
     private HostRoutingSnapshot? _published;
     private HostConfigurationSnapshot? _staged;
+    private bool _disposed;
     /// <inheritdoc />
     public HostConfigurationSnapshot? Current => Volatile.Read(ref _published)?.Configuration;
 
@@ -293,6 +294,11 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
 
         lock (_replacementGate)
         {
+            if (_disposed)
+            {
+                return false;
+            }
+
             var published = Volatile.Read(ref _published);
             if (published is not null && snapshot.Version < published.Configuration.Version)
             {
@@ -369,6 +375,11 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         HostRoutingSnapshot? previous;
         lock (_replacementGate)
         {
+            if (_disposed)
+            {
+                return false;
+            }
+
             previous = Volatile.Read(ref _published);
             if (previous is not null && snapshot.Version < previous.Configuration.Version)
             {
@@ -404,6 +415,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         Task retirement;
         lock (_replacementGate)
         {
+            _disposed = true;
             previous = Interlocked.Exchange(ref _published, null);
             Volatile.Write(ref _staged, null);
             retirement = previous?.Publication.BeginRetirement(retireGeneration: previous.DispatchGeneration is not null)

@@ -65,6 +65,11 @@ internal static partial class HostLogMessages
         Level = LogLevel.Error,
         Message = "Configuration refresh is unavailable.")]
     internal static partial void ConfigurationRefreshUnavailable(ILogger logger);
+    [LoggerMessage(
+        EventId = 1008,
+        Level = LogLevel.Warning,
+        Message = "Configuration snapshot manager completion failed after publication. Version: {Version}.")]
+    internal static partial void ConfigurationSnapshotCompletionFailed(ILogger logger, long version);
 
     [LoggerMessage(
         EventId = 1006,

@@ -200,6 +200,20 @@ public sealed class HostConfigurationSnapshotTests
         Assert.Null(holder.Current);
         Assert.Null(holder.RoutingSnapshot);
     }
+    [Fact]
+    public async Task HolderRejectsStageAndReplaceAfterDisposal()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(CreateCompleteSnapshot(1)));
+
+        await holder.DisposeAsync();
+
+        Assert.False(holder.TryStage(CreateCompleteSnapshot(2)));
+        Assert.False(holder.TryReplace(CreateCompleteSnapshot(3)));
+        Assert.False(holder.HasSnapshot);
+        Assert.Null(holder.Current);
+        Assert.Null(holder.RoutingSnapshot);
+    }
 
     private static HostConfigurationSnapshot CreateCompleteSnapshot(long version) =>
         CreateSnapshot(
