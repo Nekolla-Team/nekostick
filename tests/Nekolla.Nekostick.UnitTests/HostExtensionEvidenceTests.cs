@@ -20,7 +20,7 @@ public sealed class HostExtensionEvidenceTests
     private static readonly SemaphoreSlim OutputExtensionGate = new(1, 1);
 
     [Fact]
-    public async Task EmptyExtensionRecordsSnapshotBootstrapsValidOutputFixture()
+    public async Task PersistedExtensionRecordSnapshotBootstrapsValidOutputFixture()
     {
         await OutputExtensionGate.WaitAsync(TestContext.Current.CancellationToken);
         try
@@ -34,14 +34,22 @@ public sealed class HostExtensionEvidenceTests
                 manager,
                 new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
                 NullLogger<HostConfigurationPublisher>.Instance);
+            var record = new ExtensionRecordConfiguration(
+                FixtureExtensionId,
+                "1.0.0",
+                ExtensionLoadState.Loaded,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                1);
             var snapshot = CreatePublisherSnapshot(
                 1,
-                ImmutableArray<ExtensionRecordConfiguration>.Empty);
+                ImmutableArray.Create(record));
 
             Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
 
             Assert.Same(snapshot, holder.Current);
-            Assert.Empty(holder.Current!.ExtensionRecords);
+            Assert.Single(holder.Current!.ExtensionRecords);
+            Assert.Equal(ExtensionLoadState.Loaded, holder.Current.ExtensionRecords[0].LoadState);
             var status = manager.GetStatus(FixtureExtensionId);
             Assert.NotNull(status);
             Assert.Equal(ExtensionLoadState.Loaded, status!.State);

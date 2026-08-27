@@ -149,6 +149,58 @@ public sealed class HostConfigurationSnapshotTests
                 default));
     }
 
+
+    [Fact]
+    public void HolderStagesValidatedSnapshotWithoutPublishingCurrentOrRoutingSnapshot()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        var candidate = CreateCompleteSnapshot(4);
+
+        Assert.True(holder.TryStage(candidate));
+
+        Assert.True(holder.HasSnapshot);
+        Assert.Null(holder.Current);
+        Assert.Null(holder.RoutingSnapshot);
+    }
+
+    [Fact]
+    public void HolderRejectsOlderStagedVersionAndClearsOnlyMatchingCandidate()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        var staged = CreateCompleteSnapshot(5);
+        var older = CreateCompleteSnapshot(4);
+        var newer = CreateCompleteSnapshot(6);
+
+        Assert.True(holder.TryStage(staged));
+        Assert.False(holder.TryStage(older));
+        Assert.True(holder.TryStage(newer));
+        Assert.True(holder.HasSnapshot);
+
+        holder.ClearStaged(staged);
+        Assert.True(holder.HasSnapshot);
+        Assert.False(holder.TryStage(older));
+
+        holder.ClearStaged(newer);
+        Assert.False(holder.HasSnapshot);
+    }
+
+    [Fact]
+    public async Task HolderDisposalClearsPublishedAndStagedSnapshots()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        var published = CreateCompleteSnapshot(1);
+        var staged = CreateCompleteSnapshot(2);
+
+        Assert.True(holder.TryReplace(published));
+        Assert.True(holder.TryStage(staged));
+
+        await holder.DisposeAsync();
+
+        Assert.False(holder.HasSnapshot);
+        Assert.Null(holder.Current);
+        Assert.Null(holder.RoutingSnapshot);
+    }
+
     private static HostConfigurationSnapshot CreateCompleteSnapshot(long version) =>
         CreateSnapshot(
             version,

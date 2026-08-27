@@ -66,4 +66,14 @@ internal sealed class EfHostConfigRevisionHelper
     internal static bool IsTransactionConflict(DbUpdateException exception) =>
         exception.InnerException is PostgresException postgresException &&
         postgresException.SqlState is PostgresErrorCodes.SerializationFailure or PostgresErrorCodes.DeadlockDetected;
+    /// <summary>Unwraps execution-strategy wrappers when classifying retryable transaction conflicts.</summary>
+    /// <param name="exception">The possibly wrapped exception.</param>
+    /// <returns>Whether the root cause is a serialization or deadlock conflict.</returns>
+    internal static bool IsTransactionConflict(Exception exception) =>
+        exception switch
+        {
+            DbUpdateException dbUpdateException => IsTransactionConflict(dbUpdateException),
+            { InnerException: { } innerException } => IsTransactionConflict(innerException),
+            _ => false
+        };
 }

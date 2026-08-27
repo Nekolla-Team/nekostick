@@ -67,6 +67,30 @@ public static class HostConfigurationSemanticValidator
     public static bool TryValidateExtensionSettings(ExtensionSettingsConfiguration? settings) =>
         settings is not null && TryValidate(() => HostConfigurationExtensionValidator.ValidateSettings(settings));
 
+    /// <summary>Validates a collection of extension records for persistence.</summary>
+    /// <param name="records">The extension records to validate.</param>
+    /// <returns><see langword="true"/> when every record is semantically valid and unique.</returns>
+    internal static bool TryValidateExtensionRecords(
+        IEnumerable<ExtensionRecordConfiguration>? records)
+    {
+        if (records is null)
+        {
+            return false;
+        }
+
+        return TryValidate(() =>
+        {
+            var values = records.ToArray();
+            HostConfigurationValueValidator.ValidateUniqueText(
+                values.Select(value => value?.ExtensionId),
+                HostConfigurationValueValidator.MaxExtensionIdLength);
+            foreach (var record in values)
+            {
+                HostConfigurationExtensionValidator.ValidateRecord(record);
+            }
+        });
+    }
+
     internal static bool IsSafeExtensionId(string? value) => HostConfigurationValueValidator.IsSafeExtensionId(value);
 
     internal static bool IsUuidV7(Guid value) => HostConfigurationValueValidator.IsUuidV7(value);

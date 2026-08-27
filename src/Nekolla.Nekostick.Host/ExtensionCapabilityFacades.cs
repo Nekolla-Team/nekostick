@@ -64,7 +64,7 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             new ExtensionEndpointFacade(
                 extensionId,
                 _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
-            new ExtensionFullConfigurationFacade(_scopeFactory),
+            new ExtensionFullConfigurationFacade(_scopeFactory, _runtimeState),
             new ExtensionSupervisorFacade(
                 _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>(),
                 _serviceProvider.GetService<IMicroserviceForwardingTelemetry>()),
@@ -77,10 +77,14 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
 internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigurationApi
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly HostRuntimeState _runtimeState;
 
-    internal ExtensionFullConfigurationFacade(IServiceScopeFactory scopeFactory)
+    internal ExtensionFullConfigurationFacade(
+        IServiceScopeFactory scopeFactory,
+        HostRuntimeState runtimeState)
     {
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
+        _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
     }
 
     public async ValueTask<ConfigurationReadResult<HostConfigurationSnapshot>> ReadAsync(
@@ -99,6 +103,12 @@ internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigura
         ConfigurationChangeSet changes,
         CancellationToken cancellationToken = default)
     {
+        if (!_runtimeState.ConfigurationWritesAllowed)
+        {
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+        }
+
         await using var scope = _scopeFactory.CreateAsyncScope();
         var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
         return hostConfig is null
@@ -185,7 +195,7 @@ internal sealed class ExtensionConfigurationFacade : IExtensionConfigurationApi
         ExtensionConfigurationChangeSet changes,
         CancellationToken cancellationToken = default)
     {
-        if (!_runtimeState.ConfigurationWritesAllowed)
+        if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
             return ValueTask.FromResult(UnsupportedWrite());
         }
@@ -205,7 +215,7 @@ internal sealed class ExtensionConfigurationFacade : IExtensionConfigurationApi
         ExtensionSettingsConfiguration settings,
         CancellationToken cancellationToken = default)
     {
-        if (!_runtimeState.ConfigurationWritesAllowed)
+        if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
             return ValueTask.FromResult(UnsupportedWrite());
         }

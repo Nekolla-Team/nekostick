@@ -83,6 +83,7 @@ public sealed class HostConfigurationRefreshService : BackgroundService
     private readonly HostRuntimeOptions _options;
     private readonly HostConfigurationPublisher _publisher;
     private readonly ILogger<HostConfigurationRefreshService> _logger;
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     /// <summary>Creates the runtime configuration refresh service.</summary>
     public HostConfigurationRefreshService(
@@ -160,6 +161,21 @@ public sealed class HostConfigurationRefreshService : BackgroundService
     private async Task RefreshAsync(
         CancellationToken cancellationToken,
         bool forceSnapshotReload = false)
+    {
+        await _refreshGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await RefreshCoreAsync(forceSnapshotReload, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
+    }
+
+    private async Task RefreshCoreAsync(
+        bool forceSnapshotReload,
+        CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var revisionReader = scope.ServiceProvider.GetRequiredService<IConfigurationRevisionReader>();

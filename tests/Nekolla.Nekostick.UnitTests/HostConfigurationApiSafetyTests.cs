@@ -1,4 +1,6 @@
+using System.Collections.Immutable;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Host;
 using Xunit;
@@ -110,6 +112,83 @@ public sealed class HostConfigurationSafetyTests
         Assert.True(status.NewLeasesAllowed);
         Assert.True(status.NewServicesAllowed);
         Assert.Equal(HostReadinessState.Ready, status.Readiness);
+    }
+
+
+    [Fact]
+    public void StagedRuntimeAuthorizesOnlyExtensionConfigurationWrites()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        var candidate = new HostConfigurationSnapshot(
+            2,
+            new GlobalSettingsConfiguration(version: 2),
+            default,
+            default,
+            default,
+            default);
+        Assert.True(holder.TryStage(candidate));
+
+        var state = CreateRuntimeState(holder, readOnly: false);
+        state.BeginStagedConfigurationWrites();
+
+        Assert.True(state.ExtensionConfigurationWritesAllowed);
+        Assert.Null(holder.Current);
+        Assert.Null(holder.RoutingSnapshot);
+        Assert.False(state.ConfigurationWritesAllowed);
+        Assert.False(state.NewLeasesAllowed);
+        Assert.False(state.NewServicesAllowed);
+        Assert.False(state.IsReady);
+        Assert.False(state.Status.SnapshotAvailable);
+        Assert.Equal(HostReadinessState.Unready, state.Status.Readiness);
+    }
+
+    [Fact]
+    public void StagedRuntimeAuthorizationIsRevokedByCleanupAndFailure()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryStage(new HostConfigurationSnapshot(
+            1,
+            new GlobalSettingsConfiguration(version: 1),
+            default,
+            default,
+            default,
+            default)));
+        var state = CreateRuntimeState(holder, readOnly: false);
+
+        state.BeginStagedConfigurationWrites();
+        Assert.True(state.ExtensionConfigurationWritesAllowed);
+
+        state.EndStagedConfigurationWrites();
+        Assert.False(state.ExtensionConfigurationWritesAllowed);
+
+        state.BeginStagedConfigurationWrites();
+        state.MarkSnapshotRejected();
+        Assert.False(state.ExtensionConfigurationWritesAllowed);
+
+        state.BeginStagedConfigurationWrites();
+        state.MarkDatabaseUnavailable();
+        Assert.False(state.ExtensionConfigurationWritesAllowed);
+    }
+
+    [Fact]
+    public void ReadOnlyStagedRuntimeDoesNotAuthorizeExtensionConfigurationWrites()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryStage(new HostConfigurationSnapshot(
+            1,
+            new GlobalSettingsConfiguration(version: 1),
+            default,
+            default,
+            default,
+            default)));
+        var state = CreateRuntimeState(holder, readOnly: true);
+
+        state.BeginStagedConfigurationWrites();
+
+        Assert.False(state.ExtensionConfigurationWritesAllowed);
+        Assert.False(state.ConfigurationWritesAllowed);
+        Assert.False(state.NewLeasesAllowed);
+        Assert.False(state.NewServicesAllowed);
     }
 
     private static HostConfigurationSnapshotHolder CreateHolder()

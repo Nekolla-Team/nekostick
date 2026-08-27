@@ -61,7 +61,9 @@ public sealed class HostRuntimeState
     private readonly HostConfigurationSnapshotHolder _snapshotHolder;
     private readonly bool _readOnly;
     private int _databaseAvailable;
+    private int _databaseUnavailable;
     private int _configurationValid;
+    private int _stagedConfigurationWritesAllowed;
 
     /// <summary>Creates fail-closed runtime state.</summary>
     public HostRuntimeState(HostConfigurationSnapshotHolder snapshotHolder, HostNodeOptions nodeOptions)
@@ -73,16 +75,25 @@ public sealed class HostRuntimeState
 
     /// <summary>Gets the current safe capability state.</summary>
     public HostRuntimeStatus Status => new(
-        _snapshotHolder.HasSnapshot,
+        _snapshotHolder.Current is not null,
         Volatile.Read(ref _databaseAvailable) == 1,
         Volatile.Read(ref _configurationValid) == 1,
         _readOnly);
-
-    /// <summary>Gets whether the host has a snapshot and may serve the readiness boundary.</summary>
-    public bool IsReady => _snapshotHolder.HasSnapshot;
-
-    /// <summary>Gets whether configuration writes are currently allowed.</summary>
+    /// <summary>Gets whether host-wide configuration writes may be attempted.</summary>
     public bool ConfigurationWritesAllowed => Status.ConfigurationWritesAllowed;
+
+    /// <summary>Gets whether a current complete, validated configuration snapshot is available.</summary>
+    public bool IsReady => _snapshotHolder.Current is not null;
+
+    /// <summary>Gets whether a candidate snapshot is staged without being published.</summary>
+    internal bool HasStagedSnapshot => _snapshotHolder.Current is null && _snapshotHolder.HasSnapshot;
+
+    /// <summary>Gets whether extension-scoped configuration writes may be attempted.</summary>
+    internal bool ExtensionConfigurationWritesAllowed =>
+        ConfigurationWritesAllowed ||
+        (!_readOnly &&
+            Volatile.Read(ref _stagedConfigurationWritesAllowed) == 1 &&
+            Volatile.Read(ref _databaseUnavailable) == 0);
 
     /// <summary>Gets whether new leases are currently allowed.</summary>
     public bool NewLeasesAllowed => Status.NewLeasesAllowed;
@@ -92,22 +103,40 @@ public sealed class HostRuntimeState
 
     internal void MarkSnapshotAccepted()
     {
+        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
+        Volatile.Write(ref _databaseUnavailable, 0);
         Volatile.Write(ref _databaseAvailable, 1);
         Volatile.Write(ref _configurationValid, 1);
     }
 
+    internal void BeginStagedConfigurationWrites()
+    {
+        if (!_readOnly && Volatile.Read(ref _databaseUnavailable) == 0)
+        {
+            Volatile.Write(ref _stagedConfigurationWritesAllowed, 1);
+        }
+    }
+
+    internal void EndStagedConfigurationWrites() =>
+        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
+
+
     internal void MarkSnapshotRejected()
     {
+        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
         Volatile.Write(ref _configurationValid, 0);
     }
 
     internal void MarkDatabaseAvailable()
     {
+        Volatile.Write(ref _databaseUnavailable, 0);
         Volatile.Write(ref _databaseAvailable, 1);
     }
 
     internal void MarkDatabaseUnavailable()
     {
+        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
+        Volatile.Write(ref _databaseUnavailable, 1);
         Volatile.Write(ref _databaseAvailable, 0);
         Volatile.Write(ref _configurationValid, 0);
     }

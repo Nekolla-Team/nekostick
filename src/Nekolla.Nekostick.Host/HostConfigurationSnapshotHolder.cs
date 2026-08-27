@@ -267,6 +267,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
 {
     private readonly object _replacementGate = new();
     private HostRoutingSnapshot? _published;
+    private HostConfigurationSnapshot? _staged;
     /// <inheritdoc />
     public HostConfigurationSnapshot? Current => Volatile.Read(ref _published)?.Configuration;
 
@@ -276,10 +277,51 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     public HostConfigurationSnapshot? Snapshot => Current;
 
     /// <inheritdoc />
-    public bool HasSnapshot => Current is not null;
+    public bool HasSnapshot => Current is not null || Volatile.Read(ref _staged) is not null;
 
     /// <inheritdoc />
     public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null, null);
+    /// <summary>Stages a validated snapshot for capability admission before runtime publication.</summary>
+    internal bool TryStage(HostConfigurationSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (!HostConfigurationSnapshotValidator.IsComplete(snapshot) ||
+            !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot))
+        {
+            return false;
+        }
+
+        lock (_replacementGate)
+        {
+            var published = Volatile.Read(ref _published);
+            if (published is not null && snapshot.Version < published.Configuration.Version)
+            {
+                return false;
+            }
+
+            var staged = Volatile.Read(ref _staged);
+            if (staged is not null && snapshot.Version < staged.Version)
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _staged, snapshot);
+            return true;
+        }
+    }
+
+    /// <summary>Clears a staged snapshot when its publication attempt does not complete.</summary>
+    internal void ClearStaged(HostConfigurationSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (_replacementGate)
+        {
+            if (ReferenceEquals(Volatile.Read(ref _staged), snapshot))
+            {
+                Volatile.Write(ref _staged, null);
+            }
+        }
+    }
 
     internal bool TryReplace(
         HostConfigurationSnapshot snapshot,
@@ -342,6 +384,10 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
                 retireGeneration: previous.DispatchGeneration is not null &&
                     !ReferenceEquals(previous.DispatchGeneration, dispatchGeneration));
             Interlocked.Exchange(ref _published, publication);
+            if (ReferenceEquals(Volatile.Read(ref _staged), snapshot))
+            {
+                Volatile.Write(ref _staged, null);
+            }
         }
 
         return true;
@@ -359,6 +405,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         lock (_replacementGate)
         {
             previous = Interlocked.Exchange(ref _published, null);
+            Volatile.Write(ref _staged, null);
             retirement = previous?.Publication.BeginRetirement(retireGeneration: previous.DispatchGeneration is not null)
                 ?? Task.CompletedTask;
         }

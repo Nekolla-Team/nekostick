@@ -5,6 +5,7 @@ using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Host;
 using Nekolla.Nekostick.Extensions;
+using Nekolla.Nekostick.Routing;
 using Xunit;
 
 namespace Nekolla.Nekostick.UnitTests;
@@ -174,6 +175,7 @@ public sealed class HostConfigurationStateTests
             await revisionReader.Observed.Task.WaitAsync(
                 TimeSpan.FromSeconds(5),
                 TestContext.Current.CancellationToken);
+            await service.StopAsync(CancellationToken.None);
 
             var status = runtimeState.Status;
             Assert.Same(prior, holder.Current);
@@ -189,6 +191,44 @@ public sealed class HostConfigurationStateTests
             await service.StopAsync(CancellationToken.None);
             await publisher.DisposeAsync();
         }
+    }
+
+    [Fact]
+    public async Task PublisherReloadsLatestDurableSnapshotAfterCandidateReadiness()
+    {
+        var initial = CreateSnapshot(
+            version: 1,
+            routes: ImmutableArray.Create(CreateRoute(
+                new RouteMatcherConfiguration(RouteMatcherType.Exact, "/initial", default, default),
+                new ForwardingConfiguration(ForwardingMode.Preserve, null))));
+        var latest = CreateSnapshot(
+            version: 2,
+            routes: ImmutableArray.Create(CreateRoute(
+                new RouteMatcherConfiguration(RouteMatcherType.Exact, "/latest", default, default),
+                new ForwardingConfiguration(ForwardingMode.Preserve, null))));
+        var reader = new LatestSnapshotReader(latest);
+        var holder = new HostConfigurationSnapshotHolder();
+        var nodeOptions = new HostNodeOptions(skipExtensions: true, disableSupervisor: false, readOnly: false);
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            new ExtensionRuntimeManager(HostApiVersion.Current),
+            nodeOptions,
+            NullLogger<HostConfigurationPublisher>.Instance,
+            snapshotReader: reader);
+
+        Assert.True(await publisher.PublishAsync(initial, TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, reader.ReadCalls);
+        Assert.Same(latest, holder.Current);
+        Assert.Equal(2L, holder.Current!.Version);
+        Assert.Equal(
+            RouteMatchStatus.Matched,
+            holder.RoutingSnapshot!.Matcher.Match(
+                new RouteMatchInput("/latest", "integration.test", "GET")).Status);
+        Assert.Equal(
+            RouteMatchStatus.NoMatch,
+            holder.RoutingSnapshot.Matcher.Match(
+                new RouteMatchInput("/initial", "integration.test", "GET")).Status);
     }
 
     [Fact]
@@ -272,6 +312,25 @@ public sealed class HostConfigurationStateTests
             Task.FromResult(
                 ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+    }
+
+    private sealed class LatestSnapshotReader : IHostConfigurationSnapshotReader
+    {
+        private readonly HostConfigurationSnapshot _snapshot;
+
+        public LatestSnapshotReader(HostConfigurationSnapshot snapshot) =>
+            _snapshot = snapshot;
+
+        public int ReadCalls { get; private set; }
+
+        public Task<ConfigurationReadResult<HostConfigurationSnapshot>> ReadCompleteAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ReadCalls++;
+            return Task.FromResult(
+                ConfigurationReadResult<HostConfigurationSnapshot>.Success(_snapshot));
+        }
     }
 
     private sealed class OneShotConfigurationChangeSignal : IConfigurationChangeSignal

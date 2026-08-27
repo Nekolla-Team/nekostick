@@ -265,6 +265,157 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         {
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
+        catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
+        {
+            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+        }
+        catch (InvalidOperationException)
+        {
+            return EfHostConfigRevisionHelper.ValidationWriteFailure();
+        }
+        catch (DbUpdateException)
+        {
+            return EfHostConfigRevisionHelper.StorageWriteFailure();
+        }
+        catch (Exception)
+        {
+            return EfHostConfigRevisionHelper.StorageWriteFailure();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Atomically persists extension records that are absent from the durable store without creating
+    /// extension settings. Existing records are authoritative and an exact repeat is a no-op.
+    /// </summary>
+    /// <param name="expectedVersion">The global revision observed during manifest discovery.</param>
+    /// <param name="records">The validated records to create.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns>The committed global revision or a safe error.</returns>
+    public async ValueTask<ConfigurationWriteResult> PersistDiscoveredExtensionRecordsAsync(
+        long expectedVersion,
+        ImmutableArray<ExtensionRecordConfiguration> records,
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (expectedVersion < 0 || records.IsDefaultOrEmpty ||
+                records.Any(static record => record is null || record.LoadState != ExtensionLoadState.Loaded) ||
+                !HostConfigurationSemanticValidator.TryValidateExtensionRecords(records))
+            {
+                return EfHostConfigRevisionHelper.ValidationWriteFailure();
+            }
+
+            await using var transaction = await _dbContext.Database.BeginTransactionAsync(
+                IsolationLevel.RepeatableRead,
+                cancellationToken);
+
+            var revision = await _dbContext.ConfigurationRevisions
+                .SingleOrDefaultAsync(
+                    value => value.RevisionKey == PersistenceDatabaseDefaults.GlobalRevisionKey,
+                    cancellationToken);
+            var globalSettings = await _dbContext.GlobalSettings
+                .SingleOrDefaultAsync(cancellationToken);
+            if (revision is null || globalSettings is null)
+            {
+                return ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.NotFound));
+            }
+
+            if (revision.Id != Guid.Parse(PersistenceDatabaseDefaults.SeedConfigurationRevisionId) ||
+                globalSettings.Id != Guid.Parse(PersistenceDatabaseDefaults.SeedGlobalSettingsId))
+            {
+                return EfHostConfigRevisionHelper.ValidationWriteFailure();
+            }
+
+            // The revision is checked before the idempotence path so a stale caller cannot
+            // mistake a concurrent commit for a successful no-op.
+            if (revision.Version != expectedVersion)
+            {
+                return EfHostConfigRevisionHelper.ConflictWriteFailure();
+            }
+
+            var extensionIds = records
+                .Select(static record => record.ExtensionId)
+                .ToArray();
+            var existing = await _dbContext.ExtensionRecords
+                .Where(record => extensionIds.Contains(record.ExtensionId))
+                .ToListAsync(cancellationToken);
+            var existingById = existing.ToDictionary(
+                static record => record.ExtensionId,
+                StringComparer.Ordinal);
+            foreach (var record in records)
+            {
+                if (!existingById.TryGetValue(record.ExtensionId, out var existingRecord))
+                {
+                    continue;
+                }
+
+                // An existing row wins even when its record version or timestamps differ.
+                // A different installed version/state is a real cross-process conflict.
+                if (!string.Equals(existingRecord.InstalledVersion, record.Version, StringComparison.Ordinal) ||
+                    (Nekolla.Nekostick.Contracts.ExtensionLoadState)existingRecord.LoadState != record.LoadState)
+                {
+                    return EfHostConfigRevisionHelper.ConflictWriteFailure();
+                }
+            }
+
+            var missing = records
+                .Where(record => !existingById.ContainsKey(record.ExtensionId))
+                .ToArray();
+            if (missing.Length == 0)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ConfigurationWriteResult.Success(revision.Version);
+            }
+
+            var now = _timeProvider.GetUtcNow();
+            _dbContext.ExtensionRecords.AddRange(missing.Select(record => new ExtensionRecord
+            {
+                Id = EfHostConfigRevisionHelper.NewUuidV7(),
+                ExtensionId = record.ExtensionId,
+                InstalledVersion = record.Version,
+                LoadState = (Nekolla.Nekostick.Domain.ExtensionLoadState)record.LoadState,
+                CreatedAt = now,
+                UpdatedAt = now,
+                Version = 1
+            }));
+
+            var newVersion = EfHostConfigRevisionHelper.IncrementVersion(revision.Version);
+            revision.Version = newVersion;
+            revision.CommittedAt = now;
+            revision.UpdatedAt = now;
+            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            await _revisionHelper.PublishConfigurationChangedAsync(newVersion);
+            return ConfigurationWriteResult.Success(newVersion);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
+        {
+            return EfHostConfigRevisionHelper.ValidationWriteFailure();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+        }
+        catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
+        {
+            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+        }
+        catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
+        {
+            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+        }
         catch (InvalidOperationException)
         {
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
@@ -555,6 +706,10 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
+        {
+            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+        }
+        catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }

@@ -15,6 +15,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     private readonly HostNodeOptions _nodeOptions;
     private readonly ILogger<HostConfigurationPublisher> _logger;
     private readonly IDbContextFactory<NekostickDbContext>? _dbContextFactory;
+    private readonly HostRuntimeState? _runtimeState;
+    private readonly IHostConfigurationSnapshotReader? _snapshotReader;
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private ImmutableDictionary<Guid, string?> _routeOwners = ImmutableDictionary<Guid, string?>.Empty;
     private int _disposed;
@@ -25,18 +27,24 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     /// <param name="nodeOptions">The immutable host node options controlling extension publication.</param>
     /// <param name="logger">The logger used to record publication failures.</param>
     /// <param name="dbContextFactory">The optional persistence factory used to load service ownership metadata.</param>
+    /// <param name="runtimeState">The optional runtime capability state updated during staged publication.</param>
+    /// <param name="snapshotReader">The optional durable snapshot reader used to reload startup-owned writes before publication.</param>
     public HostConfigurationPublisher(
         HostConfigurationSnapshotHolder snapshotHolder,
         ExtensionRuntimeManager runtimeManager,
         HostNodeOptions nodeOptions,
         ILogger<HostConfigurationPublisher> logger,
-        IDbContextFactory<NekostickDbContext>? dbContextFactory = null)
+        IDbContextFactory<NekostickDbContext>? dbContextFactory = null,
+        HostRuntimeState? runtimeState = null,
+        IHostConfigurationSnapshotReader? snapshotReader = null)
     {
         _snapshotHolder = snapshotHolder ?? throw new ArgumentNullException(nameof(snapshotHolder));
         _runtimeManager = runtimeManager ?? throw new ArgumentNullException(nameof(runtimeManager));
         _nodeOptions = nodeOptions ?? throw new ArgumentNullException(nameof(nodeOptions));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _dbContextFactory = dbContextFactory;
+        _runtimeState = runtimeState;
+        _snapshotReader = snapshotReader;
     }
 
     internal async ValueTask<bool> PublishAsync(
@@ -50,6 +58,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         }
 
         await _publicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var staged = false;
+        var published = false;
+        var stagedSnapshot = snapshot;
+        ExtensionGenerationPreparation? activePreparation = null;
         try
         {
             if (Volatile.Read(ref _disposed) != 0)
@@ -57,11 +69,19 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
+            if (!_snapshotHolder.TryStage(snapshot))
+            {
+                return false;
+            }
+
+            staged = true;
+            _runtimeState?.BeginStagedConfigurationWrites();
+
             var serviceOwners = await ReadServiceOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
             _routeOwners = await ReadRouteOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
             var previousSnapshot = _snapshotHolder.RoutingSnapshot;
             var previousGeneration = previousSnapshot?.DispatchGeneration;
-            var desiredSet = BuildDesired(snapshot);
+            var desiredSet = await BuildDesiredAsync(snapshot, cancellationToken).ConfigureAwait(false);
             if (desiredSet.HasUnavailableLoadedRecord &&
                 previousGeneration is not null &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
@@ -72,6 +92,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 }
 
                 PublishSnapshotEvents(snapshot, previousSnapshot!.Configuration);
+                published = true;
                 return true;
             }
 
@@ -85,32 +106,56 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             }
 
             var preparation = preparedResult.Preparation;
+            activePreparation = preparation;
             if (HasUnsafeUnavailableBinding(preparation.Generation))
             {
                 await preparation.AbortAsync().ConfigureAwait(false);
-                return await PublishWithPreviousOrEmptyAsync(
+                activePreparation = null;
+                var fallbackPublished = await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
-                        serviceOwners,
                         cancellationToken)
                     .ConfigureAwait(false);
+                published = fallbackPublished;
+                return fallbackPublished;
             }
 
             var ready = await preparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
             if (!ready.Succeeded || ready.Generation is null)
             {
                 await preparation.AbortAsync().ConfigureAwait(false);
-                return await PublishWithPreviousOrEmptyAsync(
+                activePreparation = null;
+                var fallbackPublished = await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
-                        serviceOwners,
                         cancellationToken)
                     .ConfigureAwait(false);
+                published = fallbackPublished;
+                return fallbackPublished;
             }
 
-            if (!_snapshotHolder.TryReplace(snapshot, ready.Generation, serviceOwners))
+            var publicationSnapshot = await ReadLatestSnapshotAsync(snapshot, cancellationToken)
+                .ConfigureAwait(false);
+            if (publicationSnapshot is null ||
+                !_snapshotHolder.TryStage(publicationSnapshot))
             {
-                await preparation.AbortAsync().ConfigureAwait(false);
+                return false;
+            }
+
+            stagedSnapshot = publicationSnapshot;
+            var publicationServiceOwners = await ReadServiceOwnersAsync(
+                    publicationSnapshot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            _routeOwners = await ReadRouteOwnersAsync(
+                    publicationSnapshot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!_snapshotHolder.TryReplace(
+                    publicationSnapshot,
+                    ready.Generation,
+                    publicationServiceOwners))
+            {
                 return false;
             }
 
@@ -120,8 +165,12 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 return false;
             }
 
-            HostLogMessages.ConfigurationSnapshotApplied(_logger, snapshot.Version);
-            PublishSnapshotEvents(snapshot, previousSnapshot?.Configuration);
+            // CompletePublicationAsync is the irrevocable manager handoff. Do not
+            // abort this preparation if later event/log delivery fails.
+            activePreparation = null;
+            HostLogMessages.ConfigurationSnapshotApplied(_logger, publicationSnapshot.Version);
+            PublishSnapshotEvents(publicationSnapshot, previousSnapshot?.Configuration);
+            published = true;
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -136,25 +185,72 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         }
         finally
         {
-            _publicationGate.Release();
-        }
-    }
+            try
+            {
+                if (activePreparation is not null)
+                {
+                    await activePreparation.AbortAsync().ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                // Abort owns its manager gate cleanup; publication cleanup must
+                // still release the publisher gate when lifecycle cleanup fails.
+            }
 
+            try
+            {
+                if (staged)
+                {
+                    _snapshotHolder.ClearStaged(stagedSnapshot);
+                    if (!published)
+                    {
+                        _runtimeState?.MarkSnapshotRejected();
+                    }
+                }
+
+                _runtimeState?.EndStagedConfigurationWrites();
+            }
+            finally
+            {
+                _publicationGate.Release();
+            }
+        }
+
+
+    }
     private async ValueTask<bool> PublishWithPreviousOrEmptyAsync(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? previousGeneration,
-        ImmutableDictionary<Guid, string?> serviceOwners,
         CancellationToken cancellationToken)
     {
+        var publicationSnapshot = await ReadLatestSnapshotAsync(snapshot, cancellationToken)
+            .ConfigureAwait(false);
+        if (publicationSnapshot is null)
+        {
+            return false;
+        }
+
+        var publicationServiceOwners = await ReadServiceOwnersAsync(
+                publicationSnapshot,
+                cancellationToken)
+            .ConfigureAwait(false);
+        _routeOwners = await ReadRouteOwnersAsync(
+                publicationSnapshot,
+                cancellationToken)
+            .ConfigureAwait(false);
         var previousSnapshot = _snapshotHolder.Current;
         if (previousGeneration is not null)
         {
-            if (!_snapshotHolder.TryReplace(snapshot, previousGeneration, serviceOwners))
+            if (!_snapshotHolder.TryReplace(
+                    publicationSnapshot,
+                    previousGeneration,
+                    publicationServiceOwners))
             {
                 return false;
             }
 
-            PublishSnapshotEvents(snapshot, previousSnapshot);
+            PublishSnapshotEvents(publicationSnapshot, previousSnapshot);
             return true;
         }
 
@@ -167,20 +263,64 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         }
 
         var emptyPreparation = emptyResult.Preparation;
-        var ready = await emptyPreparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
-        if (!ready.Succeeded || ready.Generation is null ||
-            !_snapshotHolder.TryReplace(snapshot, ready.Generation, serviceOwners))
+        var completed = false;
+        try
         {
-            return false;
+            var ready = await emptyPreparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
+            if (!ready.Succeeded || ready.Generation is null ||
+                !_snapshotHolder.TryReplace(publicationSnapshot, ready.Generation, publicationServiceOwners))
+            {
+                return false;
+            }
+
+            if (!await emptyPreparation.CompletePublicationAsync().ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            completed = true;
+            PublishSnapshotEvents(publicationSnapshot, previousSnapshot);
+            return true;
+        }
+        finally
+        {
+            if (!completed)
+            {
+                await emptyPreparation.AbortAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async ValueTask<HostConfigurationSnapshot?> ReadLatestSnapshotAsync(
+        HostConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (_snapshotReader is null)
+        {
+            return snapshot;
         }
 
-        if (!await emptyPreparation.CompletePublicationAsync().ConfigureAwait(false))
+        try
         {
-            return false;
-        }
+            var loaded = await _snapshotReader
+                .ReadCompleteAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!loaded.IsSuccess || loaded.Value is null || loaded.Value.Version < snapshot.Version)
+            {
+                return null;
+            }
 
-        PublishSnapshotEvents(snapshot, previousSnapshot);
-        return true;
+            return loaded.Value;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(ReadLatestSnapshotAsync));
+            return null;
+        }
     }
 
     private async ValueTask<ImmutableDictionary<Guid, string?>> ReadServiceOwnersAsync(
@@ -330,6 +470,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         await _publicationGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            _runtimeState?.EndStagedConfigurationWrites();
             await _snapshotHolder.DisposeAsync().ConfigureAwait(false);
             await _runtimeManager.DisposeAsync().ConfigureAwait(false);
         }

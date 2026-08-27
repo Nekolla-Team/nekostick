@@ -117,7 +117,11 @@ public sealed class HostNodeRegistrationService : BackgroundService
         var snapshot = _snapshotAccessor.Current;
         if (snapshot is null)
         {
-            _runtimeState.MarkSnapshotRejected();
+            if (!_runtimeState.HasStagedSnapshot)
+            {
+                _runtimeState.MarkSnapshotRejected();
+            }
+
             return;
         }
 

@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
+using Nekolla.Nekostick.Persistence;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -20,22 +21,35 @@ public sealed partial class HostConfigurationPublisher
         long RecordVersion,
         ExtensionSettingsIdentity? Settings);
 
-    private DesiredExtensionSet BuildDesired(HostConfigurationSnapshot snapshot)
+    private const int MaxBootstrapReloadAttempts = 3;
+
+    private async ValueTask<DesiredExtensionSet> BuildDesiredAsync(
+        HostConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken,
+        int reloadAttempt = 0)
     {
         if (_nodeOptions.SkipExtensions)
         {
             return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, false);
         }
 
-        var loadedRecords = snapshot.ExtensionRecords
-            .Where(static record => record is not null && record.LoadState == ExtensionLoadState.Loaded)
-            .GroupBy(static record => record.ExtensionId, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.ToArray(), StringComparer.Ordinal);
-        var bootstrap = snapshot.ExtensionRecords.Length == 0;
+        var durableRecords = new Dictionary<string, ExtensionRecordConfiguration>(StringComparer.Ordinal);
+        var invalidDurableRecords = false;
+        foreach (var record in snapshot.ExtensionRecords)
+        {
+            if (record is null || !durableRecords.TryAdd(record.ExtensionId, record))
+            {
+                invalidDurableRecords = true;
+            }
+        }
+
+        var loadedRecords = durableRecords
+            .Where(static pair => pair.Value.LoadState == ExtensionLoadState.Loaded)
+            .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
         var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
         if (!Directory.Exists(installRoot))
         {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, loadedRecords.Count != 0);
+            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, invalidDurableRecords || loadedRecords.Count != 0);
         }
 
         var discoveredById = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
@@ -50,7 +64,7 @@ public sealed partial class HostConfigurationPublisher
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.EnumerateExtensions");
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, loadedRecords.Count != 0);
+            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, true);
         }
 
         foreach (var directory in directories)
@@ -62,9 +76,18 @@ public sealed partial class HostConfigurationPublisher
                 HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.ManifestDiscovery");
                 continue;
             }
-            if (!result.Succeeded || result.Manifest is null) continue;
+
+            if (!result.Succeeded || result.Manifest is null)
+            {
+                continue;
+            }
+
             var manifest = result.Manifest;
-            if (duplicateIds.Contains(manifest.Id)) continue;
+            if (duplicateIds.Contains(manifest.Id))
+            {
+                continue;
+            }
+
             if (!discoveredById.TryAdd(manifest.Id, manifest))
             {
                 discoveredById.Remove(manifest.Id);
@@ -72,23 +95,85 @@ public sealed partial class HostConfigurationPublisher
             }
         }
 
-        var localFailure = duplicateIds.Any(loadedRecords.ContainsKey) ||
-            loadedRecords.Any(pair => pair.Value.Length != 1 ||
-                !discoveredById.TryGetValue(pair.Key, out var manifest) ||
-                !string.Equals(pair.Value[0].Version, manifest.Version.ToString(), StringComparison.Ordinal));
+        if (invalidDurableRecords || duplicateIds.Count != 0)
+        {
+            throw new InvalidOperationException("The durable extension records or discovered identifiers are invalid.");
+        }
+
+        var localFailure = loadedRecords.Any(pair =>
+            !discoveredById.TryGetValue(pair.Key, out var manifest) ||
+            !string.Equals(pair.Value.Version, manifest.Version.ToString(), StringComparison.Ordinal));
         if (discoveredById.Count == 0)
         {
             return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, localFailure);
         }
 
-        var matchedManifests = bootstrap
-            ? discoveredById.Values.ToImmutableArray()
-            : discoveredById.Values.Where(manifest => loadedRecords.TryGetValue(manifest.Id, out var records) &&
-                records.Length == 1 && string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal)).ToImmutableArray();
-        var graph = ExtensionManifestGraph.ValidateAndOrder(
-            matchedManifests,
+        // Validate the complete discovered graph before any record can be marked Loaded.
+        var allGraph = ExtensionManifestGraph.ValidateAndOrder(
+            discoveredById.Values,
             new SemVersion(HostApiVersion.Current.Major, HostApiVersion.Current.Minor, HostApiVersion.Current.Patch));
-        if (!graph.Succeeded) return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, true);
+        if (!allGraph.Succeeded)
+        {
+            throw new InvalidOperationException("The discovered extension graph is invalid.");
+        }
+
+        // Existing records are authoritative. A missing record is predicted Loaded for this
+        // atomic bootstrap only after the graph of the extensions that may start is valid.
+        var loadableManifests = discoveredById.Values
+            .Where(manifest => !durableRecords.TryGetValue(manifest.Id, out var record) ||
+                record.LoadState == ExtensionLoadState.Loaded &&
+                string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal))
+            .ToImmutableArray();
+        var graph = ExtensionManifestGraph.ValidateAndOrder(
+            loadableManifests,
+            new SemVersion(HostApiVersion.Current.Major, HostApiVersion.Current.Minor, HostApiVersion.Current.Patch));
+        if (!graph.Succeeded)
+        {
+            throw new InvalidOperationException("The loadable extension graph is invalid.");
+        }
+
+        var absentManifests = loadableManifests
+            .Where(manifest => !durableRecords.ContainsKey(manifest.Id))
+            .ToImmutableArray();
+        var persistedIds = ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
+        if (absentManifests.Length != 0)
+        {
+            if (_dbContextFactory is null)
+            {
+                // A discovered extension must never start without its durable record.
+                throw new InvalidOperationException("Extension records require a durable configuration store.");
+            }
+
+            var persistence = await PersistBootstrapRecordsAsync(
+                    snapshot,
+                    absentManifests,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!persistence.IsSuccess)
+            {
+                var isConflict = persistence.Errors.Any(static error =>
+                    error.Code == ConfigurationErrorCode.ConcurrencyConflict);
+                if (isConflict && reloadAttempt < MaxBootstrapReloadAttempts)
+                {
+                    var latest = await ReloadBootstrapSnapshotAsync(snapshot, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (latest is not null && latest.Version > snapshot.Version)
+                    {
+                        return await BuildDesiredAsync(
+                                latest,
+                                cancellationToken,
+                                reloadAttempt + 1)
+                            .ConfigureAwait(false);
+                    }
+                }
+
+                throw new InvalidOperationException("Extension records could not be durably persisted.");
+            }
+
+            persistedIds = absentManifests
+                .Select(static manifest => manifest.Id)
+                .ToImmutableHashSet(StringComparer.Ordinal);
+        }
 
         var routesByOwner = snapshot.Routes
             .Where(static route => route is not null)
@@ -108,14 +193,102 @@ public sealed partial class HostConfigurationPublisher
         var desired = ImmutableArray.CreateBuilder<ExtensionRuntimeDescriptor>();
         foreach (var manifest in graph.OrderedManifests)
         {
-            if (!bootstrap && (!loadedRecords.TryGetValue(manifest.Id, out var records) || records.Length != 1 ||
-                !string.Equals(records[0].Version, manifest.Version.ToString(), StringComparison.Ordinal))) continue;
+            var isNewlyPersisted = persistedIds.Contains(manifest.Id);
+            if (!isNewlyPersisted &&
+                (!loadedRecords.TryGetValue(manifest.Id, out var record) ||
+                 !string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
             settingsById.TryGetValue(manifest.Id, out var settings);
             routesByOwner.TryGetValue(manifest.Id, out var ownedRouteIds);
             ownedRouteIds = ownedRouteIds.IsDefault ? ImmutableArray<Guid>.Empty : ownedRouteIds;
             desired.Add(new ExtensionRuntimeDescriptor(manifest, settings, requestedHandlerIds, true, ownedRouteIds));
         }
+
         return new(desired.ToImmutable(), localFailure);
+    }
+
+    private async ValueTask<ConfigurationWriteResult> PersistBootstrapRecordsAsync(
+        HostConfigurationSnapshot snapshot,
+        IEnumerable<ExtensionManifest> manifests,
+        CancellationToken cancellationToken)
+    {
+        if (_dbContextFactory is null)
+        {
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var records = manifests
+            .Select(manifest => new ExtensionRecordConfiguration(
+                manifest.Id,
+                manifest.Version.ToString(),
+                ExtensionLoadState.Loaded,
+                now,
+                now,
+                recordVersion: 0))
+            .ToImmutableArray();
+        try
+        {
+            await using var db = await _dbContextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var api = new EfHostConfigApi(db);
+            return await api
+                .PersistDiscoveredExtensionRecordsAsync(snapshot.Version, records, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.BootstrapRecordPersistence");
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+    }
+
+    private async ValueTask<HostConfigurationSnapshot?> ReloadBootstrapSnapshotAsync(
+        HostConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        var latest = await ReadLatestSnapshotAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        if (latest is not null && latest.Version > snapshot.Version)
+        {
+            return latest;
+        }
+
+        if (_dbContextFactory is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var db = await _dbContextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var api = new EfHostConfigApi(db);
+            var result = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            return result.IsSuccess && result.Value is { Version: > 0 } durable &&
+                durable.Version > snapshot.Version
+                ? durable
+                : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.BootstrapReload");
+            return null;
+        }
     }
 
     private static bool HasUnsafeUnavailableBinding(ExtensionDispatchGeneration generation) =>
