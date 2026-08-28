@@ -59,6 +59,7 @@ public enum HostReadinessState
 public sealed class HostRuntimeState
 {
     private readonly HostConfigurationSnapshotHolder _snapshotHolder;
+    private readonly HostNodeOptions _nodeOptions;
     private readonly bool _readOnly;
     private int _databaseAvailable;
     private int _databaseUnavailable;
@@ -70,8 +71,12 @@ public sealed class HostRuntimeState
     {
         _snapshotHolder = snapshotHolder ?? throw new ArgumentNullException(nameof(snapshotHolder));
         ArgumentNullException.ThrowIfNull(nodeOptions);
+        _nodeOptions = nodeOptions;
         _readOnly = nodeOptions.ReadOnly;
     }
+
+    /// <summary>Gets the invocation-local host safety switches.</summary>
+    internal HostNodeOptions NodeOptions => _nodeOptions;
 
     /// <summary>Gets the current safe capability state.</summary>
     public HostRuntimeStatus Status => new(

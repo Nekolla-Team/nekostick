@@ -63,7 +63,7 @@ public sealed partial class HostConfigurationPublisher
             : ExtensionLoadState.Disabled;
         var canPersistBootstrapRecords = !_nodeOptions.ReadOnly &&
             (_runtimeState is null || _runtimeState.ExtensionConfigurationWritesAllowed);
-        var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
+        var installRoot = _nodeOptions.ExtensionsRootPath;
         if (!Directory.Exists(installRoot))
         {
             return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, invalidDurableRecords || loadedRecords.Count != 0, requestedForceReloadIds);

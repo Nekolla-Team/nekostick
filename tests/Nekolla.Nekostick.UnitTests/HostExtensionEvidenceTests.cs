@@ -31,7 +31,11 @@ public sealed class HostExtensionEvidenceTests
             await using var publisher = new HostConfigurationPublisher(
                 holder,
                 manager,
-                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: true),
+                new HostNodeOptions(
+                    skipExtensions: false,
+                    disableSupervisor: false,
+                    readOnly: true,
+                    extensionsRootPath: staged.InstallRoot),
                 NullLogger<HostConfigurationPublisher>.Instance);
             var snapshot = CreatePublisherSnapshot(1, ImmutableArray<ExtensionRecordConfiguration>.Empty);
 
@@ -80,7 +84,11 @@ public sealed class HostExtensionEvidenceTests
             await using var publisher = new HostConfigurationPublisher(
                 holder,
                 manager,
-                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+                new HostNodeOptions(
+                    skipExtensions: false,
+                    disableSupervisor: false,
+                    readOnly: false,
+                    extensionsRootPath: staged.InstallRoot),
                 NullLogger<HostConfigurationPublisher>.Instance);
             var reloaded = await publisher.RequestExtensionReloadAsync(
                 first,
@@ -145,7 +153,11 @@ public sealed class HostExtensionEvidenceTests
         await using var publisher = new HostConfigurationPublisher(
             holder,
             manager,
-            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+            new HostNodeOptions(
+                skipExtensions: false,
+                disableSupervisor: false,
+                readOnly: false,
+                extensionsRootPath: staged.InstallRoot),
             NullLogger<HostConfigurationPublisher>.Instance);
         var failingSettings = Settings(
             extensionId,
@@ -244,7 +256,11 @@ public sealed class HostExtensionEvidenceTests
             await using var publisher = new HostConfigurationPublisher(
                 holder,
                 manager,
-                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+                new HostNodeOptions(
+                    skipExtensions: false,
+                    disableSupervisor: false,
+                    readOnly: false,
+                    extensionsRootPath: staged.InstallRoot),
                 NullLogger<HostConfigurationPublisher>.Instance);
             var record = new ExtensionRecordConfiguration(
                 FixtureExtensionId,
@@ -290,7 +306,11 @@ public sealed class HostExtensionEvidenceTests
             await using var publisher = new HostConfigurationPublisher(
                 holder,
                 manager,
-                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+                new HostNodeOptions(
+                    skipExtensions: false,
+                    disableSupervisor: false,
+                    readOnly: false,
+                    extensionsRootPath: staged.InstallRoot),
                 NullLogger<HostConfigurationPublisher>.Instance);
             var record = new ExtensionRecordConfiguration(
                 FixtureExtensionId,
@@ -1046,28 +1066,16 @@ public sealed class HostExtensionEvidenceTests
 
     private sealed class StagedHostExtensionDirectory : IDisposable
     {
-        private readonly string _installRoot;
-        private readonly string _rootPath;
-        private readonly bool _removeInstallRoot;
+        private StagedHostExtensionDirectory(string installRoot) => InstallRoot = installRoot;
 
-        private StagedHostExtensionDirectory(
-            string installRoot,
-            string rootPath,
-            bool removeInstallRoot)
-        {
-            _installRoot = installRoot;
-            _rootPath = rootPath;
-            _removeInstallRoot = removeInstallRoot;
-        }
+        internal string InstallRoot { get; }
 
         internal static StagedHostExtensionDirectory Create(string sourceRoot)
         {
-            var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
-            var removeInstallRoot = !Directory.Exists(installRoot);
-            Directory.CreateDirectory(installRoot);
-            var rootPath = Path.Combine(
-                installRoot,
-                "host-extension-evidence-" + Guid.NewGuid().ToString("N"));
+            var installRoot = Path.Combine(
+                Path.GetTempPath(),
+                "nekostick-evidence-" + Guid.NewGuid().ToString("N"));
+            var rootPath = Path.Combine(installRoot, "fixture");
 
             try
             {
@@ -1083,23 +1091,13 @@ public sealed class HostExtensionEvidenceTests
                     File.Copy(sourcePath, targetPath);
                 }
 
-                return new StagedHostExtensionDirectory(
-                    installRoot,
-                    rootPath,
-                    removeInstallRoot);
+                return new StagedHostExtensionDirectory(installRoot);
             }
             catch
             {
-                if (Directory.Exists(rootPath))
+                if (Directory.Exists(installRoot))
                 {
-                    Directory.Delete(rootPath, recursive: true);
-                }
-
-                if (removeInstallRoot &&
-                    Directory.Exists(installRoot) &&
-                    !Directory.EnumerateFileSystemEntries(installRoot).Any())
-                {
-                    Directory.Delete(installRoot);
+                    Directory.Delete(installRoot, recursive: true);
                 }
 
                 throw;
@@ -1108,16 +1106,9 @@ public sealed class HostExtensionEvidenceTests
 
         public void Dispose()
         {
-            if (Directory.Exists(_rootPath))
+            if (Directory.Exists(InstallRoot))
             {
-                Directory.Delete(_rootPath, recursive: true);
-            }
-
-            if (_removeInstallRoot &&
-                Directory.Exists(_installRoot) &&
-                !Directory.EnumerateFileSystemEntries(_installRoot).Any())
-            {
-                Directory.Delete(_installRoot);
+                Directory.Delete(InstallRoot, recursive: true);
             }
         }
     }

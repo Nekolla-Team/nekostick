@@ -667,12 +667,12 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         }
     }
 
-    private static ExtensionScanResult ScanExtensions(CancellationToken cancellationToken)
+    private ExtensionScanResult ScanExtensions(CancellationToken cancellationToken)
     {
         var manifests = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
         var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
         var hasUnreadableDirectories = false;
-        var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
+        var installRoot = _runtimeState.NodeOptions.ExtensionsRootPath;
         if (!Directory.Exists(installRoot))
         {
             return ExtensionScanResult.Success(manifests, duplicateIds, hasUnreadableDirectories);

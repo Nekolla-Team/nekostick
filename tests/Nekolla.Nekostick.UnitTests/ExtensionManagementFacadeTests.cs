@@ -152,7 +152,8 @@ public sealed class ExtensionManagementFacadeTests
             manager,
             snapshot,
             new SnapshotHostConfigApi(snapshot),
-            callerExtensionId: extensionId);
+            callerExtensionId: extensionId,
+            extensionsRootPath: installed.InstallRoot);
 
         using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route))
         {
@@ -336,13 +337,21 @@ public sealed class ExtensionManagementFacadeTests
         await using var publisher = new HostConfigurationPublisher(
             holder,
             manager,
-            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: true),
+            new HostNodeOptions(
+                skipExtensions: false,
+                disableSupervisor: false,
+                readOnly: true,
+                extensionsRootPath: installed.InstallRoot),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<HostConfigurationPublisher>.Instance);
         var reader = new SnapshotReader(snapshot);
         var services = new SingleServiceProvider(new SnapshotHostConfigApi(snapshot), publisher, reader);
         var runtimeState = new HostRuntimeState(
             holder,
-            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));
+            new HostNodeOptions(
+                skipExtensions: false,
+                disableSupervisor: false,
+                readOnly: false,
+                extensionsRootPath: installed.InstallRoot));
         runtimeState.MarkSnapshotAccepted();
         var facade = new ExtensionManagementFacade(
             extensionId,
@@ -440,13 +449,18 @@ public sealed class ExtensionManagementFacadeTests
         IHostConfigApi hostConfig,
         string callerExtensionId = "caller.extension",
         HostConfigurationPublisher? publisher = null,
-        IHostConfigurationSnapshotReader? snapshotReader = null)
+        IHostConfigurationSnapshotReader? snapshotReader = null,
+        string? extensionsRootPath = null)
     {
         var holder = new HostConfigurationSnapshotHolder();
         Assert.True(holder.TryReplace(snapshot));
         var runtimeState = new HostRuntimeState(
             holder,
-            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));
+            new HostNodeOptions(
+                skipExtensions: false,
+                disableSupervisor: false,
+                readOnly: false,
+                extensionsRootPath: extensionsRootPath));
         runtimeState.MarkSnapshotAccepted();
         var services = new SingleServiceProvider(hostConfig, publisher, snapshotReader);
         return new ExtensionManagementFacade(
@@ -504,15 +518,16 @@ public sealed class ExtensionManagementFacadeTests
 
     private sealed class InstalledExtensionDirectory : IDisposable
     {
-        private readonly string directory;
+        private InstalledExtensionDirectory(string installRoot) => InstallRoot = installRoot;
 
-        private InstalledExtensionDirectory(string directory) => this.directory = directory;
+        internal string InstallRoot { get; }
 
         internal static InstalledExtensionDirectory Create(string sourceRoot)
         {
-            var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
-            Directory.CreateDirectory(installRoot);
-            var directory = Path.Combine(installRoot, "facade-" + Guid.NewGuid().ToString("N"));
+            var installRoot = Path.Combine(
+                Path.GetTempPath(),
+                "nekostick-facade-" + Guid.NewGuid().ToString("N"));
+            var directory = Path.Combine(installRoot, "fixture");
             Directory.CreateDirectory(directory);
             foreach (var sourcePath in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
             {
@@ -522,14 +537,14 @@ public sealed class ExtensionManagementFacadeTests
                 File.Copy(sourcePath, targetPath);
             }
 
-            return new InstalledExtensionDirectory(directory);
+            return new InstalledExtensionDirectory(installRoot);
         }
 
         public void Dispose()
         {
-            if (Directory.Exists(directory))
+            if (Directory.Exists(InstallRoot))
             {
-                Directory.Delete(directory, recursive: true);
+                Directory.Delete(InstallRoot, recursive: true);
             }
         }
     }
