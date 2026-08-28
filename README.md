@@ -176,3 +176,5 @@ Keep the Contracts assembly as the stable ABI boundary. Do not expose database c
 Copyright 2026 Nekolla Team.
 
 Licensed under the GNU Affero General Public License, Version 3.0. See [`LICENSE`](LICENSE) or <https://www.gnu.org/licenses/agpl-3.0.html> for the full text.
+
+**Exception**: the Contracts package ([`src/Nekolla.Nekostick.Contracts`](src/Nekolla.Nekostick.Contracts)) is separately licensed under the Apache License, Version 2.0, so extension authors can build against the stable ABI without copyleft obligations. See [`src/Nekolla.Nekostick.Contracts/LICENSE`](src/Nekolla.Nekostick.Contracts/LICENSE) or <https://www.apache.org/licenses/LICENSE-2.0> for the full text.
