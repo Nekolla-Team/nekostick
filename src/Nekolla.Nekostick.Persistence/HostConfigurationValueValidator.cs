@@ -19,7 +19,7 @@ internal static class HostConfigurationValueValidator
     internal const int MaxEnvironmentValueLength = 64 * 1024;
     internal const int MaxArgumentLength = 64 * 1024;
     internal const int MaxHealthPathLength = 2048;
-    internal const int RegexTimeoutMilliseconds = 50;
+    internal const int RegexTimeoutMilliseconds = 250;
 
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 

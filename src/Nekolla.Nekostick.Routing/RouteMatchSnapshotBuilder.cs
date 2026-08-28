@@ -8,6 +8,13 @@ namespace Nekolla.Nekostick.Routing;
 /// <summary>Builds immutable route matching snapshots from Contract or Domain models.</summary>
 public static class RouteMatchSnapshotBuilder
 {
+    /// <summary>
+    /// Per-match budget for route regexes. The NonBacktracking engine matches in linear time,
+    /// so this only guards against degenerate automata; it must also tolerate heavily loaded
+    /// machines where a trivial match can be starved well beyond a few tens of milliseconds.
+    /// </summary>
+    private const int RegexMatchTimeoutMilliseconds = 250;
+
     /// <summary>Builds a snapshot from immutable Contract route values.</summary>
     /// <param name="routes">The route configurations to validate and compile.</param>
     /// <returns>A snapshot or safe configuration errors. Invalid routes are never included.</returns>
@@ -135,7 +142,10 @@ public static class RouteMatchSnapshotBuilder
                     regex = new Regex(
                         $"\\A(?:{input.Pattern})\\z",
                         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
-                        TimeSpan.FromMilliseconds(50));
+                        TimeSpan.FromMilliseconds(RegexMatchTimeoutMilliseconds));
+                    // Pay the one-time engine construction cost at build time so the first
+                    // request-path evaluation cannot burn its match budget on lazy setup.
+                    regex.IsMatch(string.Empty);
                 }
                 catch (ArgumentException)
                 {
