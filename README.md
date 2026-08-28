@@ -92,7 +92,11 @@ The equivalent bootstrap environment variables are:
 | PostgreSQL connection | `--connection-string` | `NEKOSTICK_CONNECTION_STRING` | Required |
 | Listen address | `--listen-address` | `NEKOSTICK_LISTEN_ADDRESS` | `127.0.0.1` |
 | Listen port | `--listen-port` | `NEKOSTICK_LISTEN_PORT` | `8080` |
-| Node identifier | `--node-id` | `NEKOSTICK_NODE_ID` | `0` |
+| Node identifier (max 128 characters) | `--node-id` | `NEKOSTICK_NODE_ID` | `0` |
+| Minimum log level | `--log-level` | `NEKOSTICK_LOG_LEVEL` | `Information` |
+| Include EF Core logs | `--include-ef-logs` | `NEKOSTICK_INCLUDE_EF_LOGS` | off |
+
+Accepted log levels are case-insensitive: `trace`, `debug`, `information` (alias `info`), `warning` (alias `warn`), `error`, `critical`, `none`. `--include-ef-logs` is a flag whose presence enables EF Core logging; the environment form accepts `true` or `false` and any other value fails startup validation. Diagnostics commands (`status`, `doctor`) accept the same bootstrap options and emit JSON instead of serving routes.
 
 ### Docker
 
@@ -133,7 +137,7 @@ Extension projects should reference Contracts and their explicitly declared shar
 
 ## Configuration and operations
 
-Business configuration is read from validated PostgreSQL snapshots. Bootstrap settings include `NEKOSTICK_CONNECTION_STRING`, `NEKOSTICK_LISTEN_ADDRESS`, `NEKOSTICK_LISTEN_PORT`, and `NEKOSTICK_NODE_ID`. Do not commit connection strings, secrets, or environment files, and do not write them to logs or diagnostic output.
+Business configuration is read from validated PostgreSQL snapshots. Bootstrap settings include `NEKOSTICK_CONNECTION_STRING`, `NEKOSTICK_LISTEN_ADDRESS`, `NEKOSTICK_LISTEN_PORT`, `NEKOSTICK_NODE_ID`, `NEKOSTICK_LOG_LEVEL`, and `NEKOSTICK_INCLUDE_EF_LOGS`; every setting also has an equivalent `--` CLI option (see above), and CLI values override environment values. Do not commit connection strings, secrets, or environment files, and do not write them to logs or diagnostic output.
 
 Operational constraints include:
 
