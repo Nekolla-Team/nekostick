@@ -9,7 +9,11 @@ public sealed partial class HostConfigurationPublisher
 {
     private readonly record struct DesiredExtensionSet(
         ImmutableArray<ExtensionRuntimeDescriptor> Descriptors,
-        bool HasUnavailableLoadedRecord);
+        bool HasUnavailableLoadedRecord,
+        ImmutableHashSet<string> ForceReloadIds);
+    private static readonly ImmutableHashSet<string> EmptyForceReloadIds =
+        ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
+
 
     private readonly record struct ExtensionSettingsIdentity(
         int SchemaVersion,
@@ -23,14 +27,22 @@ public sealed partial class HostConfigurationPublisher
 
     private const int MaxBootstrapReloadAttempts = 3;
 
+    /// <summary>Builds the desired extension generation from durable records and discovered manifests.</summary>
+    /// <param name="snapshot">The durable Host configuration snapshot.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <param name="reloadAttempt">The bounded bootstrap persistence retry number.</param>
+    /// <param name="forceReloadIds">The extension identifiers that must be re-candidated even when their descriptors are unchanged.</param>
+    /// <returns>The desired descriptors and publication metadata.</returns>
     private async ValueTask<DesiredExtensionSet> BuildDesiredAsync(
         HostConfigurationSnapshot snapshot,
         CancellationToken cancellationToken,
-        int reloadAttempt = 0)
+        int reloadAttempt = 0,
+        ImmutableHashSet<string>? forceReloadIds = null)
     {
+        var requestedForceReloadIds = forceReloadIds ?? EmptyForceReloadIds;
         if (_nodeOptions.SkipExtensions)
         {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, false);
+            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, false, requestedForceReloadIds);
         }
 
         var durableRecords = new Dictionary<string, ExtensionRecordConfiguration>(StringComparer.Ordinal);
@@ -46,10 +58,15 @@ public sealed partial class HostConfigurationPublisher
         var loadedRecords = durableRecords
             .Where(static pair => pair.Value.LoadState == ExtensionLoadState.Loaded)
             .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
+        var bootstrapState = durableRecords.Count == 0
+            ? ExtensionLoadState.Loaded
+            : ExtensionLoadState.Disabled;
+        var canPersistBootstrapRecords = !_nodeOptions.ReadOnly &&
+            (_runtimeState is null || _runtimeState.ExtensionConfigurationWritesAllowed);
         var installRoot = Path.Combine(AppContext.BaseDirectory, "extensions");
         if (!Directory.Exists(installRoot))
         {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, invalidDurableRecords || loadedRecords.Count != 0);
+            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, invalidDurableRecords || loadedRecords.Count != 0, requestedForceReloadIds);
         }
 
         var discoveredById = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
@@ -64,7 +81,7 @@ public sealed partial class HostConfigurationPublisher
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.EnumerateExtensions");
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, true);
+            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, true, requestedForceReloadIds);
         }
 
         foreach (var directory in directories)
@@ -105,24 +122,17 @@ public sealed partial class HostConfigurationPublisher
             !string.Equals(pair.Value.Version, manifest.Version.ToString(), StringComparison.Ordinal));
         if (discoveredById.Count == 0)
         {
-            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, localFailure);
+            return new(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, localFailure, requestedForceReloadIds);
         }
 
-        // Validate the complete discovered graph before any record can be marked Loaded.
-        var allGraph = ExtensionManifestGraph.ValidateAndOrder(
-            discoveredById.Values,
-            new SemVersion(HostApiVersion.Current.Major, HostApiVersion.Current.Minor, HostApiVersion.Current.Patch));
-        if (!allGraph.Succeeded)
-        {
-            throw new InvalidOperationException("The discovered extension graph is invalid.");
-        }
-
-        // Existing records are authoritative. A missing record is predicted Loaded for this
-        // atomic bootstrap only after the graph of the extensions that may start is valid.
+        // Existing records are authoritative. A missing record is predicted Loaded only for
+        // the zero-record first-run bootstrap when durable bootstrap writes are permitted.
+        // Validate only load-relevant manifests so an invalid Disabled or newly discovered-to-be-Disabled manifest cannot poison publication.
         var loadableManifests = discoveredById.Values
-            .Where(manifest => !durableRecords.TryGetValue(manifest.Id, out var record) ||
-                record.LoadState == ExtensionLoadState.Loaded &&
-                string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal))
+            .Where(manifest => durableRecords.TryGetValue(manifest.Id, out var record)
+                ? record.LoadState == ExtensionLoadState.Loaded &&
+                  string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal)
+                : bootstrapState == ExtensionLoadState.Loaded && canPersistBootstrapRecords)
             .ToImmutableArray();
         var graph = ExtensionManifestGraph.ValidateAndOrder(
             loadableManifests,
@@ -132,11 +142,11 @@ public sealed partial class HostConfigurationPublisher
             throw new InvalidOperationException("The loadable extension graph is invalid.");
         }
 
-        var absentManifests = loadableManifests
+        var absentManifests = discoveredById.Values
             .Where(manifest => !durableRecords.ContainsKey(manifest.Id))
             .ToImmutableArray();
         var persistedIds = ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
-        if (absentManifests.Length != 0)
+        if (absentManifests.Length != 0 && canPersistBootstrapRecords)
         {
             if (_dbContextFactory is null)
             {
@@ -145,6 +155,7 @@ public sealed partial class HostConfigurationPublisher
             }
 
             var persistence = await PersistBootstrapRecordsAsync(
+                    bootstrapState,
                     snapshot,
                     absentManifests,
                     cancellationToken)
@@ -162,7 +173,8 @@ public sealed partial class HostConfigurationPublisher
                         return await BuildDesiredAsync(
                                 latest,
                                 cancellationToken,
-                                reloadAttempt + 1)
+                                reloadAttempt + 1,
+                                requestedForceReloadIds)
                             .ConfigureAwait(false);
                     }
                 }
@@ -170,9 +182,11 @@ public sealed partial class HostConfigurationPublisher
                 throw new InvalidOperationException("Extension records could not be durably persisted.");
             }
 
-            persistedIds = absentManifests
-                .Select(static manifest => manifest.Id)
-                .ToImmutableHashSet(StringComparer.Ordinal);
+            persistedIds = bootstrapState == ExtensionLoadState.Loaded
+                ? absentManifests
+                    .Select(static manifest => manifest.Id)
+                    .ToImmutableHashSet(StringComparer.Ordinal)
+                : ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
         }
 
         var routesByOwner = snapshot.Routes
@@ -207,10 +221,11 @@ public sealed partial class HostConfigurationPublisher
             desired.Add(new ExtensionRuntimeDescriptor(manifest, settings, requestedHandlerIds, true, ownedRouteIds));
         }
 
-        return new(desired.ToImmutable(), localFailure);
+        return new(desired.ToImmutable(), localFailure, requestedForceReloadIds);
     }
 
     private async ValueTask<ConfigurationWriteResult> PersistBootstrapRecordsAsync(
+        ExtensionLoadState initialState,
         HostConfigurationSnapshot snapshot,
         IEnumerable<ExtensionManifest> manifests,
         CancellationToken cancellationToken)
@@ -226,7 +241,7 @@ public sealed partial class HostConfigurationPublisher
             .Select(manifest => new ExtensionRecordConfiguration(
                 manifest.Id,
                 manifest.Version.ToString(),
-                ExtensionLoadState.Loaded,
+                initialState,
                 now,
                 now,
                 recordVersion: 0))
@@ -238,7 +253,11 @@ public sealed partial class HostConfigurationPublisher
                 .ConfigureAwait(false);
             await using var api = new EfHostConfigApi(db);
             return await api
-                .PersistDiscoveredExtensionRecordsAsync(snapshot.Version, records, cancellationToken)
+                .PersistDiscoveredExtensionRecordsAsync(
+                    initialState,
+                    snapshot.Version,
+                    records,
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

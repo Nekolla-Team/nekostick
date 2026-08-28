@@ -143,7 +143,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Cancelled);
         }
         var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
-        if (service is null || !service.Enabled)
+        if (service is null || !service.Enabled || !IsServiceEnabledForSnapshot(snapshot, serviceId))
         {
             await WithdrawAsync(serviceId, cancellationToken).ConfigureAwait(false);
             return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Disabled);
@@ -171,14 +171,15 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 {
                     return new(serviceId, snapshot.Version, HostServiceReadinessStatus.DatabaseUnavailable);
                 }
-
                 if (slot.Startup is null)
                 {
                     slot.StartupGeneration = service.Version;
-                    slot.Startup = StartOrSwitchAsync(slot, snapshot, service);
+                    startup = StartOrSwitchAsync(slot, snapshot, service);
                 }
-
-                startup = slot.Startup!;
+                else
+                {
+                    startup = slot.Startup!;
+                }
             }
         }
 
@@ -199,6 +200,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         lock (slot.Gate)
         {
             if (slot.Active is { Ready: true } active &&
+                active.Configuration.Version == service.Version &&
                 active.Lease is { } lease && !lease.IsExpired(DateTimeOffset.UtcNow) &&
                 _runtimeState.Status.DatabaseAvailable)
             {
@@ -357,7 +359,9 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
     internal async Task ReconcileAsync(HostConfigurationSnapshot snapshot, CancellationToken cancellationToken)
     {
-        var configured = snapshot.Services.Where(value => value.Enabled).ToImmutableDictionary(value => value.Id);
+        var configured = snapshot.Services
+            .Where(value => value.Enabled && IsServiceEnabledForSnapshot(snapshot, value.Id))
+            .ToImmutableDictionary(value => value.Id);
         foreach (var slotPair in _slots)
         {
             if (!configured.ContainsKey(slotPair.Key))
@@ -372,6 +376,41 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             .ToArray();
         await Task.WhenAll(eagerStarts).ConfigureAwait(false);
     }
+    internal async Task StopOwnedServicesAsync(
+        string extensionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(extensionId))
+        {
+            return;
+        }
+
+        var serviceIds = _snapshotHolder.RoutingSnapshot?.ServiceOwners
+            .Where(pair => string.Equals(pair.Value, extensionId, StringComparison.Ordinal))
+            .Select(static pair => pair.Key)
+            .ToArray() ?? Array.Empty<Guid>();
+        foreach (var serviceId in serviceIds)
+        {
+            await WithdrawAsync(serviceId, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private bool IsServiceEnabledForSnapshot(
+        HostConfigurationSnapshot snapshot,
+        Guid serviceId)
+    {
+        if (_snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(serviceId, out var owner) != true ||
+            owner is null)
+        {
+            return true;
+        }
+
+        var record = snapshot.ExtensionRecords.FirstOrDefault(value =>
+            string.Equals(value.ExtensionId, owner, StringComparison.Ordinal));
+        // Only a durable Disabled record gates; owners without records (host-attributed or pre-discovery) stay enabled.
+        return record?.LoadState != Nekolla.Nekostick.Contracts.ExtensionLoadState.Disabled;
+    }
+
 
     internal async Task RenewLeasesAsync(CancellationToken cancellationToken)
     {
@@ -380,6 +419,12 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             ServiceGeneration? generation;
             lock (slot.Gate) generation = slot.Active;
             if (generation is null || !generation.Ready)
+            {
+                continue;
+            }
+
+            var snapshot = _snapshotHolder.Current;
+            if (snapshot is null || !IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id))
             {
                 continue;
             }

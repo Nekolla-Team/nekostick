@@ -353,7 +353,7 @@ public sealed class NekostickDbContext : DbContext
                 "ck_extension_records_id_uuid_v7",
                 PersistenceDatabaseDefaults.UuidV7CheckConstraintSql);
             table.HasCheckConstraint("ck_extension_records_text", "length(extension_id) BETWEEN 1 AND 128 AND length(installed_version) BETWEEN 1 AND 128");
-            table.HasCheckConstraint("ck_extension_records_load_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading')");
+            table.HasCheckConstraint("ck_extension_records_load_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled')");
         });
 
         builder.HasKey(value => value.Id).HasName("pk_extension_records");

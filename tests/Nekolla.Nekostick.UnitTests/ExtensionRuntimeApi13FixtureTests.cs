@@ -34,7 +34,7 @@ public sealed partial class ExtensionRuntimeTests
             TestContext.Current.CancellationToken);
         Assert.Equal(ExtensionInvocationState.Handled, currentResult.State);
         var currentBody = Body(currentResult);
-        Assert.Contains("api=1.3.0", currentBody, StringComparison.Ordinal);
+        Assert.Contains("api=1.3.1", currentBody, StringComparison.Ordinal);
         Assert.Contains(
             "api13=Supported;sibling=True;supervisor=NotFound;routeSubscribe=True;routeHook=True;logWriter=Called",
             currentBody,
@@ -111,6 +111,13 @@ public sealed partial class ExtensionRuntimeTests
     private sealed class RecordingSupervisor : IExtensionSupervisorApi
     {
         public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadAsync(
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Success(
+                    ImmutableArray<ExtensionServiceRuntimeSnapshot>.Empty));
+
+        public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadForExtensionAsync(
+            string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Success(

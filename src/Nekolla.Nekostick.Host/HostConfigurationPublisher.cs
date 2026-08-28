@@ -49,9 +49,11 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
     internal async ValueTask<bool> PublishAsync(
         HostConfigurationSnapshot snapshot,
+        ImmutableHashSet<string>? forceReloadIds = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        var requestedForceReloadIds = forceReloadIds ?? EmptyForceReloadIds;
         if (Volatile.Read(ref _disposed) != 0)
         {
             return false;
@@ -81,7 +83,11 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             _routeOwners = await ReadRouteOwnersAsync(snapshot, cancellationToken).ConfigureAwait(false);
             var previousSnapshot = _snapshotHolder.RoutingSnapshot;
             var previousGeneration = previousSnapshot?.DispatchGeneration;
-            var desiredSet = await BuildDesiredAsync(snapshot, cancellationToken).ConfigureAwait(false);
+            var desiredSet = await BuildDesiredAsync(
+                    snapshot,
+                    cancellationToken,
+                    forceReloadIds: requestedForceReloadIds)
+                .ConfigureAwait(false);
             if (desiredSet.HasUnavailableLoadedRecord &&
                 previousGeneration is not null &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
@@ -96,12 +102,18 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 staged = false;
                 DeliverPublicationEvents(snapshot, previousSnapshot!.Configuration);
                 published = true;
-                return true;
+                // Reusing the prior generation cannot satisfy a forced reload;
+                // keep the live publication but report the reload as unsuccessful.
+                return requestedForceReloadIds.Count == 0;
             }
 
             var desired = desiredSet.Descriptors;
             var preparedResult = await _runtimeManager
-                .PrepareGenerationAsync(desired, previousGeneration, cancellationToken)
+                .PrepareGenerationAsync(
+                    desired,
+                    previousGeneration,
+                    desiredSet.ForceReloadIds,
+                    cancellationToken)
                 .ConfigureAwait(false);
             if (!preparedResult.Succeeded || preparedResult.Preparation is null)
             {
@@ -119,8 +131,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         previousGeneration,
                         cancellationToken)
                     .ConfigureAwait(false);
+                // Fallback publishes the snapshot without forcing the requested
+                // reload; preserve publication cleanup while reporting failure.
                 published = fallbackPublished;
-                return fallbackPublished;
+                return requestedForceReloadIds.Count == 0 && fallbackPublished;
             }
 
             var ready = await preparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
@@ -134,7 +148,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         cancellationToken)
                     .ConfigureAwait(false);
                 published = fallbackPublished;
-                return fallbackPublished;
+                return requestedForceReloadIds.Count == 0 && fallbackPublished;
             }
 
             var publicationSnapshot = await ReadLatestSnapshotAsync(snapshot, cancellationToken)
@@ -224,6 +238,74 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
 
     }
+    /// <summary>Publishes a snapshot while forcing one loaded extension through candidate replacement.</summary>
+    /// <param name="snapshot">The durable Host configuration snapshot to publish.</param>
+    /// <param name="extensionId">The extension identifier that must be reloaded.</param>
+    /// <param name="cancellationToken">The publication cancellation token.</param>
+    /// <returns>The publication outcome plus the committed snapshot version when accepted.</returns>
+    internal async ValueTask<ExtensionReloadPublication> RequestExtensionReloadAsync(
+        HostConfigurationSnapshot snapshot,
+        string extensionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (string.IsNullOrWhiteSpace(extensionId))
+        {
+            return ExtensionReloadPublication.Failed;
+        }
+
+        var latest = await ReadLatestSnapshotAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        if (latest is null)
+        {
+            return ExtensionReloadPublication.Failed;
+        }
+
+        // Revalidate against the latest durable snapshot: a concurrent disable/delete may have
+        // removed the target after the caller validated its own stale snapshot.
+        var target = latest.ExtensionRecords.FirstOrDefault(value =>
+            string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
+        if (target is null || target.LoadState != ExtensionLoadState.Loaded)
+        {
+            return ExtensionReloadPublication.TargetUnavailable;
+        }
+
+        var published = await PublishAsync(
+                latest,
+                EmptyForceReloadIds.Add(extensionId),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return published
+            ? new ExtensionReloadPublication(ExtensionReloadPublicationStatus.Published, latest.Version)
+            : ExtensionReloadPublication.Failed;
+    }
+
+    /// <summary>Describes one forced extension reload publication.</summary>
+    /// <param name="Status">The publication outcome.</param>
+    /// <param name="CommittedVersion">The committed snapshot version when published; otherwise zero.</param>
+    internal readonly record struct ExtensionReloadPublication(
+        ExtensionReloadPublicationStatus Status,
+        long CommittedVersion)
+    {
+        /// <summary>Gets the generic publication failure result.</summary>
+        internal static ExtensionReloadPublication Failed =>
+            new(ExtensionReloadPublicationStatus.Failed, 0);
+
+        /// <summary>Gets the result for a target that is missing or no longer loaded in the latest snapshot.</summary>
+        internal static ExtensionReloadPublication TargetUnavailable =>
+            new(ExtensionReloadPublicationStatus.TargetUnavailable, 0);
+    }
+
+    /// <summary>Identifies forced reload publication outcomes.</summary>
+    internal enum ExtensionReloadPublicationStatus
+    {
+        /// <summary>The publication failed or reused the prior generation without reloading.</summary>
+        Failed,
+        /// <summary>The target extension is missing or no longer loaded in the latest durable snapshot.</summary>
+        TargetUnavailable,
+        /// <summary>The forced publication was accepted.</summary>
+        Published
+    }
+
     private async ValueTask<bool> PublishWithPreviousOrEmptyAsync(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? previousGeneration,
@@ -260,7 +342,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         }
 
         var emptyResult = await _runtimeManager
-            .PrepareGenerationAsync(ImmutableArray<ExtensionRuntimeDescriptor>.Empty, null, cancellationToken)
+            .PrepareGenerationAsync(
+                ImmutableArray<ExtensionRuntimeDescriptor>.Empty,
+                null,
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         if (!emptyResult.Succeeded || emptyResult.Preparation is null)
         {

@@ -15,27 +15,61 @@ internal static class ExtensionApiCapabilityGate
         host.Major == Api12Version.Major && host >= Api12Version;
 }
 
+internal enum ExtensionCallbackKind
+{
+    /// <summary>Route handler, fallback, or route-hook dispatch; the invocation holds an active-request lease that generation replacement drains.</summary>
+    Route,
+    /// <summary>Event-queue subscriber; the consumer loop is awaited when the owning instance stops.</summary>
+    Event,
+    /// <summary>Extension task-scheduler callback; an independent logical context that inherits no callback constraints.</summary>
+    Scheduler,
+    /// <summary>Entrypoint lifecycle callback (start/stop/previous-stopped) awaited by the runtime under the publication gate.</summary>
+    Lifecycle
+}
+
 internal static class ExtensionCallbackGuard
 {
-    private static readonly AsyncLocal<int> Depth = new();
+    private const int RouteBit = 1;
+    private const int EventBit = 2;
+    private const int SchedulerBit = 4;
+    private const int LifecycleBit = 8;
 
-    internal static bool IsActive => Depth.Value > 0;
+    private static readonly AsyncLocal<int> Bits = new();
 
-    internal static IDisposable Enter()
+    internal static bool IsActive => Bits.Value != 0;
+
+    /// <summary>Gets whether the current context is an entrypoint lifecycle callback awaited under the publication gate.</summary>
+    internal static bool IsLifecycleActive => (Bits.Value & LifecycleBit) != 0;
+
+    /// <summary>Gets whether the current context is torn down during generation replacement of the calling extension (route lease drain, event consumer, or tracked scheduler task).</summary>
+    internal static bool IsSelfReplacementUnsafe => (Bits.Value & (RouteBit | EventBit | SchedulerBit)) != 0;
+
+    internal static IDisposable Enter(ExtensionCallbackKind kind)
     {
-        Depth.Value++;
-        return new Scope();
+        var prior = Bits.Value;
+        // Scheduler callbacks are independent logical contexts: entrypoint lifecycle constraints
+        // captured via ExecutionContext at task creation must not leak into them.
+        Bits.Value = kind == ExtensionCallbackKind.Scheduler
+            ? SchedulerBit
+            : prior | ToBit(kind);
+        return new Scope(prior);
     }
+
+    private static int ToBit(ExtensionCallbackKind kind) => kind switch
+    {
+        ExtensionCallbackKind.Route => RouteBit,
+        ExtensionCallbackKind.Event => EventBit,
+        ExtensionCallbackKind.Scheduler => SchedulerBit,
+        _ => LifecycleBit
+    };
 
     private sealed class Scope : IDisposable
     {
-        public void Dispose()
-        {
-            if (Depth.Value > 0)
-            {
-                Depth.Value--;
-            }
-        }
+        private readonly int _prior;
+
+        public Scope(int prior) => _prior = prior;
+
+        public void Dispose() => Bits.Value = _prior;
     }
 }
 
@@ -83,9 +117,15 @@ internal static class UnsupportedExtensionCapabilities
             new UnsupportedFullConfigurationApi(),
             new UnsupportedSupervisorApi(),
             new UnsupportedRouteEvents(),
-            new UnsupportedLogWriter());
+            new UnsupportedLogWriter(),
+            new UnsupportedManagementApi(negotiatedVersion));
 
     internal static IExtensionSupervisorApi CreateSupervisor() => new UnsupportedSupervisorApi();
+    internal static IExtensionManagementApi CreateManagement() =>
+        CreateManagement(HostApiVersion.Current);
+
+    internal static IExtensionManagementApi CreateManagement(HostApiVersion negotiatedVersion) =>
+        new UnsupportedManagementApi(negotiatedVersion);
 
     internal static IExtensionRouteEvents CreateRouteEvents() => new UnsupportedRouteEvents();
 
@@ -188,11 +228,69 @@ internal static class UnsupportedExtensionCapabilities
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.Unsupported)));
 
+        public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadForExtensionAsync(
+            string extensionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
         public ValueTask<ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>> GetAsync(
             Guid serviceId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+    }
+
+    private sealed class UnsupportedManagementApi : IExtensionManagementApi
+    {
+        private readonly HostApiVersion _apiVersion;
+
+        internal UnsupportedManagementApi(HostApiVersion apiVersion) => _apiVersion = apiVersion;
+
+        public HostApiVersion ApiVersion => _apiVersion;
+
+        public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>> ListAsync(
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationWriteResult> EnableAsync(
+            string extensionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationWriteResult> DisableAsync(
+            string extensionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationWriteResult> ReloadAsync(
+            string extensionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public bool ReloadSoon(string extensionId) => false;
+
+        public ValueTask<ConfigurationWriteResult> DeleteRecordAsync(
+            string extensionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationReadResult<ExtensionRefreshSummary>> RequestRefreshAsync(
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.Unsupported)));
     }
 

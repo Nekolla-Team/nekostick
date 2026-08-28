@@ -119,14 +119,14 @@ The Compose example requires `NEKOSTICK_CONNECTION_STRING` and a stable, unique 
 - [Extension API guide](docs/extension-api/)
 - [Contracts package README](src/Nekolla.Nekostick.Contracts/)
 
-Extensions are trusted in-process code. A collectible `AssemblyLoadContext` provides dependency isolation and unloadability; it is not a security sandbox. Manifest validation, capability boundaries, lifecycle behavior, handler semantics, and configuration rules are defined by the [Extension API guide](docs/extension-api.md) and its versioned detail documents.
+Extensions are trusted in-process code. A collectible `AssemblyLoadContext` provides dependency isolation and unloadability; it is not a security sandbox. Manifest validation, capability boundaries, lifecycle behavior, handler semantics, and configuration rules are defined by the [Extension API guide](docs/extension-api/) and its versioned detail documents.
 
 ### Consume the Contracts package
 
 The stable Host and extension contract surface is distributed as the `Nekolla.Nekostick.Contracts` NuGet package:
 
 ```sh
-dotnet add package Nekolla.Nekostick.Contracts --version 1.3.0
+dotnet add package Nekolla.Nekostick.Contracts --version 1.3.1
 ```
 
 Extension projects should reference Contracts and their explicitly declared shared-contract assemblies only. They should not reference Host, Persistence, ASP.NET, EF Core, or another extension's implementation assembly.

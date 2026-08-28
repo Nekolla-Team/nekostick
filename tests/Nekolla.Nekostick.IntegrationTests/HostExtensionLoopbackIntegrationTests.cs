@@ -44,15 +44,12 @@ public sealed class HostExtensionLoopbackIntegrationTests
                     includeFallbackCount = true
                 }),
                 version: 1);
-            var prepared = await manager.PrepareGenerationAsync(
-                ImmutableArray.Create(
-                    new ExtensionRuntimeDescriptor(
-                        manifestResult.Manifest!,
-                        settings,
-                        [ExtensionId],
-                        includeFallback: true)),
-                previous: null,
-                cancellationToken);
+            var prepared = await manager.PrepareGenerationAsync(ImmutableArray.Create(
+                new ExtensionRuntimeDescriptor(
+                    manifestResult.Manifest!,
+                    settings,
+                    [ExtensionId],
+                    includeFallback: true)), previous: null, cancellationToken: cancellationToken);
             Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
             var preparation = prepared.Preparation!;
             var ready = await preparation.ReadyToPublishAsync(cancellationToken);
@@ -99,15 +96,12 @@ public sealed class HostExtensionLoopbackIntegrationTests
                     includeFallbackCount = true
                 }),
                 version: 1);
-            var prepared = await manager.PrepareGenerationAsync(
-                ImmutableArray.Create(
-                    new ExtensionRuntimeDescriptor(
-                        manifestResult.Manifest!,
-                        settings,
-                        [ExtensionId],
-                        includeFallback: true)),
-                previous: null,
-                cancellationToken);
+            var prepared = await manager.PrepareGenerationAsync(ImmutableArray.Create(
+                new ExtensionRuntimeDescriptor(
+                    manifestResult.Manifest!,
+                    settings,
+                    [ExtensionId],
+                    includeFallback: true)), previous: null, cancellationToken: cancellationToken);
             Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
             var preparation = prepared.Preparation!;
             var ready = await preparation.ReadyToPublishAsync(cancellationToken);

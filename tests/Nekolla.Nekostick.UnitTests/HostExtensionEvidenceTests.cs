@@ -18,6 +18,218 @@ public sealed class HostExtensionEvidenceTests
 {
     private const string FixtureExtensionId = "fixture.extension.deterministic";
     private static readonly SemaphoreSlim OutputExtensionGate = new(1, 1);
+    [Fact]
+    public async Task ReadOnlyRecordlessPublisherDoesNotBootstrapOrLoadDiscoveredExtension()
+    {
+        await OutputExtensionGate.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            using var fixture = TestExtensionDirectory.CreateJson();
+            using var staged = StagedHostExtensionDirectory.Create(fixture.RootPath);
+            await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+            var holder = new HostConfigurationSnapshotHolder();
+            await using var publisher = new HostConfigurationPublisher(
+                holder,
+                manager,
+                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: true),
+                NullLogger<HostConfigurationPublisher>.Instance);
+            var snapshot = CreatePublisherSnapshot(1, ImmutableArray<ExtensionRecordConfiguration>.Empty);
+
+            Assert.True(await publisher.PublishAsync(
+                snapshot,
+                cancellationToken: TestContext.Current.CancellationToken));
+
+            Assert.Same(snapshot, holder.Current);
+            Assert.Empty(snapshot.ExtensionRecords);
+            Assert.Null(manager.GetStatus(FixtureExtensionId));
+        }
+        finally
+        {
+            OutputExtensionGate.Release();
+        }
+    }
+
+
+    [Fact]
+    public async Task ForcedPublisherReloadStartsReplacementAndStopsPreviousInstance()
+    {
+        await OutputExtensionGate.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            using var fixture = TestExtensionDirectory.CreateJson();
+            using var staged = StagedHostExtensionDirectory.Create(fixture.RootPath);
+            var manifest = Discover(fixture.RootPath);
+            await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+            var settings = Settings(FixtureExtensionId, "forced-reload");
+            var oldGeneration = await PrepareAndPublishGenerationAsync(
+                manager,
+                manifest,
+                settings,
+                previous: null);
+            var holder = new HostConfigurationSnapshotHolder();
+            var first = CreateExtensionSnapshot(
+                1,
+                CreateRoute(
+                    RoutingTestData.Id(850),
+                    "/forced-reload",
+                    new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId)),
+                FixtureExtensionId,
+                settings);
+            Assert.True(holder.TryReplace(first, oldGeneration));
+
+            await using var publisher = new HostConfigurationPublisher(
+                holder,
+                manager,
+                new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+                NullLogger<HostConfigurationPublisher>.Instance);
+            var reloaded = await publisher.RequestExtensionReloadAsync(
+                first,
+                FixtureExtensionId,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(
+                HostConfigurationPublisher.ExtensionReloadPublicationStatus.Published,
+                reloaded.Status);
+            Assert.Equal(first.Version, reloaded.CommittedVersion);
+
+            var status = manager.GetStatus(FixtureExtensionId);
+            Assert.NotNull(status);
+            Assert.Equal(ExtensionLoadState.Loaded, status!.State);
+            var handled = await holder.RoutingSnapshot!.DispatchGeneration!.HandleAsync(
+                FixtureExtensionId,
+                new ExtensionHandlerRequest("GET", "/forced-reload"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(ExtensionInvocationState.Handled, handled.State);
+            var body = Encoding.UTF8.GetString(handled.Response!.Body.AsSpan());
+            Assert.Equal("forced-reload:previous-stopped", body);
+            Assert.NotSame(oldGeneration, holder.RoutingSnapshot!.DispatchGeneration);
+        }
+        finally
+        {
+            OutputExtensionGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task ForcedReloadFallbackReusesPriorGenerationAndStillDeliversPublicationEvents()
+    {
+        await OutputExtensionGate.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+        var extensionId = "reuse.extension." + Guid.NewGuid().ToString("N");
+        using var fixture = TestExtensionDirectory.CreateJson(
+            ExtensionManifestTestDefaults.Json.Replace(
+                "fixture.extension.deterministic",
+                extensionId,
+                StringComparison.Ordinal));
+        using var staged = StagedHostExtensionDirectory.Create(fixture.RootPath);
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var settings = Settings(extensionId, "reuse", publishCoreEvents: true, eventCount: 1);
+        var oldGeneration = await PrepareAndPublishGenerationAsync(
+            manager,
+            manifest,
+            settings,
+            previous: null,
+            requestedHandlerId: extensionId);
+        var holder = new HostConfigurationSnapshotHolder();
+        var first = CreateExtensionSnapshot(
+            1,
+            CreateRoute(
+                RoutingTestData.Id(851),
+                "/reuse",
+                new ExtensionHandlerRouteTargetConfiguration(extensionId)),
+            extensionId,
+            settings);
+        Assert.True(holder.TryReplace(first, oldGeneration));
+
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            manager,
+            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+            NullLogger<HostConfigurationPublisher>.Instance);
+        var failingSettings = Settings(
+            extensionId,
+            "reuse",
+            startFails: true,
+            publishCoreEvents: true,
+            eventCount: 1);
+        var second = CreateExtensionSnapshot(
+            2,
+            CreateRoute(
+                RoutingTestData.Id(851),
+                "/reuse-v2",
+                new ExtensionHandlerRouteTargetConfiguration(extensionId),
+                routeVersion: 2),
+            extensionId,
+            failingSettings);
+
+        var fallbackReload = await publisher.RequestExtensionReloadAsync(
+            second,
+            extensionId,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(
+            HostConfigurationPublisher.ExtensionReloadPublicationStatus.Failed,
+            fallbackReload.Status);
+        Assert.Same(oldGeneration, holder.RoutingSnapshot!.DispatchGeneration);
+
+        var handled = await holder.RoutingSnapshot!.DispatchGeneration!.HandleAsync(
+            extensionId,
+            new ExtensionHandlerRequest("GET", "/reuse"),
+            TestContext.Current.CancellationToken).AsTask().WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, handled.State);
+        var body = Encoding.UTF8.GetString(handled.Response!.Body.AsSpan());
+        Assert.Contains("state", body, StringComparison.Ordinal);
+        Assert.Contains("applied", body, StringComparison.Ordinal);
+        }
+        finally
+        {
+            OutputExtensionGate.Release();
+        }
+    }
+    [Fact]
+    public async Task ForcedReloadReportsTargetUnavailableWhenLatestSnapshotDisablesTarget()
+    {
+        var extensionId = "target-unavailable." + Guid.NewGuid().ToString("N");
+        var initial = CreatePublisherSnapshot(
+            1,
+            ImmutableArray.Create(new ExtensionRecordConfiguration(
+                extensionId,
+                "1.0.0",
+                ExtensionLoadState.Loaded,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                1)));
+        var latest = CreatePublisherSnapshot(
+            2,
+            ImmutableArray.Create(new ExtensionRecordConfiguration(
+                extensionId,
+                "1.0.0",
+                ExtensionLoadState.Disabled,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                2)));
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        await using var publisher = new HostConfigurationPublisher(
+            new HostConfigurationSnapshotHolder(),
+            manager,
+            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+            NullLogger<HostConfigurationPublisher>.Instance,
+            snapshotReader: new LatestSnapshotReader(latest));
+
+        var publication = await publisher.RequestExtensionReloadAsync(
+            initial,
+            extensionId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            HostConfigurationPublisher.ExtensionReloadPublicationStatus.TargetUnavailable,
+            publication.Status);
+        Assert.Equal(0, publication.CommittedVersion);
+    }
+
+
 
     [Fact]
     public async Task PersistedExtensionRecordSnapshotBootstrapsValidOutputFixture()
@@ -45,7 +257,7 @@ public sealed class HostExtensionEvidenceTests
                 1,
                 ImmutableArray.Create(record));
 
-            Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+            Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
             Assert.Same(snapshot, holder.Current);
             Assert.Single(holder.Current!.ExtensionRecords);
@@ -63,6 +275,7 @@ public sealed class HostExtensionEvidenceTests
     [Theory]
     [InlineData(ExtensionLoadState.Discovered)]
     [InlineData(ExtensionLoadState.Stopped)]
+    [InlineData(ExtensionLoadState.Disabled)]
     [InlineData(ExtensionLoadState.Failed)]
     public async Task NonLoadedExtensionRecordDoesNotBootstrapOutputFixture(
         ExtensionLoadState loadState)
@@ -91,7 +304,7 @@ public sealed class HostExtensionEvidenceTests
                 ImmutableArray.Create(record),
                 ImmutableArray.Create(Settings(FixtureExtensionId, "non-loaded")));
 
-            Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+            Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
             Assert.Same(snapshot, holder.Current);
             Assert.Single(holder.Current!.ExtensionRecords);
@@ -120,7 +333,7 @@ public sealed class HostExtensionEvidenceTests
                 "/normal",
                 new StaticFileRouteTargetConfiguration(Path.GetTempPath())));
 
-        Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+        Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Same(snapshot, holder.Current);
         Assert.NotNull(holder.RoutingSnapshot);
@@ -174,7 +387,7 @@ public sealed class HostExtensionEvidenceTests
             settings,
             previous: null);
         Assert.True(holder.TryReplace(first, generation));
-        Assert.True(await publisher.PublishAsync(second, TestContext.Current.CancellationToken));
+        Assert.True(await publisher.PublishAsync(second, cancellationToken: TestContext.Current.CancellationToken));
         var status = manager.GetStatus(FixtureExtensionId);
         Assert.NotNull(status);
         Assert.Equal(1, status!.HandlerCount);
@@ -218,14 +431,11 @@ public sealed class HostExtensionEvidenceTests
             oldGeneration));
 
         var newSettings = Settings(FixtureExtensionId, "new");
-        var prepared = await manager.PrepareGenerationAsync(
-            ImmutableArray.Create(
-                new ExtensionRuntimeDescriptor(
-                    manifest,
-                    newSettings,
-                    [FixtureExtensionId])),
-            oldGeneration,
-            TestContext.Current.CancellationToken);
+        var prepared = await manager.PrepareGenerationAsync(ImmutableArray.Create(
+            new ExtensionRuntimeDescriptor(
+                manifest,
+                newSettings,
+                [FixtureExtensionId])), oldGeneration, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
         Assert.NotNull(prepared.Preparation);
         var preparation = prepared.Preparation!;
@@ -244,14 +454,11 @@ public sealed class HostExtensionEvidenceTests
         Assert.True(holder.TryReplace(replacement, ready.Generation));
         Assert.True(await preparation.CompletePublicationAsync());
 
-        var followUp = await manager.PrepareGenerationAsync(
-            ImmutableArray.Create(
-                new ExtensionRuntimeDescriptor(
-                    manifest,
-                    newSettings,
-                    [FixtureExtensionId])),
-            ready.Generation,
-            TestContext.Current.CancellationToken);
+        var followUp = await manager.PrepareGenerationAsync(ImmutableArray.Create(
+            new ExtensionRuntimeDescriptor(
+                manifest,
+                newSettings,
+                [FixtureExtensionId])), ready.Generation, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(followUp.Succeeded, followUp.FailureCode.ToString());
         Assert.NotNull(followUp.Preparation);
         await followUp.Preparation!.AbortAsync();
@@ -303,7 +510,7 @@ public sealed class HostExtensionEvidenceTests
             newSettings,
             recordVersion: 2);
 
-        Assert.True(await publisher.PublishAsync(replacement, TestContext.Current.CancellationToken));
+        Assert.True(await publisher.PublishAsync(replacement, cancellationToken: TestContext.Current.CancellationToken));
         Assert.Same(replacement, holder.Current);
         Assert.NotSame(oldGeneration, holder.RoutingSnapshot!.DispatchGeneration);
         Assert.Empty(holder.RoutingSnapshot.DispatchGeneration!.Bindings);
@@ -335,7 +542,7 @@ public sealed class HostExtensionEvidenceTests
             new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
             NullLogger<HostConfigurationPublisher>.Instance);
 
-        Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+        Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Same(snapshot, holder.Current);
         Assert.NotNull(holder.RoutingSnapshot);
@@ -367,7 +574,7 @@ public sealed class HostExtensionEvidenceTests
             new ExtensionRuntimeManager(HostApiVersion.Current),
             new HostNodeOptions(skipExtensions: true, disableSupervisor: false, readOnly: false),
             NullLogger<HostConfigurationPublisher>.Instance);
-        Assert.True(await publisher.PublishAsync(snapshot, TestContext.Current.CancellationToken));
+        Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
         using var services = CreateProxyServices();
         var targetExecutor = new HostRouteTargetExecutor(
@@ -660,7 +867,8 @@ public sealed class HostExtensionEvidenceTests
         ExtensionManifest? manifest,
         ExtensionSettingsConfiguration? settings,
         ExtensionDispatchGeneration? previous,
-        bool includeFallback = false)
+        bool includeFallback = false,
+        string? requestedHandlerId = null)
     {
         var desired = manifest is null
             ? ImmutableArray<ExtensionRuntimeDescriptor>.Empty
@@ -668,12 +876,9 @@ public sealed class HostExtensionEvidenceTests
                 new ExtensionRuntimeDescriptor(
                     manifest,
                     settings,
-                    [FixtureExtensionId],
+                    [requestedHandlerId ?? FixtureExtensionId],
                     includeFallback));
-        var prepared = await manager.PrepareGenerationAsync(
-            desired,
-            previous,
-            TestContext.Current.CancellationToken);
+        var prepared = await manager.PrepareGenerationAsync(desired, previous, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
         Assert.NotNull(prepared.Preparation);
         var preparation = prepared.Preparation!;
@@ -758,6 +963,7 @@ public sealed class HostExtensionEvidenceTests
         string extensionId,
         string label,
         bool handlerFails = false,
+        bool startFails = false,
         bool registerFallback = false,
         bool publishCoreEvents = false,
         int eventCount = 3,
@@ -771,6 +977,7 @@ public sealed class HostExtensionEvidenceTests
                 label,
                 handlerId = extensionId,
                 handlerFails,
+                startFails,
                 registerFallback,
                 publishCoreEvents,
                 eventCount
@@ -957,4 +1164,16 @@ public sealed class HostExtensionEvidenceTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromException(new IOException("Response write deliberately failed."));
     }
+    private sealed class LatestSnapshotReader : IHostConfigurationSnapshotReader
+    {
+        private readonly HostConfigurationSnapshot snapshot;
+
+        internal LatestSnapshotReader(HostConfigurationSnapshot snapshot) =>
+            this.snapshot = snapshot;
+
+        public Task<ConfigurationReadResult<HostConfigurationSnapshot>> ReadCompleteAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(ConfigurationReadResult<HostConfigurationSnapshot>.Success(snapshot));
+    }
+
 }

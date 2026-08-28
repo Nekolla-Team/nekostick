@@ -335,7 +335,7 @@ public sealed partial class ExtensionRuntimeManager
             return ExtensionInvocationResult.Unavailable;
         }
 
-        using var callbackScope = ExtensionCallbackGuard.Enter();
+        using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
 
         try
         {
@@ -391,7 +391,7 @@ public sealed partial class ExtensionRuntimeManager
             return ExtensionInvocationResult.NotHandled;
         }
 
-        using var callbackScope = ExtensionCallbackGuard.Enter();
+        using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
 
         try
         {

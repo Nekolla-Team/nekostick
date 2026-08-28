@@ -171,14 +171,11 @@ public sealed class ExtensionRouteGenerationSafetyTests
         Guid routeId,
         ExtensionDispatchGeneration? previous = null)
     {
-        var prepared = await manager.PrepareGenerationAsync(
-            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
-                manifest,
-                new ExtensionSettingsConfiguration(manifest.Id, 1, "{}", 0),
-                ["fixture.handler"],
-                routeIds: [routeId])),
-            previous,
-            TestContext.Current.CancellationToken);
+        var prepared = await manager.PrepareGenerationAsync(ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+            manifest,
+            new ExtensionSettingsConfiguration(manifest.Id, 1, "{}", 0),
+            ["fixture.handler"],
+            routeIds: [routeId])), previous, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
         var preparation = Assert.IsType<ExtensionGenerationPreparation>(prepared.Preparation);
         var ready = await preparation.ReadyToPublishAsync(TestContext.Current.CancellationToken);

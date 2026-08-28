@@ -216,7 +216,7 @@ public sealed class HostConfigurationStateTests
             NullLogger<HostConfigurationPublisher>.Instance,
             snapshotReader: reader);
 
-        Assert.True(await publisher.PublishAsync(initial, TestContext.Current.CancellationToken));
+        Assert.True(await publisher.PublishAsync(initial, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal(1, reader.ReadCalls);
         Assert.Same(latest, holder.Current);

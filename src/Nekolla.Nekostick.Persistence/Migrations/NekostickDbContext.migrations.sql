@@ -788,3 +788,28 @@ BEGIN
 END $EF$;
 COMMIT;
 
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260828120000_AddDisabledExtensionLoadState') THEN
+    ALTER TABLE nekostick.extension_records DROP CONSTRAINT ck_extension_records_load_state;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260828120000_AddDisabledExtensionLoadState') THEN
+    ALTER TABLE nekostick.extension_records ADD CONSTRAINT ck_extension_records_load_state CHECK (load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled'));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260828120000_AddDisabledExtensionLoadState') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260828120000_AddDisabledExtensionLoadState', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+

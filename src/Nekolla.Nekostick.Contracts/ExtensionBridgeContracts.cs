@@ -76,4 +76,7 @@ public interface IExtensionHostBridge13 : IExtensionHostBridge
 
     /// <summary>Gets the Host-attributed custom text writer.</summary>
     IExtensionLogWriter LogWriter { get; }
+
+    /// <summary>Gets the extension installation record management and refresh operations.</summary>
+    IExtensionManagementApi Management { get; }
 }

@@ -16,7 +16,10 @@ public enum ExtensionLoadState
     Failed,
 
     /// <summary>The extension is being unloaded.</summary>
-    Unloading
+    Unloading,
+
+    /// <summary>The extension is persistently disabled.</summary>
+    Disabled
 }
 
 /// <summary>Describes one stable extension installation record.</summary>

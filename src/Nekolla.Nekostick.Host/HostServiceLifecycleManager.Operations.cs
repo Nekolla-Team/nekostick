@@ -366,13 +366,15 @@ public sealed partial class HostServiceLifecycleManager
             ServiceSupervisor supervisor,
             PortLease lease,
             long snapshotVersion,
-            HealthRetryState healthRetryState)
+            HealthRetryState healthRetryState,
+            string? ownerExtensionId)
         {
             Configuration = configuration;
             Supervisor = supervisor;
             Lease = lease;
             SnapshotVersion = snapshotVersion;
             HealthRetryState = healthRetryState;
+            OwnerExtensionId = ownerExtensionId;
             Ready = true;
         }
 
@@ -381,6 +383,8 @@ public sealed partial class HostServiceLifecycleManager
         internal PortLease? Lease { get; set; }
         internal long SnapshotVersion { get; }
         internal HealthRetryState HealthRetryState { get; set; }
+        internal string? OwnerExtensionId { get; }
         internal bool Ready { get; set; }
+
     }
 }

@@ -12,13 +12,18 @@ public sealed partial class ExtensionRuntimeManager
     /// </summary>
     /// <param name="desired">The explicit desired extension descriptors.</param>
     /// <param name="previous">The generation currently held by Host, when available.</param>
+    /// <param name="forceReloadIds">The extension identifiers that must be re-candidated even when their identity is unchanged.</param>
     /// <param name="cancellationToken">The preparation cancellation token.</param>
     /// <returns>A preparation result. Local binding failures are represented in the preparation status, not as a global failure.</returns>
     public async ValueTask<ExtensionGenerationPreparationResult> PrepareGenerationAsync(
         ImmutableArray<ExtensionRuntimeDescriptor> desired,
         ExtensionDispatchGeneration? previous = null,
+        ImmutableHashSet<string>? forceReloadIds = null,
         CancellationToken cancellationToken = default)
     {
+        var requestedForceReloadIds = forceReloadIds is null || forceReloadIds.IsEmpty
+            ? ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal)
+            : forceReloadIds.WithComparer(StringComparer.Ordinal);
         if (cancellationToken.IsCancellationRequested)
         {
             return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.Cancelled);
@@ -166,6 +171,7 @@ public sealed partial class ExtensionRuntimeManager
                 var reused = false;
                 var failureCode = ExtensionFailureCode.None;
                 if (previousById.TryGetValue(manifest.Id, out var previousContext) &&
+                    !requestedForceReloadIds.Contains(manifest.Id) &&
                     HasExactIdentity(previousContext, manifest, descriptor.Settings, descriptor.RouteIds))
                 {
                     if (!baseGeneration.TryRetainContext(previousContext))

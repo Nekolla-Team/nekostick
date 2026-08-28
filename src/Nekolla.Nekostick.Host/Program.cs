@@ -152,7 +152,7 @@ internal static class Program
             }
 
             var publisher = app.Services.GetRequiredService<HostConfigurationPublisher>();
-            if (!await publisher.PublishAsync(snapshotResult.Value, cancellationToken).ConfigureAwait(false))
+            if (!await publisher.PublishAsync(snapshotResult.Value, cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
                 var logger = loggerFactory.CreateLogger(HostLoggerCategory.Startup);

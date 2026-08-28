@@ -105,7 +105,8 @@ public sealed partial class HostServiceLifecycleManager
         if (snapshot is null || !snapshot.Services.Any(value =>
                 value.Id == generation.Configuration.Id &&
                 value.Version == generation.Configuration.Version &&
-                value.Enabled))
+                value.Enabled) ||
+            !IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id))
         {
             return;
         }

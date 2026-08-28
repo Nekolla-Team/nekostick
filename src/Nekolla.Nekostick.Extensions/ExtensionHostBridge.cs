@@ -44,6 +44,9 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         LogWriter = api13Supported
             ? capabilities.LogWriter ?? UnsupportedExtensionCapabilities.CreateLogWriter()
             : UnsupportedExtensionCapabilities.CreateLogWriter();
+        Management = api13Supported
+            ? capabilities.ExtensionManagement ?? UnsupportedExtensionCapabilities.CreateManagement(apiVersion)
+            : UnsupportedExtensionCapabilities.CreateManagement(apiVersion);
     }
 
     public HostApiVersion ApiVersion { get; }
@@ -69,6 +72,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
     public IExtensionRouteEvents RouteEvents { get; }
 
     public IExtensionLogWriter LogWriter { get; }
+    public IExtensionManagementApi Management { get; }
 }
 
 internal sealed class ExtensionStartContext : IExtensionStartContext

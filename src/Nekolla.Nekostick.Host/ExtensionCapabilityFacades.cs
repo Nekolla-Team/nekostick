@@ -53,6 +53,16 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             handlerIsOwned);
         var logger = _serviceProvider.GetService<ILoggerFactory>()?.CreateLogger(HostLoggerCategory.Extensions)
             ?? NullLogger.Instance;
+        var runtimeManager = _serviceProvider.GetService<ExtensionRuntimeManager>();
+        var management = ExtensionAbi.IsApi13Supported(HostApiVersion.Current) && runtimeManager is not null
+            ? new ExtensionManagementFacade(
+                extensionId,
+                _scopeFactory,
+                _runtimeState,
+                runtimeManager,
+                _serviceProvider)
+            : null;
+
         return new ExtensionCapabilitySet(
             configuration,
             new ExtensionRouteFacade(configuration),
@@ -69,7 +79,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>(),
                 _serviceProvider.GetService<IMicroserviceForwardingTelemetry>()),
             routeEvents,
-            new ExtensionLogWriter(extensionId, logger));
+            new ExtensionLogWriter(extensionId, logger),
+            management);
     }
 }
 

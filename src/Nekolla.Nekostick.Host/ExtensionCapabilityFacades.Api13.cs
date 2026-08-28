@@ -51,6 +51,46 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
                     new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
         }
     }
+    public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadForExtensionAsync(
+        string extensionId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(extensionId))
+        {
+            return ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Validation)));
+        }
+
+        if (_runtime is null)
+        {
+            return ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+        }
+
+        try
+        {
+            var result = _runtime.ReadCurrent()
+                .Where(value => string.Equals(value.OwnerExtensionId, extensionId, StringComparison.Ordinal))
+                .Select(ToContract)
+                .ToImmutableArray();
+            return ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Success(result));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return ValueTask.FromResult(
+                ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+        }
+    }
+
 
     public ValueTask<ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>> GetAsync(
         Guid serviceId,
@@ -100,7 +140,8 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
             forwarding.ForwardedRequestCount,
             forwarding.ActiveForwardedRequestCount,
             value.LastUpdatedAt,
-            value.LastHealthAt);
+            value.LastHealthAt,
+            value.OwnerExtensionId);
     }
 }
 

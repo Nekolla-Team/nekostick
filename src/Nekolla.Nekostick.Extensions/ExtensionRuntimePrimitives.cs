@@ -358,7 +358,7 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
 
     private async Task RunTrackedAsync(Func<CancellationToken, ValueTask> callback)
     {
-        using var callbackScope = ExtensionCallbackGuard.Enter();
+        using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Scheduler);
         try
         {
             await callback(_stop.Token).ConfigureAwait(false);

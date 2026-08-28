@@ -294,7 +294,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             return ExtensionInvocationResult.Unavailable;
         }
 
-        using var callbackScope = ExtensionCallbackGuard.Enter();
+        using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
         try
         {
             var response = await handler.HandleAsync(request, cancellationToken).ConfigureAwait(false);
@@ -336,7 +336,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             return ExtensionInvocationResult.NotHandled;
         }
 
-        using var callbackScope = ExtensionCallbackGuard.Enter();
+        using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
         try
         {
             var result = await fallback.HandleAsync(

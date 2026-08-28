@@ -27,7 +27,8 @@ public sealed record HostServiceRuntimeSnapshot
         DateTimeOffset? lastUpdatedAt,
         DateTimeOffset? lastHealthAt,
         ExtensionServiceLifecycleState lifecycleState,
-        ExtensionServiceHealthState healthState)
+        ExtensionServiceHealthState healthState,
+        string? ownerExtensionId = null)
     {
         ServiceId = serviceId;
         ConfigurationVersion = configurationVersion;
@@ -38,6 +39,7 @@ public sealed record HostServiceRuntimeSnapshot
         LastHealthAt = lastHealthAt;
         LifecycleState = lifecycleState;
         Health = healthState;
+        OwnerExtensionId = ownerExtensionId;
     }
 
     /// <summary>Gets the identifier of the service represented by this snapshot.</summary>
@@ -64,6 +66,10 @@ public sealed record HostServiceRuntimeSnapshot
 
     /// <summary>Gets the current health state of the service.</summary>
     public ExtensionServiceHealthState Health { get; }
+
+    /// <summary>Gets the owning extension identifier when this service is extension-owned.</summary>
+    public string? OwnerExtensionId { get; }
+
 
     /// <summary>Gets the non-negative elapsed time since the active service process started, or <see langword="null"/> if unavailable.</summary>
     public TimeSpan? Uptime
@@ -171,6 +177,7 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
             lastUpdatedAt,
             lastHealthAt,
             lifecycle,
-            health);
+            health,
+            generation.OwnerExtensionId);
     }
 }

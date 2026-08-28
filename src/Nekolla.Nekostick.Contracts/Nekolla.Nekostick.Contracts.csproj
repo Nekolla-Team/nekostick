@@ -4,7 +4,7 @@
     <RootNamespace>Nekolla.Nekostick.Contracts</RootNamespace>
     <IsPackable>true</IsPackable>
     <PackageId>Nekolla.Nekostick.Contracts</PackageId>
-    <PackageVersion>1.3.0</PackageVersion>
+    <PackageVersion>1.3.1</PackageVersion>
     <Authors>Nekolla-Team</Authors>
     <PackageDescription>Stable host and extension contracts for Nekostick.</PackageDescription>
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>

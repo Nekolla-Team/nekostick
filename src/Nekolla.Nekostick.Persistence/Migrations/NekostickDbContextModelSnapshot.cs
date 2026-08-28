@@ -138,7 +138,7 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         {
                             t.HasCheckConstraint("ck_extension_records_id_uuid_v7", "substring(id::text, 15, 1) = '7' AND substring(id::text, 20, 1) IN ('8', '9', 'a', 'b')");
 
-                            t.HasCheckConstraint("ck_extension_records_load_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading')");
+                            t.HasCheckConstraint("ck_extension_records_load_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled')");
 
                             t.HasCheckConstraint("ck_extension_records_text", "length(extension_id) BETWEEN 1 AND 128 AND length(installed_version) BETWEEN 1 AND 128");
                         });

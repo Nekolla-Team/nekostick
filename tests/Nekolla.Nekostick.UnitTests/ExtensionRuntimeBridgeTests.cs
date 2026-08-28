@@ -31,7 +31,7 @@ public async Task BridgeAddsCapabilitiesWhilePreservingLegacySettingsAndSafeUnsu
 
     Assert.Equal(ExtensionInvocationState.Handled, result.State);
     var body = Body(result);
-    Assert.Contains("api=1.3.0", body, StringComparison.Ordinal);
+    Assert.Contains("api=1.3.1", body, StringComparison.Ordinal);
     Assert.Contains($"legacy={manifest.Id}:1:0", body, StringComparison.Ordinal);
     Assert.Contains("properties=True", body, StringComparison.Ordinal);
     Assert.Contains($"lifecycle={manifest.Id}:Discovered", body, StringComparison.Ordinal);

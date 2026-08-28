@@ -11,9 +11,9 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
 | [api-1.0.md](api-1.0.md) | 1.0.0 | 入口点、路由处理器、fallback、注册表、设置读取、后台任务、事件、状态、日志、共享契约 |
 | [api-1.1.md](api-1.1.md) | 1.1.0 | 属主配置 API、属主路由 CRUD、属主服务 CRUD 与生命周期、端点租约、自身生命周期 |
 | [api-1.2.md](api-1.2.md) | 1.2.0 | 全量配置读写（`FullConfiguration`） |
-| [api-1.3.md](api-1.3.md) | 1.3.0 | 服务运行遥测、路由观测与动作钩子、自定义日志文本 |
+| [api-1.3.md](api-1.3.md) | 1.3.1 | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新 |
 
-当前 Contracts 包版本为 **1.3.0**（`HostApiVersion.Current`）。
+当前 Contracts 包版本为 **1.3.1**（`HostApiVersion.Current`）。
 
 ## 快速开始
 
@@ -30,7 +30,7 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Nekolla.Nekostick.Contracts" Version="1.3.0" />
+    <PackageReference Include="Nekolla.Nekostick.Contracts" Version="1.3.1" />
   </ItemGroup>
 </Project>
 ```
@@ -113,7 +113,7 @@ extensions/
     Example.Hello.dll
 ```
 
-Host 启动时扫描 `extensions/`。首次启动（数据库中没有任何扩展记录）会把发现的扩展全部加载；此后只加载数据库中状态为 `Loaded`、且记录版本与 manifest 版本一致的扩展。要让扩展在后续启动中持续加载，需要由管理扩展通过配置 API 写入对应的扩展安装记录（见 [api-1.2.md](api-1.2.md)）。Host 不监视文件变化；扩展的 reload / unload 由扩展自身通过生命周期 API 发起（见[api-1.1.md](api-1.1.md#自身生命周期 lifecycle)）。
+Host 启动时扫描 `extensions/`。首次启动（数据库中没有任何扩展记录）会把发现的扩展全部加载；此后扫描到的新扩展会先以 `Disabled` 记录，只有数据库中状态为 `Loaded` 且记录版本与 manifest 版本一致的扩展才会加载。Host 不监视文件变化；API 1.3 扩展可通过 `IExtensionHostBridge13.Management.RequestRefreshAsync` 请求重新扫描，再使用 `EnableAsync` 或 `ReloadAsync` 通过发布管线应用变更（见 [api-1.3.md](api-1.3.md)）。记录不会因扩展文件缺失而自动删除；`DeleteRecordAsync` 仅在 ID 已从可靠目录扫描中消失时才允许显式删除。
 
 让流量到达 handler：用配置 API 创建一条 `target` 指向该 handler ID 的路由，见 [api-1.1.md](api-1.1.md#属主路由 routes) 的完整示例。
 
@@ -188,6 +188,7 @@ var has13 = ExtensionAbi.IsApi13Supported(api); // 是否可用 1.3 能力
 | `Supervisor`（经 `IExtensionHostBridge13`） | 1.3 | 全局服务运行遥测。 |
 | `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3 | 路由观测订阅与动作钩子。 |
 | `LogWriter`（经 `IExtensionHostBridge13`） | 1.3 | 自定义文本日志。 |
+| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.1） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
 
 ## 通用约定
 

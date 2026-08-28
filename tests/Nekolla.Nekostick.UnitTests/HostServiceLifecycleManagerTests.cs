@@ -41,6 +41,69 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.False(publisher.Current.ContainsKey(LazyServiceId));
         Assert.False(publisher.Current.ContainsKey(DisabledServiceId));
     }
+    [Fact]
+    public async Task DisabledOwnerServicesStayOutOfReconcileUntilTheOwnerIsEnabled()
+    {
+        const string owner = "disabled.owner";
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var loadedSnapshot = CreateOwnedSnapshot(
+            1,
+            service,
+            owner,
+            Contracts.ExtensionLoadState.Loaded);
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(
+            loadedSnapshot,
+            dispatchGeneration: null,
+            ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner)));
+        var runtime = CreateRuntimeState(loadedSnapshot, holder);
+        var executor = new RecordingExecutor();
+        var endpointPublisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = new HostServiceLifecycleManager(
+            executor,
+            new RecordingProbe(),
+            new RecordingLeaseStore(),
+            holder,
+            endpointPublisher,
+            runtime,
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance);
+
+        await manager.ReconcileAsync(loadedSnapshot, TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { service.Id }, executor.StartedServices);
+        Assert.True(endpointPublisher.Current.ContainsKey(service.Id));
+
+        var disabledSnapshot = CreateOwnedSnapshot(
+            2,
+            service,
+            owner,
+            Contracts.ExtensionLoadState.Disabled);
+        Assert.True(holder.TryReplace(
+            disabledSnapshot,
+            dispatchGeneration: null,
+            ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner)));
+        await manager.ReconcileAsync(disabledSnapshot, TestContext.Current.CancellationToken);
+        Assert.Contains(service.Id, executor.StoppedServices);
+        Assert.False(endpointPublisher.Current.ContainsKey(service.Id));
+        var disabledReadiness = await manager.EnsureReadyAsync(
+            disabledSnapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Disabled, disabledReadiness.Status);
+
+        var enabledSnapshot = CreateOwnedSnapshot(
+            3,
+            service,
+            owner,
+            Contracts.ExtensionLoadState.Loaded);
+        Assert.True(holder.TryReplace(
+            enabledSnapshot,
+            dispatchGeneration: null,
+            ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner)));
+        await manager.ReconcileAsync(enabledSnapshot, TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { service.Id, service.Id }, executor.StartedServices);
+    }
+
 
     [Fact]
     public async Task LazyServiceStartsOnlyOnEnsureReadyAndCoalescesConcurrentStarts()
@@ -410,6 +473,28 @@ public sealed class HostServiceLifecycleManagerTests
             services.ToImmutableArray(),
             default,
             default);
+    private static HostConfigurationSnapshot CreateOwnedSnapshot(
+        long version,
+        ServiceConfiguration service,
+        string owner,
+        Contracts.ExtensionLoadState state) =>
+        new(
+            version,
+            new GlobalSettingsConfiguration(
+                version: version,
+                autoPortRangeStart: 35000,
+                autoPortRangeEnd: 35099),
+            default,
+            ImmutableArray.Create(service),
+            ImmutableArray.Create(new ExtensionRecordConfiguration(
+                owner,
+                "1.0.0",
+                state,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                1)),
+            default);
+
 
     private static ServiceConfiguration CreateService(
         Guid id,
@@ -465,6 +550,7 @@ public sealed class HostServiceLifecycleManagerTests
         }
 
         public List<Guid> StartedServices { get; } = [];
+        public List<Guid> StoppedServices { get; } = [];
         public List<Guid> AcceptedServices { get; } = [];
         public TaskCompletionSource<bool> StartEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -499,10 +585,13 @@ public sealed class HostServiceLifecycleManagerTests
         public ValueTask<ProcessOperationResult> StopAsync(
             Guid serviceId,
             TimeSpan gracePeriod,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new ProcessOperationResult(
+            CancellationToken cancellationToken = default)
+        {
+            StoppedServices.Add(serviceId);
+            return ValueTask.FromResult(new ProcessOperationResult(
                 ProcessOperationStatus.Completed,
                 ServiceStateReasonCode.StopCompleted));
+        }
 
         public void ReleaseStart() => _startGate.TrySetResult(true);
     }

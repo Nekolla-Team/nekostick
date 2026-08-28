@@ -151,7 +151,7 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
 
                 foreach (var subscriber in subscribers)
                 {
-                    using var callbackScope = ExtensionCallbackGuard.Enter();
+                    using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Event);
                     try
                     {
                         await subscriber(@event, _stop.Token).ConfigureAwait(false);

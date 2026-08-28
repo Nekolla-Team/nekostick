@@ -132,7 +132,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         {
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(timeout);
-            using (ExtensionCallbackGuard.Enter())
+            using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Lifecycle))
             {
                 await _entrypoint!.StartAsync(
                         new ExtensionStartContext(reloading, _bridge, _contracts, _registry),
@@ -169,7 +169,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         try
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
-            using (ExtensionCallbackGuard.Enter())
+            using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Lifecycle))
             {
                 await _entrypoint!.OnPreviousStoppedAsync(timeoutSource.Token)
                     .AsTask()
@@ -347,7 +347,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         try
         {
             using var timeoutSource = new CancellationTokenSource(timeout);
-            using (ExtensionCallbackGuard.Enter())
+            using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Lifecycle))
             {
                 await _entrypoint!.StopAsync(timeoutSource.Token)
                     .AsTask()

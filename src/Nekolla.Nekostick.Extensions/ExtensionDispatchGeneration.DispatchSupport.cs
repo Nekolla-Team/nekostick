@@ -411,7 +411,7 @@ public sealed partial class ExtensionDispatchGeneration
             // worker so the dispatcher can enforce the hard deadline itself.
             callbackTask = Task.Run(async () =>
             {
-                using var callbackScope = ExtensionCallbackGuard.Enter();
+                using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
                 return await registration.Callback(context, linked.Token).ConfigureAwait(false);
             });
         }

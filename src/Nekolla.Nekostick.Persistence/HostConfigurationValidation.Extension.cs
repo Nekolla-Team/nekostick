@@ -10,11 +10,15 @@ internal static class HostConfigurationExtensionValidator
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
         TimeSpan.FromMilliseconds(HostConfigurationValueValidator.RegexTimeoutMilliseconds));
 
+    internal static bool IsValidVersion(string? value) =>
+        value is not null &&
+        value.Length <= HostConfigurationValueValidator.MaxExtensionIdLength &&
+        SemanticVersionPattern.IsMatch(value);
+
     internal static void ValidateRecord(ExtensionRecordConfiguration? value)
     {
         if (value is null || !HostConfigurationValueValidator.IsSafeExtensionId(value.ExtensionId) ||
-            value.Version.Length > HostConfigurationValueValidator.MaxExtensionIdLength ||
-            !SemanticVersionPattern.IsMatch(value.Version) || !Enum.IsDefined(value.LoadState) ||
+            !IsValidVersion(value.Version) || !Enum.IsDefined(value.LoadState) ||
             value.RecordVersion < 0)
         {
             HostConfigurationValueValidator.Throw();

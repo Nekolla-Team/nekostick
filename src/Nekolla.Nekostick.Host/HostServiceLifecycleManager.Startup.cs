@@ -39,7 +39,50 @@ public sealed partial class HostServiceLifecycleManager
             observation.InstanceId,
             observation.SuccessfulExit,
             observation.ExitedAt);
-    private async Task<HostServiceReadinessResult> StartOrSwitchAsync(
+    private Task<HostServiceReadinessResult> StartOrSwitchAsync(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service)
+    {
+        var startup = new TaskCompletionSource<HostServiceReadinessResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (slot.Gate)
+        {
+            slot.Startup = startup.Task;
+        }
+
+        _ = CompleteStartOrSwitchAsync(slot, snapshot, service, startup);
+        return startup.Task;
+    }
+
+    private async Task CompleteStartOrSwitchAsync(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        TaskCompletionSource<HostServiceReadinessResult> startup)
+    {
+        try
+        {
+            var result = await RunStartOrSwitchAsync(slot, snapshot, service).ConfigureAwait(false);
+            startup.TrySetResult(result);
+        }
+        catch (Exception exception)
+        {
+            startup.TrySetException(exception);
+        }
+        finally
+        {
+            lock (slot.Gate)
+            {
+                if (ReferenceEquals(slot.Startup, startup.Task))
+                {
+                    slot.Startup = null;
+                }
+            }
+        }
+    }
+
+    private async Task<HostServiceReadinessResult> RunStartOrSwitchAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service)
@@ -122,13 +165,6 @@ public sealed partial class HostServiceLifecycleManager
             PublishServiceState(service.Id, snapshot.Version, "unavailable");
             return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
         }
-        finally
-        {
-            lock (slot.Gate)
-            {
-                slot.Startup = null;
-            }
-        }
     }
 
     private async Task<ServiceGeneration?> StartGenerationAsync(
@@ -188,9 +224,20 @@ public sealed partial class HostServiceLifecycleManager
 
         ServiceSupervisor? supervisor = null;
         Task<SupervisorOperationResult>? startTask = null;
+        // Re-validate against the freshest known snapshot only when it is newer than the
+        // decision snapshot; an empty/lagging holder must not veto a legitimate launch.
+        var gateSnapshot = _snapshotHolder.Current is { } latestSnapshot &&
+            latestSnapshot.Version > snapshot.Version
+                ? latestSnapshot
+                : snapshot;
         lock (_lifecycleGate)
         {
-            if (!IsStopping)
+            if (!IsStopping &&
+                gateSnapshot.Services.Any(value =>
+                    value.Id == service.Id &&
+                    value.Version == service.Version &&
+                    value.Enabled) &&
+                IsServiceEnabledForSnapshot(gateSnapshot, service.Id))
             {
                 try
                 {
@@ -259,7 +306,19 @@ public sealed partial class HostServiceLifecycleManager
                     return null;
                 }
 
-                return new ServiceGeneration(service, supervisor, readyLease, snapshot.Version, decision.NextState);
+                var ownerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
+                    service.Id,
+                    out var owner)
+                    == true
+                    ? owner
+                    : null;
+                return new ServiceGeneration(
+                    service,
+                    supervisor,
+                    readyLease,
+                    snapshot.Version,
+                    decision.NextState,
+                    ownerExtensionId);
             }
 
             if (decision is null || decision.Action is HealthRetryAction.Cancelled or HealthRetryAction.Failed or HealthRetryAction.TimedOut)

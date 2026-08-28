@@ -45,7 +45,7 @@ public enum ExtensionServiceHealthState
 /// </remarks>
 public sealed record ExtensionServiceRuntimeSnapshot
 {
-    /// <summary>Creates an immutable service runtime telemetry snapshot.</summary>
+    /// <summary>Creates an immutable service runtime telemetry snapshot with owner identity.</summary>
     /// <param name="serviceId">The stable service identifier.</param>
     /// <param name="processId">The operating-system process ID when one is currently known.</param>
     /// <param name="startedAt">The UTC time at which the current process generation started.</param>
@@ -56,6 +56,7 @@ public sealed record ExtensionServiceRuntimeSnapshot
     /// <param name="activeForwardedRequestCount">The number of currently forwarded requests.</param>
     /// <param name="lastUpdatedAt">The UTC time at which this telemetry was last updated.</param>
     /// <param name="lastHealthAt">The UTC time of the latest health observation.</param>
+    /// <param name="ownerExtensionId">The owning extension identifier, when the service is extension-owned.</param>
     public ExtensionServiceRuntimeSnapshot(
         Guid serviceId,
         int? processId,
@@ -66,7 +67,8 @@ public sealed record ExtensionServiceRuntimeSnapshot
         long forwardedRequestCount,
         long activeForwardedRequestCount,
         DateTimeOffset? lastUpdatedAt,
-        DateTimeOffset? lastHealthAt)
+        DateTimeOffset? lastHealthAt,
+        string? ownerExtensionId)
     {
         ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
         if (processId is <= 0)
@@ -105,6 +107,11 @@ public sealed record ExtensionServiceRuntimeSnapshot
         ActiveForwardedRequestCount = activeForwardedRequestCount;
         LastUpdatedAt = lastUpdatedAtUtc;
         LastHealthAt = lastHealthAtUtc;
+        OwnerExtensionId = ownerExtensionId is null
+            ? null
+            : string.IsNullOrWhiteSpace(ownerExtensionId)
+                ? throw new ArgumentException("An owner extension identifier is required when supplied.", nameof(ownerExtensionId))
+                : ownerExtensionId;
     }
 
     /// <summary>Gets the stable service identifier.</summary>
@@ -136,6 +143,9 @@ public sealed record ExtensionServiceRuntimeSnapshot
 
     /// <summary>Gets the UTC time of the latest health observation, when known.</summary>
     public DateTimeOffset? LastHealthAt { get; }
+
+    /// <summary>Gets the owning extension identifier when the service is extension-owned.</summary>
+    public string? OwnerExtensionId { get; }
 }
 
 /// <summary>Provides global, read-only supervisor telemetry to an extension.</summary>
@@ -149,6 +159,14 @@ public interface IExtensionSupervisorApi
     /// <param name="cancellationToken">The operation cancellation token.</param>
     /// <returns>The immutable snapshots or a safe error.</returns>
     ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadAsync(
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Reads immutable runtime snapshots for services owned by an extension.</summary>
+    /// <param name="extensionId">The stable owning extension identifier.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns>The immutable owner-scoped snapshots or a safe error.</returns>
+    ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadForExtensionAsync(
+        string extensionId,
         CancellationToken cancellationToken = default);
 
     /// <summary>Reads one service runtime snapshot.</summary>

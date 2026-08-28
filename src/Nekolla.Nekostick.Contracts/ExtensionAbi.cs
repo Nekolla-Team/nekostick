@@ -7,7 +7,7 @@ namespace Nekolla.Nekostick.Contracts;
 public static class ExtensionAbi
 {
     /// <summary>Gets the minimum host API version that exposes the API 1.3 sibling bridge.</summary>
-    public static HostApiVersion Api13Version { get; } = new(1, 3, 0);
+    public static HostApiVersion Api13Version { get; } = new(1, 3, 1);
 
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
     public static HostApiVersion Version { get; } = Api13Version;
