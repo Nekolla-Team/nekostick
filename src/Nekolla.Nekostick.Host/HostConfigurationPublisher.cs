@@ -545,28 +545,75 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 });
         }
 
-        if (previousRoutes is null)
+        if (previousRoutes is not null)
         {
-            return;
+            foreach (var routeId in previousRoutes.Keys)
+            {
+                if (currentIds.Contains(routeId))
+                {
+                    continue;
+                }
+
+                HostCoreEventPublisher.Publish(
+                    _runtimeManager,
+                    ExtensionCoreEventKind.RouteChanged,
+                    new
+                    {
+                        routeId,
+                        version = snapshot.Version,
+                        state = "removed"
+                    });
+            }
         }
 
-        foreach (var routeId in previousRoutes.Keys)
+        PublishExtensionSettingsEvents(snapshot, previous);
+    }
+
+    private void PublishExtensionSettingsEvents(
+        HostConfigurationSnapshot snapshot,
+        HostConfigurationSnapshot? previous)
+    {
+        var currentSettings = snapshot.ExtensionSettings.ToDictionary(
+            static value => value.ExtensionId,
+            StringComparer.Ordinal);
+        var previousSettings = previous?.ExtensionSettings.ToDictionary(
+            static value => value.ExtensionId,
+            StringComparer.Ordinal);
+
+        foreach (var current in currentSettings)
         {
-            if (currentIds.Contains(routeId))
+            if (previousSettings is not null &&
+                previousSettings.TryGetValue(current.Key, out var prior) &&
+                prior.Version == current.Value.Version &&
+                string.Equals(prior.SettingsJson, current.Value.SettingsJson, StringComparison.Ordinal))
             {
                 continue;
             }
 
-            HostCoreEventPublisher.Publish(
-                _runtimeManager,
-                ExtensionCoreEventKind.RouteChanged,
-                new
-                {
-                    routeId,
-                    version = snapshot.Version,
-                    state = "removed"
-                });
+            PublishExtensionSettingsChanged(current.Key);
         }
+
+        if (previousSettings is null)
+        {
+            return;
+        }
+
+        foreach (var prior in previousSettings)
+        {
+            if (!currentSettings.ContainsKey(prior.Key))
+            {
+                PublishExtensionSettingsChanged(prior.Key);
+            }
+        }
+    }
+
+    private void PublishExtensionSettingsChanged(string extensionId)
+    {
+        HostCoreEventPublisher.Publish(
+            _runtimeManager,
+            ExtensionCoreEventKind.ExtensionSettingsChanged,
+            new { extensionId },
+            extensionId);
     }
 
     /// <inheritdoc />

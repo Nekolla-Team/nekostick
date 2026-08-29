@@ -11,11 +11,16 @@ public sealed record HostNodeOptions
     /// Extension install root scanned for manifests; defaults to the
     /// <c>extensions</c> directory next to the host assembly.
     /// </param>
+    /// <param name="dataDirectory">
+    /// Host data directory exposed to extensions; defaults to the <c>data</c> directory
+    /// next to the host assembly.
+    /// </param>
     public HostNodeOptions(
         bool skipExtensions,
         bool disableSupervisor,
         bool readOnly,
-        string? extensionsRootPath = null)
+        string? extensionsRootPath = null,
+        string? dataDirectory = null)
     {
         SkipExtensions = skipExtensions;
         DisableSupervisor = disableSupervisor;
@@ -23,6 +28,9 @@ public sealed record HostNodeOptions
         ExtensionsRootPath = string.IsNullOrWhiteSpace(extensionsRootPath)
             ? Path.Combine(AppContext.BaseDirectory, "extensions")
             : extensionsRootPath;
+        DataDirectory = string.IsNullOrWhiteSpace(dataDirectory)
+            ? Path.Combine(AppContext.BaseDirectory, "data")
+            : Path.GetFullPath(dataDirectory);
     }
 
     /// <summary>Gets whether extension loading is disabled for this process.</summary>
@@ -35,4 +43,7 @@ public sealed record HostNodeOptions
     public bool ReadOnly { get; }
     /// <summary>Gets the extension install root scanned for manifests.</summary>
     public string ExtensionsRootPath { get; }
+
+    /// <summary>Gets the host data directory exposed to extensions.</summary>
+    public string DataDirectory { get; }
 }

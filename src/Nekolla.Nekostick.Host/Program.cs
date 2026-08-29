@@ -235,10 +235,13 @@ internal static class Program
         builder.Host.UseConsoleLifetime();
 
         var bootstrap = command.BootstrapOptions;
-        builder.Services.AddSingleton(new HostNodeOptions(
+        var nodeOptions = new HostNodeOptions(
             command.RunOptions.SkipExtensions,
             command.RunOptions.DisableSupervisor,
-            command.RunOptions.ReadOnly));
+            command.RunOptions.ReadOnly,
+            dataDirectory: bootstrap.DataDirectory);
+        Directory.CreateDirectory(nodeOptions.DataDirectory);
+        builder.Services.AddSingleton(nodeOptions);
         builder.Services.AddSingleton(new HostRuntimeOptions(
             bootstrap.ConnectionString,
             bootstrap.NodeId,
@@ -256,7 +259,8 @@ internal static class Program
                 capabilityFactory: serviceProvider.GetService<IExtensionCapabilityFactory>(),
                 logger: serviceProvider
                     .GetRequiredService<ILoggerFactory>()
-                    .CreateLogger(HostLoggerCategory.Extensions)));
+                    .CreateLogger(HostLoggerCategory.Extensions),
+                dataDirectory: serviceProvider.GetRequiredService<HostNodeOptions>().DataDirectory));
         builder.Services.AddSingleton<HostConfigurationPublisher>();
         builder.Services.AddSingleton<IRouteFallbackDispatcher, ExtensionRouteFallbackDispatcher>();
         builder.Services.AddMicroserviceProxy();
@@ -473,8 +477,8 @@ internal static class Program
         BootstrapDefaults.ListenAddressOption or
         BootstrapDefaults.ListenPortOption or
         BootstrapDefaults.NodeIdOption or
-        BootstrapDefaults.LogLevelOption;
-
+        BootstrapDefaults.LogLevelOption or
+        BootstrapDefaults.DataDirectoryOption;
     private static Dictionary<string, string?> ReadBootstrapEnvironment() =>
         new Dictionary<string, string?>(StringComparer.Ordinal)
         {
@@ -487,7 +491,9 @@ internal static class Program
             [BootstrapDefaults.NodeIdEnvironmentVariable] =
                 Environment.GetEnvironmentVariable(BootstrapDefaults.NodeIdEnvironmentVariable),
             [BootstrapDefaults.LogLevelEnvironmentVariable] =
-                Environment.GetEnvironmentVariable(BootstrapDefaults.LogLevelEnvironmentVariable)
+                Environment.GetEnvironmentVariable(BootstrapDefaults.LogLevelEnvironmentVariable),
+            [BootstrapDefaults.DataDirectoryEnvironmentVariable] =
+                Environment.GetEnvironmentVariable(BootstrapDefaults.DataDirectoryEnvironmentVariable)
         };
 
     private sealed record DatabaseInspection(

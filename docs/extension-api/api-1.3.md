@@ -1,13 +1,16 @@
-# API 1.3：遥测、路由观测、自定义日志与扩展管理
+# API 1.3：遥测、路由观测、自定义日志、扩展管理与流式处理
 
-本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.1**；`HostApiVersion.Current`、`ExtensionAbi.Version` 与 `ExtensionAbi.Api13Version` 均为 `1.3.1`。这是 API 1.3 的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.1 Host 满足）。
+本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.2**；`HostApiVersion.Current`、`ExtensionAbi.Version` 与 `ExtensionAbi.Api13Version` 均为 `1.3.2`。`1.3.2` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.2 Host 满足）。
 
-API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加四组能力：
+API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加七组能力：
 
 - `Supervisor`：全局服务运行遥测与属主过滤（只读）。
 - `RouteEvents`：路由观测订阅与可干预转发的动作钩子。
 - `LogWriter`：Host 署名的自定义文本日志。
 - `Management`：跨扩展安装记录、启用状态、reload、`ReloadSoon`、删除与目录刷新。
+- `DataDirectory`：Host 配置的数据目录路径。
+- 流式请求/响应处理器 `IExtensionStreamingHandler`。
+- 设置内容变更事件 `ExtensionCoreEventKind.ExtensionSettingsChanged`。
 
 ## 能力探测（必读）
 
@@ -24,7 +27,7 @@ if (context.Host is not IExtensionHostBridge13 bridge13)
 // 第二步：协商出的版本是否真的支持 API 1.3
 if (!ExtensionAbi.IsApi13Supported(bridge13.ApiVersion))
 {
-    // 桥类型存在，但 Host 版本低于 API 1.3.1：能力处于「不受支持」状态
+    // 桥类型存在，但 Host 版本低于 API 1.3.2：能力处于「不受支持」状态
     return;
 }
 
@@ -385,6 +388,122 @@ bridge13.LogWriter.WriteText(ExtensionLogLevel.Warning, $"upstream latency {late
 - 级别仍然只有 `Information` / `Warning` 两档。
 - 不要写入机密（设置文档、环境变量、Cookie、Authorization 等）。
 
+## 设置内容变更事件（ExtensionSettingsChanged）
+
+1.3.2 新增 `ExtensionCoreEventKind.ExtensionSettingsChanged`。当 Host 配置发布流程检测到某个扩展的 `ExtensionSettingsConfiguration` 内容（`Version` 或 `SettingsJson`）发生变化时，向该扩展自身的事件总线投递一条事件。
+
+**事件本身不携带设置内容**，载荷只有 `{ extensionId }`：
+
+```csharp
+context.Host.Events.TrySubscribe(async (@event, token) =>
+{
+    if (@event.Type != nameof(ExtensionCoreEventKind.ExtensionSettingsChanged))
+    {
+        return;
+    }
+
+    // 扩展收到事件后，通过现有 API 读取自己的设置并做 diff
+    var read = await context.Host.ConfigurationApi.ReadSettingsAsync(token);
+    if (!read.IsSuccess) { /* 处理读取失败 */ }
+
+    var settings = read.Value;
+    // 与本地缓存对比、热重载配置等
+});
+```
+
+规则：
+
+- **属主限定**：Host 只把该事件投递给 `extensionId` 对应的扩展；其他扩展不会收到。
+- **内容无关**：载荷仅含扩展 ID，扩展需自行调用 `IExtensionConfigurationApi.ReadSettingsAsync` 读取并 diff。
+- **有序投递**：与扩展内其他事件共用同一条有序事件队列，串行、best-effort。
+- **版本门槛**：低于 1.3.2 的 Host 不会发布该事件；扩展可通过 `ExtensionAbi.IsApi13Supported(host.ApiVersion)` 判断。
+
+## Host 数据目录（DataDirectory）
+
+`IExtensionHostBridge13.DataDirectory` 暴露 Host 为扩展准备的持久化数据目录路径。
+
+配置方式（按优先级从高到低）：
+
+1. CLI 参数 `--data-directory <path>`。
+2. 环境变量 `NEKOSTICK_DATA_DIRECTORY`。
+3. 默认值：`Path.Combine(AppContext.BaseDirectory, "data")`，即与 `extensions/` 目录同级的 `data/`。
+
+Host 保证在扩展 `StartAsync` 之前该目录已存在。扩展使用规则：
+
+```csharp
+if (host is not IExtensionHostBridge13 bridge13)
+{
+    // 旧版桥：不可用
+    return;
+}
+
+if (string.IsNullOrEmpty(bridge13.DataDirectory))
+{
+    // 明确不可用；不能当作路径使用
+    return;
+}
+
+var extensionDataPath = Path.Combine(bridge13.DataDirectory, "my.extension");
+```
+
+- `string.Empty` 表示不可用，扩展**不能**将其当作路径使用。
+- 在 manifest 中要求 `>=1.3.2`，或在运行时探测 `ExtensionAbi.IsApi13Supported(host.ApiVersion)`，确认版本后再读取。
+- 该目录由 Host 所有；扩展只应读写自己命名的子目录/文件，不能删除或覆盖 Host 文件。
+
+## 流式请求 / 响应处理器
+
+1.3.2 新增 `IExtensionStreamingHandler`，让扩展以原始 `Stream` 消费请求体、生产响应体，与既有字节数组处理器 `IExtensionHandler` 并存。
+
+注册方式：
+
+```csharp
+public sealed class StreamingHandler : IExtensionStreamingHandler
+{
+    public string HandlerId => "example.echo";
+
+    public async ValueTask<ExtensionStreamingResponse> HandleStreamingAsync(
+        ExtensionStreamingRequest request,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new MemoryStream();
+        await request.BodyStream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        buffer.Position = 0;
+
+        return new ExtensionStreamingResponse(
+            200,
+            new[] { new KeyValuePair<string, IEnumerable<string>>("Content-Type", ["application/octet-stream"]) },
+            buffer);
+    }
+}
+
+context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
+```
+
+### 请求流（`ExtensionStreamingRequest.BodyStream`）
+
+- Host 所有；仅在 `HandleStreamingAsync` 回调执行期间有效。
+- 回调返回、抛出或被取消后，Host 负责释放。
+- 读取受路由 `MaxRequestBodyBytes` 限制；超出时 Host 仅让本次请求失败，**不会**计入扩展的失败统计（客户端超限不是扩展故障）。
+
+### 响应流（`ExtensionStreamingResponse.BodyStream`）
+
+- 回调执行期间由 handler 所有；**回调返回后所有权转移给 Host**。
+- Host 从流的**当前位置**开始读取，复制到客户端后释放。
+- 如果 handler 把数据写入 `MemoryStream`，**必须在返回前 rewind**（`Position = 0`）。
+- 第一个字节复制到客户端即**提交响应**，此后无法回滚。
+- `null` 会被替换为 `Stream.Null`，表示空响应体。
+
+### 与路由钩子 / 观测的交互
+
+- 流式路由上的 route hooks 收到的请求体快照为**空**（`Body` 长度 0）。
+- 如果某条流式路由上存在 hooks，Host 会把整个流式响应**完全缓冲到内存**后再提供给 hooks 做 snapshot / rollback；扩展不需要关心这一行为，但应意识到大流会被缓冲。
+
+### 何时使用流式处理器
+
+- 请求体或响应体较大，不适合全部驻留在内存（但仍受 Host 请求体上限约束）。
+- 需要流式转换、压缩、分块解析等场景。
+- 不需要 hook 对请求体做 snapshot / rollback 的路由。
+
 ## Host 桥能力总览
 
 `IExtensionHostBridge` 按版本累积能力；API 1.3 能力都经 `IExtensionHostBridge13` 暴露：
@@ -404,10 +523,13 @@ bridge13.LogWriter.WriteText(ExtensionLogLevel.Warning, $"upstream latency {late
 | `Endpoints` | 1.1 | 已发布的服务端点租约。 |
 | `Lifecycle` | 1.1 | 自身状态查询、请求 reload / unload。 |
 | `FullConfiguration` | 1.2 | 全量 Host 配置读写。 |
-| `Supervisor`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.1） | 全局服务运行遥测与属主过滤。 |
-| `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.1） | 路由观测订阅与动作钩子。 |
-| `LogWriter`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.1） | 自定义文本日志。 |
-| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.1） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
+| `Supervisor`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 全局服务运行遥测与属主过滤。 |
+| `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 路由观测订阅与动作钩子。 |
+| `LogWriter`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 自定义文本日志。 |
+| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
+| `DataDirectory`（经 `IExtensionHostBridge13`） | 1.3.2 | Host 配置的数据目录路径。 |
+| `IExtensionRegistration.TryRegisterStreamingHandler` | 1.3.2 | 流式请求 / 响应处理器注册。 |
+| `ExtensionCoreEventKind.ExtensionSettingsChanged` | 1.3.2 | 设置内容变更事件。 |
 
 ## 操作限制与已知限制
 
@@ -430,10 +552,13 @@ bridge13.LogWriter.WriteText(ExtensionLogLevel.Warning, $"upstream latency {late
 | 动作钩子回调时限 | 250 ms |
 | 观测 / 钩子快照 body | 64 KiB |
 | 自定义日志单条文本 | 4096 字符 |
+| 流式请求体上限 | 由路由 `MaxRequestBodyBytes` 决定 |
+| 流式响应 hook 缓冲 | hook 启用时完整响应体被缓冲到内存（受 Host 内存限制） |
 
 ## 从 1.2 迁移
 
 - 1.2 及以前的桥契约保持不变，`IExtensionHostBridge` 的全部成员行为不变；`IExtensionHostBridge13` 是旁路接口。
-- Contracts 包升级到 **1.3.1** 即可获得 API 1.3.1 的新 DTO、`Management` 和 Supervisor 属主过滤；`ExtensionCapabilitySet` 的旧构造函数仍保留，`ExtensionManagement` 是可空的可选能力。
+- Contracts 包升级到 **1.3.2** 即可获得 API 1.3.2 的 `DataDirectory`、流式处理器 `IExtensionStreamingHandler`、设置变更事件 `ExtensionCoreEventKind.ExtensionSettingsChanged`；`ExtensionCapabilitySet` 的旧构造函数仍保留，`ExtensionManagement` 是可空的可选能力。
 - 只需要在用到新能力的地方按本文开头的两步检查做探测；老代码不需要改。
 - API version 仍是 1.3，没有另一个管理 API version。要求 Host API 1.3 的 manifest 不需要改写；新发现扩展的持久化默认状态、显式 refresh 和记录永不自动删除是本版本的生命周期规则。
+- 流式处理器是**追加**的新接口；已有的 `IExtensionHandler` 行为、路由配置和目标绑定均不变。

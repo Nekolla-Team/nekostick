@@ -18,7 +18,6 @@ public enum BootstrapErrorCode
     /// <summary>The requested log level was not a supported name.</summary>
     InvalidLogLevel,
 
-
     /// <summary>An option was repeated.</summary>
     DuplicateOption,
 
@@ -32,7 +31,10 @@ public enum BootstrapErrorCode
     InvalidArguments,
 
     /// <summary>The EF log inclusion switch was not a supported Boolean value.</summary>
-    InvalidIncludeEfLogs
+    InvalidIncludeEfLogs,
+
+    /// <summary>The host data directory was empty, unsafe, or invalid.</summary>
+    InvalidDataDirectory
 }
 
 /// <summary>Contains a bootstrap error without echoing supplied values.</summary>
@@ -65,7 +67,8 @@ public sealed record BootstrapOptions
         int listenPort,
         string nodeId,
         string minimumLevel,
-        bool includeEfLogs)
+        bool includeEfLogs,
+        string dataDirectory)
     {
         ConnectionString = connectionString;
         ListenAddress = listenAddress;
@@ -73,6 +76,7 @@ public sealed record BootstrapOptions
         NodeId = nodeId;
         MinimumLevel = minimumLevel;
         IncludeEfLogs = includeEfLogs;
+        DataDirectory = dataDirectory;
     }
 
     /// <summary>Gets the PostgreSQL connection string. Callers must treat it as secret.</summary>
@@ -92,14 +96,24 @@ public sealed record BootstrapOptions
     /// <summary>Gets whether Entity Framework Core logs are included at the configured framework level.</summary>
     public bool IncludeEfLogs { get; }
 
+    /// <summary>Gets the normalized absolute host data directory for extension-owned files.</summary>
+    public string DataDirectory { get; }
+
     internal static BootstrapOptions CreateValidated(
         string connectionString,
         string listenAddress,
         int listenPort,
         string nodeId,
         string minimumLevel,
-        bool includeEfLogs) => new(
-            connectionString, listenAddress, listenPort, nodeId, minimumLevel, includeEfLogs);
+        bool includeEfLogs,
+        string dataDirectory) => new(
+            connectionString,
+            listenAddress,
+            listenPort,
+            nodeId,
+            minimumLevel,
+            includeEfLogs,
+            dataDirectory);
 }
 
 /// <summary>Registers bootstrap environment names and safe defaults.</summary>
@@ -122,6 +136,9 @@ public static class BootstrapDefaults
     /// <summary>The environment variable controlling EF log inclusion.</summary>
     public const string IncludeEfLogsEnvironmentVariable = "NEKOSTICK_INCLUDE_EF_LOGS";
 
+    /// <summary>The environment variable for the host data directory.</summary>
+    public const string DataDirectoryEnvironmentVariable = "NEKOSTICK_DATA_DIRECTORY";
+
     /// <summary>The CLI option for the database connection string.</summary>
     public const string ConnectionStringOption = "--connection-string";
 
@@ -139,6 +156,9 @@ public static class BootstrapDefaults
     /// <summary>The CLI switch controlling EF log inclusion.</summary>
     public const string IncludeEfLogsOption = "--include-ef-logs";
 
+    /// <summary>The CLI option for the host data directory.</summary>
+    public const string DataDirectoryOption = "--data-directory";
+
     /// <summary>The default loopback listen address.</summary>
     public const string DefaultListenAddress = "127.0.0.1";
 
@@ -150,6 +170,9 @@ public static class BootstrapDefaults
 
     /// <summary>The default minimum log level name.</summary>
     public const string DefaultLogLevel = "Information";
+
+    /// <summary>The default host data directory beside the executable.</summary>
+    public static string DefaultDataDirectory => Path.Combine(AppContext.BaseDirectory, "data");
 
     /// <summary>The maximum node identifier length in UTF-16 characters.</summary>
     public const int MaxNodeIdLength = 128;

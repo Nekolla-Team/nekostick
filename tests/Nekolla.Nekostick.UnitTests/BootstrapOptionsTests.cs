@@ -86,6 +86,65 @@ public sealed class BootstrapOptionsTests
         Assert.False(result.Options!.IncludeEfLogs);
     }
 
+    [Fact]
+    public void DataDirectoryCliTakesPrecedenceAndNormalizesRelativePath()
+    {
+        const string cliDirectory = "cli-data-directory";
+        var result = BootstrapOptionsParser.Parse(
+            [
+                "--connection-string", "database-secret",
+                BootstrapDefaults.DataDirectoryOption, cliDirectory
+            ],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.DataDirectoryEnvironmentVariable] = "/tmp/environment-data-directory"
+            });
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(Path.GetFullPath(cliDirectory), result.Options!.DataDirectory);
+    }
+
+    [Fact]
+    public void DataDirectoryEnvironmentTakesPrecedenceOverDefault()
+    {
+        var environmentDirectory = Path.Combine(Path.GetTempPath(), "environment-data-directory");
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.DataDirectoryEnvironmentVariable] = environmentDirectory
+            });
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(Path.GetFullPath(environmentDirectory), result.Options!.DataDirectory);
+    }
+
+    [Fact]
+    public void DataDirectoryDefaultsBesideExecutable()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>());
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "data")),
+            result.Options!.DataDirectory);
+    }
+
+    [Fact]
+    public void InvalidDataDirectoryIsRejectedWithoutEchoingInput()
+    {
+        const string unsafeDirectory = "invalid\0directory";
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret", BootstrapDefaults.DataDirectoryOption, unsafeDirectory],
+            new Dictionary<string, string?>());
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(BootstrapErrorCode.InvalidDataDirectory, result.Error!.Code);
+        Assert.DoesNotContain(unsafeDirectory, result.Error.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("localhost")]
     [InlineData("127.0.0.1 ")]

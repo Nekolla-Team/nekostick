@@ -151,6 +151,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     private readonly ExtensionContractCatalog _contractCatalog;
     private readonly IExtensionCapabilityFactory? _capabilityFactory;
     private readonly ILogger? _logger;
+    private readonly string _dataDirectory;
     private readonly Dictionary<string, ExtensionInstance> _instances = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HandlerBinding> _handlers = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _dispatchLifetime = new();
@@ -162,16 +163,19 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     /// <param name="contractCatalog">The immutable host-owned shared contract catalog.</param>
     /// <param name="capabilityFactory">The optional host-owned factory for extension capabilities.</param>
     /// <param name="logger">The optional host logger for lifecycle events.</param>
+    /// <param name="dataDirectory">The host-configured directory exposed to API 1.3.2 extensions.</param>
     public ExtensionRuntimeManager(
         HostApiVersion hostApiVersion,
         ExtensionContractCatalog? contractCatalog = null,
         IExtensionCapabilityFactory? capabilityFactory = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        string? dataDirectory = null)
     {
         _hostApiVersion = hostApiVersion;
         _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault();
         _capabilityFactory = capabilityFactory;
         _logger = logger;
+        _dataDirectory = dataDirectory ?? string.Empty;
         _loader = new CollectibleExtensionLoader(
             new SemVersion(hostApiVersion.Major, hostApiVersion.Minor, hostApiVersion.Patch),
             _contractCatalog);

@@ -13,7 +13,21 @@ internal static class HostCoreEventPublisher
     internal static void Publish(
         ExtensionRuntimeManager? runtimeManager,
         ExtensionCoreEventKind kind,
-        object payload)
+        object payload) =>
+        PublishCoreEvent(runtimeManager, kind, payload, targetExtensionId: null);
+
+    internal static void Publish(
+        ExtensionRuntimeManager? runtimeManager,
+        ExtensionCoreEventKind kind,
+        object payload,
+        string targetExtensionId) =>
+        PublishCoreEvent(runtimeManager, kind, payload, targetExtensionId);
+
+    private static void PublishCoreEvent(
+        ExtensionRuntimeManager? runtimeManager,
+        ExtensionCoreEventKind kind,
+        object payload,
+        string? targetExtensionId)
     {
         if (runtimeManager is null || payload is null)
         {
@@ -28,7 +42,15 @@ internal static class HostCoreEventPublisher
                 return;
             }
 
-            runtimeManager.PublishCoreEvent(new ExtensionCoreEvent(kind, SchemaVersion, payloadJson));
+            var @event = new ExtensionCoreEvent(kind, SchemaVersion, payloadJson);
+            if (targetExtensionId is null)
+            {
+                runtimeManager.PublishCoreEvent(@event);
+            }
+            else
+            {
+                runtimeManager.PublishCoreEvent(@event, targetExtensionId);
+            }
         }
         catch (Exception)
         {

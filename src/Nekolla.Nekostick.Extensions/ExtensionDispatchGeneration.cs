@@ -256,7 +256,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         }
     }
 
-    /// <summary>Dispatches through a short-lived lease owned by this convenience call.</summary>
+    /// <summary>Dispatches a buffered handler through a short-lived Host lease.</summary>
     public async ValueTask<ExtensionInvocationResult> HandleAsync(
         string? handlerId,
         ExtensionHandlerRequest? request,
@@ -266,6 +266,29 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         return lease is null
             ? ExtensionInvocationResult.Unavailable
             : await lease.HandleAsync(handlerId, request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Dispatches a streaming handler through a short-lived Host lease.</summary>
+    public async ValueTask<ExtensionStreamingInvocationResult> HandleStreamingAsync(
+        string? handlerId,
+        ExtensionStreamingRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        using var lease = TryAcquireLease();
+        if (lease is null)
+        {
+            try
+            {
+                request?.BodyStream.Dispose();
+            }
+            catch
+            {
+            }
+
+            return ExtensionStreamingInvocationResult.Unavailable;
+        }
+
+        return await lease.HandleStreamingAsync(handlerId, request, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Dispatches fallback through a short-lived lease owned by this convenience call.</summary>
@@ -287,6 +310,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(handlerId) || request is null ||
             !_handlers.TryGetValue(handlerId, out var binding) ||
+            binding.StreamingHandler is not null ||
             binding.Handler is not { } handler ||
             !binding.Context.Instance.IsHandlerOwned(handlerId) ||
             !binding.Context.Instance.TryEnterRequest())
@@ -315,6 +339,77 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         finally
         {
             binding.Context.Instance.LeaveRequest();
+        }
+    }
+
+    internal async ValueTask<ExtensionStreamingInvocationResult> HandleStreamingWithLeaseAsync(
+        string? handlerId,
+        ExtensionStreamingRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(handlerId) || request is null ||
+            !_handlers.TryGetValue(handlerId, out var binding) ||
+            binding.StreamingHandler is not { } handler ||
+            !binding.Context.Instance.IsStreamingHandler(handlerId) ||
+            !binding.Context.Instance.TryEnterRequest())
+        {
+            request?.BodyStream.Dispose();
+            return ExtensionStreamingInvocationResult.Unavailable;
+        }
+
+        var holdRequestLease = false;
+        try
+        {
+            ExtensionStreamingResponse? response;
+            using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route))
+            {
+                try
+                {
+                    response = await handler.HandleStreamingAsync(request, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (ExtensionRequestBodyLimitExceededException)
+                {
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+                catch (ExtensionRequestReadTimeoutException)
+                {
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+                catch (OperationCanceledException)
+                {
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+                catch (Exception exception)
+                {
+                    await binding.Context.RecordFailureAsync(ExtensionFailureCode.HandlerFailed, exception)
+                        .ConfigureAwait(false);
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+            }
+
+            if (response is null)
+            {
+                return ExtensionStreamingInvocationResult.Failed;
+            }
+
+            holdRequestLease = true;
+            return ExtensionStreamingInvocationResult.Handled(response, binding.Context.Instance);
+        }
+        finally
+        {
+            try
+            {
+                request.BodyStream.Dispose();
+            }
+            catch
+            {
+            }
+
+            if (!holdRequestLease)
+            {
+                binding.Context.Instance.LeaveRequest();
+            }
         }
     }
 
@@ -373,6 +468,11 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             .Where(id => !_handlers.ContainsKey(id))
             .ToImmutableArray();
     }
+
+    internal bool IsStreamingHandler(string? handlerId) =>
+        !string.IsNullOrWhiteSpace(handlerId) &&
+        _handlers.TryGetValue(handlerId, out var binding) &&
+        binding.StreamingHandler is not null;
     /// <summary>Retires this generation and waits for its active leases to drain.</summary>
     /// <param name="cancellationToken">The token that cancels the retirement wait.</param>
     /// <returns><see langword="true" /> if active leases drain and the generation is released; otherwise, <see langword="false" /> when the wait is canceled.</returns>

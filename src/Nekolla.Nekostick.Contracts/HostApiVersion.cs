@@ -5,8 +5,8 @@ public readonly record struct HostApiVersion : IComparable<HostApiVersion>
 {
     /// <summary>Creates a host API semantic version.</summary>
     /// <param name="major">The incompatible API generation.</param>
-    /// <param name="minor">The backward-compatible feature version.</param>
-    /// <param name="patch">The backward-compatible fix version.</param>
+    /// <param name="minor">The backward-compatible API generation, such as a new sibling bridge.</param>
+    /// <param name="patch">The additive evolution within the API generation.</param>
     public HostApiVersion(int major, int minor, int patch)
     {
         if (major < 0 || minor < 0 || patch < 0)
@@ -20,7 +20,7 @@ public readonly record struct HostApiVersion : IComparable<HostApiVersion>
     }
 
     /// <summary>Gets the current host API version.</summary>
-    public static HostApiVersion Current { get; } = new(1, 3, 1);
+    public static HostApiVersion Current { get; } = new(1, 3, 2);
 
     /// <summary>Gets the major component.</summary>
     public int Major { get; }

@@ -21,10 +21,12 @@ internal static partial class HostRouteEvents
         }
 
         var hasHooks = generation.HasRouteHooks(match.RouteId);
+        var isStreamingHandler = generation.IsStreamingHandler(match.Target?.HandlerId);
+        var includeBody = hasHooks && !isStreamingHandler;
         ExtensionRouteRequestSnapshot request;
         try
         {
-            request = await CreateRequestSnapshotAsync(context, hasHooks, cancellationToken).ConfigureAwait(false);
+            request = await CreateRequestSnapshotAsync(context, includeBody, cancellationToken).ConfigureAwait(false);
         }
         catch
         {

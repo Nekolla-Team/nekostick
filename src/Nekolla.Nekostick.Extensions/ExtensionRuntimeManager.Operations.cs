@@ -415,6 +415,96 @@ public sealed partial class ExtensionRuntimeManager
         }
     }
 
+    /// <summary>Dispatches one streaming handler by stable ID without exposing runtime handles.</summary>
+    /// <param name="handlerId">The stable handler ID.</param>
+    /// <param name="request">The streaming request value.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>A safe streaming invocation result.</returns>
+    public async ValueTask<ExtensionStreamingInvocationResult> HandleStreamingAsync(
+        string? handlerId,
+        ExtensionStreamingRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(handlerId) || request is null)
+        {
+            return ExtensionStreamingInvocationResult.Unavailable;
+        }
+
+        HandlerBinding? binding;
+        lock (_gate)
+        {
+            if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+            {
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            _handlers.TryGetValue(handlerId, out binding);
+        }
+
+        if (binding is null || binding.StreamingHandler is not { } handler ||
+            !binding.Instance.IsStreamingHandler(handlerId) ||
+            !binding.Instance.TryEnterRequest())
+        {
+            request.BodyStream.Dispose();
+            return ExtensionStreamingInvocationResult.Unavailable;
+        }
+
+        var holdRequestLease = false;
+        try
+        {
+            ExtensionStreamingResponse? response;
+            using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route))
+            {
+                try
+                {
+                    response = await handler.HandleStreamingAsync(request, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (ExtensionRequestBodyLimitExceededException)
+                {
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+                catch (ExtensionRequestReadTimeoutException)
+                {
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+                catch (OperationCanceledException)
+                {
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+                catch (Exception exception)
+                {
+                    await RecordFailureAsync(binding.Instance, ExtensionFailureCode.HandlerFailed, exception)
+                        .ConfigureAwait(false);
+                    return ExtensionStreamingInvocationResult.Failed;
+                }
+            }
+
+            if (response is null)
+            {
+                return ExtensionStreamingInvocationResult.Failed;
+            }
+
+            holdRequestLease = true;
+            return ExtensionStreamingInvocationResult.Handled(response, binding.Instance);
+        }
+        finally
+        {
+            try
+            {
+                request.BodyStream.Dispose();
+            }
+            catch
+            {
+            }
+
+            if (!holdRequestLease)
+            {
+                binding.Instance.LeaveRequest();
+            }
+        }
+    }
+
     /// <summary>Gets a safe snapshot of all currently known extension states.</summary>
     public ImmutableArray<ExtensionRuntimeStatus> GetStatuses()
     {

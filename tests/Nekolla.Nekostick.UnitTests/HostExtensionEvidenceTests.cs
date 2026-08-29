@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
@@ -422,6 +423,70 @@ public sealed class HostExtensionEvidenceTests
         Assert.Contains("\"state\":\"Loaded\"", body, StringComparison.Ordinal);
         Assert.Contains("\"state\":\"applied\"", body, StringComparison.Ordinal);
         Assert.Contains("\"state\":\"changed\"", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublisherEmitsSettingsEventsOnlyForChangedAddedAndRemovedEntries()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var runtimeSettings = Settings(
+            FixtureExtensionId,
+            "settings-events",
+            publishCoreEvents: true,
+            eventCount: 8);
+        Assert.True((await manager.LoadAsync(
+            manifest,
+            runtimeSettings,
+            TestContext.Current.CancellationToken)).Succeeded);
+
+        var holder = new HostConfigurationSnapshotHolder();
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            manager,
+            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+            NullLogger<HostConfigurationPublisher>.Instance);
+        var record = new ExtensionRecordConfiguration(
+            FixtureExtensionId,
+            "1.0.0",
+            ExtensionLoadState.Loaded,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            1);
+        var oldSettings = Settings(FixtureExtensionId, "old", settingsVersion: 1);
+        var sameSettings = Settings(FixtureExtensionId, "old", settingsVersion: 1);
+        var changedSettings = Settings(FixtureExtensionId, "new", settingsVersion: 2);
+        var initial = CreatePublisherSnapshot(1, [record], [oldSettings]);
+        var same = CreatePublisherSnapshot(2, [record], [sameSettings]);
+        var changed = CreatePublisherSnapshot(3, [record], [changedSettings]);
+        var noSettings = CreatePublisherSnapshot(
+            4,
+            [record],
+            ImmutableArray<ExtensionSettingsConfiguration>.Empty);
+        var added = CreatePublisherSnapshot(5, [record], [oldSettings]);
+        var removed = CreatePublisherSnapshot(
+            6,
+            [record],
+            ImmutableArray<ExtensionSettingsConfiguration>.Empty);
+
+        InvokePublishSnapshotEvents(publisher, same, initial);
+        InvokePublishSnapshotEvents(publisher, changed, same);
+        InvokePublishSnapshotEvents(publisher, added, noSettings);
+        InvokePublishSnapshotEvents(publisher, removed, initial);
+
+        var result = await manager.HandleAsync(
+            FixtureExtensionId,
+            new ExtensionHandlerRequest("GET", "/settings-events"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, result.State);
+        var body = Encoding.UTF8.GetString(result.Response!.Body.AsSpan());
+        var settingsPayload = $"{{\"extensionId\":\"{FixtureExtensionId}\"}}";
+        Assert.Equal(3, body.Split(settingsPayload, StringSplitOptions.None).Length - 1);
+        Assert.Contains("{\"version\":2,\"state\":\"applied\"}", body, StringComparison.Ordinal);
+        Assert.Contains("{\"version\":3,\"state\":\"applied\"}", body, StringComparison.Ordinal);
+        Assert.Contains("{\"version\":5,\"state\":\"applied\"}", body, StringComparison.Ordinal);
+        Assert.Contains("{\"version\":6,\"state\":\"applied\"}", body, StringComparison.Ordinal);
     }
 
 
@@ -1063,6 +1128,18 @@ public sealed class HostExtensionEvidenceTests
             ImmutableArray<ServiceConfiguration>.Empty,
             records,
             settings);
+
+    private static void InvokePublishSnapshotEvents(
+        HostConfigurationPublisher publisher,
+        HostConfigurationSnapshot snapshot,
+        HostConfigurationSnapshot? previous)
+    {
+        var method = typeof(HostConfigurationPublisher).GetMethod(
+            "PublishSnapshotEvents",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(publisher, [snapshot, previous]);
+    }
 
     private sealed class StagedHostExtensionDirectory : IDisposable
     {

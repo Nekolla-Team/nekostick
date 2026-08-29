@@ -60,10 +60,54 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
             state.StartLifecycleResult = await state.RequestLifecycleAsync().ConfigureAwait(false);
         }
 
+        if (options.ReadDataDirectory)
+        {
+            var bridge13 = context.Host as IExtensionHostBridge13;
+            state.DataDirectoryValue = bridge13 is null
+                ? "unavailable"
+                : string.IsNullOrEmpty(bridge13.DataDirectory)
+                    ? "empty"
+                    : bridge13.DataDirectory;
+        }
+
+        if (options.SubscribeSettingsChanged)
+        {
+            if (!context.Host.Events.TrySubscribe(async (@event, token) =>
+                {
+                    if (!string.Equals(
+                            @event.Type,
+                            nameof(ExtensionCoreEventKind.ExtensionSettingsChanged),
+                            StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+
+                    Interlocked.Increment(ref state.SettingsChangedEventCount);
+                    var read = await context.Host.ConfigurationApi.ReadSettingsAsync(token)
+                        .ConfigureAwait(false);
+                    state.SettingsChangedReadResult = read.IsSuccess
+                        ? $"Success:{read.Value?.ExtensionId ?? "null"}"
+                        : read.Errors.IsDefaultOrEmpty
+                            ? "Unknown"
+                            : read.Errors[0].Code.ToString();
+                    state.SettingsChangedComplete.TrySetResult(true);
+                }))
+            {
+                throw new InvalidOperationException("Fixture settings-changed subscription failed.");
+            }
+        }
+
         if (!context.Registration.TryRegisterHandler(
                 new FixtureHandler(state, options.HandlerId)))
         {
             throw new InvalidOperationException("Fixture handler registration failed.");
+        }
+
+        if (options.RegisterStreamingHandler &&
+            !context.Registration.TryRegisterStreamingHandler(
+                new FixtureStreamingHandler(state, options.StreamingHandlerId)))
+        {
+            throw new InvalidOperationException("Fixture streaming handler registration failed.");
         }
 
         if ((options.RegisterFallback || options.DuplicateFallback) &&

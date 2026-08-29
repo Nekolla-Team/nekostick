@@ -13,9 +13,11 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         ExtensionCapabilitySet capabilities,
         IExtensionLifecycleApi lifecycle,
         Action<ExtensionStatus> reportStatus,
-        Action<ExtensionLogLevel, string> reportLog)
+        Action<ExtensionLogLevel, string> reportLog,
+        string? dataDirectory = null)
     {
         ApiVersion = apiVersion;
+        DataDirectory = dataDirectory ?? string.Empty;
         Configuration = new ExtensionSettingsReader(settings);
         var api11Supported = ExtensionApiCapabilityGate.IsApi11Supported(apiVersion);
         var api12Supported = ExtensionApiCapabilityGate.IsApi12Supported(apiVersion);
@@ -50,6 +52,8 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
     }
 
     public HostApiVersion ApiVersion { get; }
+
+    public string DataDirectory { get; }
 
     public IExtensionSettingsReader Configuration { get; }
     public IExtensionConfigurationApi ConfigurationApi { get; }

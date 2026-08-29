@@ -55,7 +55,8 @@ public sealed partial class ExtensionRuntimeManager
                 settings,
                 ResolveContractProvider,
                 _capabilityFactory,
-                routeIds);
+                routeIds,
+                _dataDirectory);
             instance.SetFailureCallback(exception =>
                 RecordFailureAsync(instance, ExtensionFailureCode.CallbackFailed, exception));
             instance.SetLifecycleCallbacks(
@@ -289,7 +290,16 @@ public sealed partial class ExtensionRuntimeManager
     /// <summary>Publishes one required node-local core event without blocking the caller.</summary>
     /// <param name="event">The immutable core event.</param>
     /// <returns>The number of active extension queues that accepted the event.</returns>
-    public int PublishCoreEvent(ExtensionCoreEvent? @event)
+    public int PublishCoreEvent(ExtensionCoreEvent? @event) =>
+        PublishCoreEvent(@event, targetExtensionId: null);
+
+    /// <summary>Publishes one core event to serving instances owned by one extension.</summary>
+    /// <param name="event">The immutable core event.</param>
+    /// <param name="targetExtensionId">The stable extension owner, or null to broadcast.</param>
+    /// <returns>The number of active extension queues that accepted the event.</returns>
+    public int PublishCoreEvent(
+        ExtensionCoreEvent? @event,
+        string? targetExtensionId)
     {
         if (@event is null)
         {
@@ -304,7 +314,10 @@ public sealed partial class ExtensionRuntimeManager
         lock (_gate)
         {
             recipients = _instances.Values
-                .Where(static instance => instance.IsServing)
+                .Where(instance =>
+                    instance.IsServing &&
+                    (targetExtensionId is null ||
+                        string.Equals(instance.Manifest.Id, targetExtensionId, StringComparison.Ordinal)))
                 .ToArray();
         }
 
@@ -325,12 +338,17 @@ public sealed partial class ExtensionRuntimeManager
         _instances[instance.Manifest.Id] = instance;
         foreach (var pair in instance.Handlers)
         {
-            _handlers[pair.Key] = new HandlerBinding(instance, pair.Value, null);
+            _handlers[pair.Key] = new HandlerBinding(instance, pair.Value, null, null);
+        }
+
+        foreach (var pair in instance.StreamingHandlers)
+        {
+            _handlers[pair.Key] = new HandlerBinding(instance, null, pair.Value, null);
         }
 
         if (instance.Fallback is not null)
         {
-            _fallback = new HandlerBinding(instance, null, instance.Fallback);
+            _fallback = new HandlerBinding(instance, null, null, instance.Fallback);
         }
 
         instance.MarkServing();
@@ -498,5 +516,6 @@ public sealed partial class ExtensionRuntimeManager
     private sealed record HandlerBinding(
         ExtensionInstance Instance,
         IExtensionHandler? Handler,
+        IExtensionStreamingHandler? StreamingHandler,
         IExtensionFallback? Fallback);
 }

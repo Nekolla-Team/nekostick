@@ -11,9 +11,9 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
 | [api-1.0.md](api-1.0.md) | 1.0.0 | 入口点、路由处理器、fallback、注册表、设置读取、后台任务、事件、状态、日志、共享契约 |
 | [api-1.1.md](api-1.1.md) | 1.1.0 | 属主配置 API、属主路由 CRUD、属主服务 CRUD 与生命周期、端点租约、自身生命周期 |
 | [api-1.2.md](api-1.2.md) | 1.2.0 | 全量配置读写（`FullConfiguration`） |
-| [api-1.3.md](api-1.3.md) | 1.3.1 | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新 |
+| [api-1.3.md](api-1.3.md) | 1.3.1 / 1.3.2 patch | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新；1.3.2 追加设置内容变更事件、Host 数据目录、流式请求/响应处理器 |
 
-当前 Contracts 包版本为 **1.3.1**（`HostApiVersion.Current`）。
+当前 Contracts 包版本为 **1.3.2**（`HostApiVersion.Current`）。
 
 ## 快速开始
 
@@ -30,7 +30,7 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Nekolla.Nekostick.Contracts" Version="1.3.1" />
+    <PackageReference Include="Nekolla.Nekostick.Contracts" Version="1.3.2" />
   </ItemGroup>
 </Project>
 ```
@@ -188,7 +188,7 @@ var has13 = ExtensionAbi.IsApi13Supported(api); // 是否可用 1.3 能力
 | `Supervisor`（经 `IExtensionHostBridge13`） | 1.3 | 全局服务运行遥测。 |
 | `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3 | 路由观测订阅与动作钩子。 |
 | `LogWriter`（经 `IExtensionHostBridge13`） | 1.3 | 自定义文本日志。 |
-| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.1） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
+| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
 
 ## 通用约定
 

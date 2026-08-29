@@ -7,7 +7,7 @@ namespace Nekolla.Nekostick.Contracts;
 public static class ExtensionAbi
 {
     /// <summary>Gets the minimum host API version that exposes the API 1.3 sibling bridge.</summary>
-    public static HostApiVersion Api13Version { get; } = new(1, 3, 1);
+    public static HostApiVersion Api13Version { get; } = new(1, 3, 2);
 
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
     public static HostApiVersion Version { get; } = Api13Version;
@@ -310,7 +310,10 @@ public enum ExtensionCoreEventKind
     PortLeaseChanged,
 
     /// <summary>An extension changed lifecycle state.</summary>
-    ExtensionStateChanged
+    ExtensionStateChanged,
+
+    /// <summary>An extension's settings content changed.</summary>
+    ExtensionSettingsChanged
 }
 
 /// <summary>Contains one immutable node-local core event.</summary>
@@ -433,6 +436,12 @@ public interface IExtensionRegistration
 {
     /// <summary>Attempts to register one handler ID.</summary>
     bool TryRegisterHandler(IExtensionHandler handler);
+
+    /// <summary>Attempts to register one streaming handler ID.</summary>
+    /// <remarks>The extension consumes this registration path for streaming handlers; the Host implements it.</remarks>
+    /// <param name="handler">The streaming handler to register.</param>
+    /// <returns><see langword="true" /> when the Host accepted the handler.</returns>
+    bool TryRegisterStreamingHandler(IExtensionStreamingHandler handler) => false;
 
     /// <summary>Attempts to register the sole global fallback.</summary>
     bool TryRegisterFallback(IExtensionFallback fallback);

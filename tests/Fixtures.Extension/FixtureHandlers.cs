@@ -63,6 +63,19 @@ public sealed class FixtureHandler : IExtensionHandler
             await _state.CallbackComplete.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        if (_state.Options.SubscribeSettingsChanged)
+        {
+            try
+            {
+                await _state.SettingsChangedComplete.Task.WaitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // No settings-changed event arrived for this extension; render the current state.
+            }
+        }
+
         var payload = _state.RenderPayload();
         return new ExtensionHandlerResponse(
             200,
@@ -113,5 +126,72 @@ internal sealed class FixtureContractLogger : IExtensionLogger
 {
     public void Report(ExtensionLogLevel level, string code)
     {
+    }
+}
+
+/// <summary>Provides a streaming handler registered by <see cref="FixtureEntrypoint" />.</summary>
+public sealed class FixtureStreamingHandler : IExtensionStreamingHandler
+{
+    private readonly FixtureState _state;
+
+    /// <inheritdoc />
+    public string HandlerId { get; }
+
+    /// <summary>Creates a streaming handler over one private fixture state.</summary>
+    public FixtureStreamingHandler(FixtureState state, string handlerId)
+    {
+        _state = state ?? throw new ArgumentNullException(nameof(state));
+        HandlerId = handlerId;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<ExtensionStreamingResponse> HandleStreamingAsync(
+        ExtensionStreamingRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (_state.Options.RequestLifecycleFromHandler)
+        {
+            _state.HandlerLifecycleResult = await _state.RequestLifecycleAsync().ConfigureAwait(false);
+        }
+
+        if (_state.Options.HandlerFails)
+        {
+            throw new InvalidOperationException(FixtureSignals.HandlerFailure);
+        }
+
+        var bodyStream = request.BodyStream;
+        Stream responseBody;
+        if (_state.Options.StreamingHandlerEmptyResponse)
+        {
+            var empty = new MemoryStream();
+            var filler = Encoding.UTF8.GetBytes("should-be-ignored");
+            await empty.WriteAsync(filler, cancellationToken).ConfigureAwait(false);
+            responseBody = empty;
+        }
+        else
+        {
+            var buffer = new MemoryStream();
+            if (bodyStream is not null)
+            {
+                await bodyStream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+            }
+
+            buffer.Position = 0;
+            responseBody = buffer;
+        }
+
+        var payload = _state.RenderPayload();
+        return new ExtensionStreamingResponse(
+            200,
+            new[]
+            {
+                new KeyValuePair<string, IEnumerable<string>>(
+                    "Content-Type",
+                    ["text/plain; charset=utf-8"]),
+                new KeyValuePair<string, IEnumerable<string>>(
+                    "X-Fixture-Label",
+                    [payload])
+            },
+            responseBody);
     }
 }

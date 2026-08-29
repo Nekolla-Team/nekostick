@@ -91,6 +91,8 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                         extension.HandlerId,
                         executable.Configuration.MaxRequestBodyBytes ??
                             snapshot.Configuration.GlobalSettings.MaxRequestBodyBytes,
+                        executable.Configuration.RequestReadTimeout ??
+                            snapshot.Configuration.GlobalSettings.RequestReadTimeout,
                         publicationLease,
                         cancellationToken),
                 _ => RouteTargetExecutionResult.SafeFailure
@@ -126,6 +128,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
         HostRoutingSnapshot snapshot,
         string handlerId,
         long maxBodyBytes,
+        TimeSpan readTimeout,
         HostRoutingSnapshotLease? publicationLease,
         CancellationToken cancellationToken)
     {
@@ -144,6 +147,18 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
 
         try
         {
+            if (snapshot.DispatchGeneration?.IsStreamingHandler(handlerId) == true)
+            {
+                return await ExecuteStreamingExtensionAsync(
+                    context,
+                    snapshot,
+                    handlerId,
+                    maxBodyBytes,
+                    readTimeout,
+                    dispatchLease,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             var request = await ExtensionHttpAdapter.CreateRequestAsync(
                     context,
                     maxBodyBytes,
@@ -186,6 +201,51 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
             {
                 dispatchLease.Dispose();
             }
+        }
+    }
+
+    private static async ValueTask<RouteTargetExecutionResult> ExecuteStreamingExtensionAsync(
+        HttpContext context,
+        HostRoutingSnapshot snapshot,
+        string handlerId,
+        long maxBodyBytes,
+        TimeSpan readTimeout,
+        ExtensionDispatchLease dispatchLease,
+        CancellationToken cancellationToken)
+    {
+        var request = await ExtensionHttpAdapter.CreateStreamingRequestAsync(
+                context,
+                maxBodyBytes,
+                readTimeout,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (request is null)
+        {
+            return RouteTargetExecutionResult.BadRequest;
+        }
+
+        var result = await dispatchLease
+            .HandleStreamingAsync(handlerId, request, cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            return result.State switch
+            {
+                ExtensionInvocationState.Handled when result.Response is not null =>
+                    await ExtensionHttpAdapter.WriteStreamingResponseAsync(
+                        context,
+                        result.Response,
+                        cancellationToken).ConfigureAwait(false)
+                        ? RouteTargetExecutionResult.Handled
+                        : RouteTargetExecutionResult.InternalServerError,
+                ExtensionInvocationState.Failed => RouteTargetExecutionResult.InternalServerError,
+                ExtensionInvocationState.Unavailable => RouteTargetExecutionResult.Unavailable,
+                _ => RouteTargetExecutionResult.Unavailable
+            };
+        }
+        finally
+        {
+            await result.DisposeAsync().ConfigureAwait(false);
         }
     }
 

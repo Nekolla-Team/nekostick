@@ -91,8 +91,10 @@ public sealed partial class FixtureEntrypoint
             ExtensionRouteEventStage.Trigger,
             static (_, _) => ValueTask.FromResult(ExtensionRouteHookResult.FailClosed));
         bridge.LogWriter.WriteText(ExtensionLogLevel.Information, "fixture-api13-probe");
+        var dataDirectory = string.IsNullOrEmpty(bridge.DataDirectory) ? "empty" : bridge.DataDirectory;
         return $"api13={(supported ? "Supported" : "Unsupported")};sibling=True;" +
             $"supervisor={ReadCode(supervisor)};routeSubscribe={routeSubscribe};" +
-            $"routeHook={routeHook};logWriter={(supported ? "Called" : "Unsupported")}";
+            $"routeHook={routeHook};logWriter={(supported ? "Called" : "Unsupported")};" +
+            $"dataDirectory={dataDirectory}";
     }
 }

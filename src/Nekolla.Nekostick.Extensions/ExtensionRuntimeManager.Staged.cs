@@ -339,12 +339,16 @@ public sealed partial class ExtensionRuntimeManager
 
         foreach (var pair in generation.HandlerBindings)
         {
-            _handlers[pair.Key] = new HandlerBinding(pair.Value.Context.Instance, pair.Value.Handler, null);
+            _handlers[pair.Key] = new HandlerBinding(
+                pair.Value.Context.Instance,
+                pair.Value.Handler,
+                pair.Value.StreamingHandler,
+                null);
         }
 
         if (generation.FallbackBinding is { } fallback)
         {
-            _fallback = new HandlerBinding(fallback.Context.Instance, null, fallback.Fallback);
+            _fallback = new HandlerBinding(fallback.Context.Instance, null, null, fallback.Fallback);
         }
     }
 
@@ -408,11 +412,13 @@ public sealed partial class ExtensionRuntimeManager
     private static ExtensionFailureCode FindHandlerCollision(
         ImmutableArray<string> selectedIds,
         IReadOnlyDictionary<string, IExtensionHandler> actualHandlers,
+        IReadOnlyDictionary<string, IExtensionStreamingHandler> actualStreamingHandlers,
         Dictionary<string, ExtensionDispatchBinding> existing)
     {
         foreach (var handlerId in selectedIds)
         {
-            if (actualHandlers.ContainsKey(handlerId) && existing.ContainsKey(handlerId))
+            if ((actualHandlers.ContainsKey(handlerId) || actualStreamingHandlers.ContainsKey(handlerId)) &&
+                existing.ContainsKey(handlerId))
             {
                 return ExtensionFailureCode.HandlerConflict;
             }

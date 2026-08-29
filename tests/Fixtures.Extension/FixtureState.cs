@@ -36,9 +36,14 @@ public sealed class FixtureState
     internal bool? ReregisterHandlerResult { get; set; }
     internal string? StartLifecycleResult { get; set; }
     internal string? PreviousStoppedLifecycleResult { get; set; }
+    internal int SettingsChangedEventCount;
+    internal string? SettingsChangedReadResult { get; set; }
+    internal string? DataDirectoryValue { get; set; }
     internal TaskCompletionSource<bool> EventsComplete { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     internal TaskCompletionSource<bool> CallbackComplete { get; } = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    internal TaskCompletionSource<bool> SettingsChangedComplete { get; } = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal async ValueTask<string> RequestLifecycleAsync()
@@ -140,6 +145,21 @@ public sealed class FixtureState
         if (ReregisterHandlerResult is { } reregisterHandler)
         {
             observations.Add($"handler-reregister={reregisterHandler}");
+        }
+
+        if (Options.SubscribeSettingsChanged)
+        {
+            observations.Add($"settings-changed={SettingsChangedEventCount}");
+        }
+
+        if (SettingsChangedReadResult is not null)
+        {
+            observations.Add($"settings-read={SettingsChangedReadResult}");
+        }
+
+        if (DataDirectoryValue is not null)
+        {
+            observations.Add($"data-directory={DataDirectoryValue}");
         }
 
         return observations.Count == 0

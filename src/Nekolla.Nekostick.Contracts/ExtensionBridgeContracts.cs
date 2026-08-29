@@ -79,4 +79,16 @@ public interface IExtensionHostBridge13 : IExtensionHostBridge
 
     /// <summary>Gets the extension installation record management and refresh operations.</summary>
     IExtensionManagementApi Management { get; }
+
+    /// <summary>Gets the host-configured data directory for extension-owned persistent files.</summary>
+    /// <remarks>
+    /// The Host configures this path through its CLI or environment settings and defaults it to a data directory
+    /// beside the extensions root. The Host guarantees that the directory exists before the extension starts.
+    /// Extensions MUST treat <c>string.Empty</c> as not available and MUST NOT use it as a path. Before accessing
+    /// this property, an extension MUST either require host API version 1.3.2 or later in its manifest, or verify
+    /// that <see cref="IExtensionHostBridge.ApiVersion" /> is at least 1.3.2. Extensions SHOULD treat this path
+    /// as the canonical location for their own persistent files. The default implementation returns an empty
+    /// string for older bridge implementers that do not override this member.
+    /// </remarks>
+    string DataDirectory => string.Empty;
 }

@@ -29,7 +29,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         ExtensionSettingsConfiguration? settings,
         Func<string, Type, object?> resolveProvider,
         IExtensionCapabilityFactory? capabilityFactory,
-        ImmutableArray<Guid> routeIds = default)
+        ImmutableArray<Guid> routeIds = default,
+        string? dataDirectory = null)
     {
         Manifest = manifest;
         Settings = settings;
@@ -68,7 +69,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             capabilities,
             lifecycle,
             _ => { },
-            (_, _) => { });
+            (_, _) => { },
+            dataDirectory);
         _entrypoint = loadHandle.CreateEntrypoint(_bridge);
     }
     internal ExtensionRouteRegistrationSet RouteRegistrations => _routeRegistrations;
@@ -77,6 +79,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     internal ExtensionManifest Manifest { get; }
 
     internal IReadOnlyDictionary<string, IExtensionHandler> Handlers => _registry.Handlers;
+
+    internal IReadOnlyDictionary<string, IExtensionStreamingHandler> StreamingHandlers => _registry.StreamingHandlers;
 
     internal IExtensionFallback? Fallback => _registry.Fallback;
 
@@ -93,6 +97,9 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         _registry.SetUnregisterCallbacks(onHandlerUnregistered, onFallbackUnregistered);
     internal bool IsHandlerOwned(string handlerId) =>
         ExtensionIdentifierSyntax.IsValid(handlerId) && _registry.IsHandlerAvailable(handlerId);
+
+    internal bool IsStreamingHandler(string handlerId) =>
+        ExtensionIdentifierSyntax.IsValid(handlerId) && _registry.IsStreamingHandler(handlerId);
 
     internal bool IsFallbackOwned => _registry.IsFallbackAvailable;
     internal ExtensionLifecycleStatus GetLifecycleStatus()

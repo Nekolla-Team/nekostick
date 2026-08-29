@@ -78,6 +78,9 @@ public sealed partial class ExtensionRuntimeTests
         string extensionId,
         string label = "fixture",
         string handlerId = "fixture.handler",
+        string streamingHandlerId = "fixture.streaming",
+        bool registerStreamingHandler = false,
+        bool streamingHandlerEmptyResponse = false,
         bool startFails = false,
         bool stopFails = false,
         bool previousStoppedFails = false,
@@ -105,12 +108,17 @@ public sealed partial class ExtensionRuntimeTests
         bool requestLifecycleFromPreviousStopped = false,
         bool requestLifecycleFromStop = false,
         int lifecycleObservationPort = 0,
-        int unregisterBarrierPort = 0)
+        int unregisterBarrierPort = 0,
+        bool subscribeSettingsChanged = false,
+        bool readDataDirectory = false)
     {
         var json = JsonSerializer.Serialize(new
         {
             label,
             handlerId,
+            streamingHandlerId,
+            registerStreamingHandler,
+            streamingHandlerEmptyResponse,
             startFails,
             stopFails,
             previousStoppedFails,
@@ -139,7 +147,9 @@ public sealed partial class ExtensionRuntimeTests
             requestLifecycleFromPreviousStopped,
             requestLifecycleFromStop,
             lifecycleObservationPort,
-            unregisterBarrierPort
+            unregisterBarrierPort,
+            subscribeSettingsChanged,
+            readDataDirectory
         });
         return new ExtensionSettingsConfiguration(extensionId, 1, json, 0);
     }

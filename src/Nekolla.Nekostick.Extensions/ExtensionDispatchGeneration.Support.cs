@@ -32,6 +32,30 @@ public sealed class ExtensionDispatchLease : IDisposable, IAsyncDisposable
             : generation.HandleWithLeaseAsync(handlerId, request, cancellationToken);
     }
 
+    /// <summary>Dispatches a streaming handler while this Host lease remains held.</summary>
+    public async ValueTask<ExtensionStreamingInvocationResult> HandleStreamingAsync(
+        string? handlerId,
+        ExtensionStreamingRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        var generation = _generation;
+        if (generation is null)
+        {
+            try
+            {
+                request?.BodyStream.Dispose();
+            }
+            catch
+            {
+            }
+
+            return ExtensionStreamingInvocationResult.Unavailable;
+        }
+
+        return await generation.HandleStreamingWithLeaseAsync(handlerId, request, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     /// <summary>Dispatches fallback while this Host lease remains held.</summary>
     public ValueTask<ExtensionInvocationResult> HandleFallbackAsync(
         ExtensionHandlerRequest? request,
@@ -122,15 +146,27 @@ internal sealed class ExtensionDispatchBinding
         ExtensionDispatchContext context,
         IExtensionHandler? handler,
         IExtensionFallback? fallback)
+        : this(context, handler, null, fallback)
+    {
+    }
+
+    internal ExtensionDispatchBinding(
+        ExtensionDispatchContext context,
+        IExtensionHandler? handler,
+        IExtensionStreamingHandler? streamingHandler,
+        IExtensionFallback? fallback)
     {
         Context = context;
         Handler = handler;
+        StreamingHandler = streamingHandler;
         Fallback = fallback;
     }
 
     internal ExtensionDispatchContext Context { get; }
 
     internal IExtensionHandler? Handler { get; }
+
+    internal IExtensionStreamingHandler? StreamingHandler { get; }
 
     internal IExtensionFallback? Fallback { get; }
 }

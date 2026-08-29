@@ -8,6 +8,8 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
     private readonly object _gate = new();
     private ImmutableDictionary<string, IExtensionHandler> _handlers =
         ImmutableDictionary.Create<string, IExtensionHandler>(StringComparer.Ordinal);
+    private ImmutableDictionary<string, IExtensionStreamingHandler> _streamingHandlers =
+        ImmutableDictionary.Create<string, IExtensionStreamingHandler>(StringComparer.Ordinal);
     private ImmutableHashSet<string> _unregisteredHandlers =
         ImmutableHashSet.Create<string>(StringComparer.Ordinal);
     private IExtensionFallback? _fallback;
@@ -34,6 +36,17 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
             lock (_gate)
             {
                 return _handlers;
+            }
+        }
+    }
+
+    internal IReadOnlyDictionary<string, IExtensionStreamingHandler> StreamingHandlers
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _streamingHandlers;
             }
         }
     }
@@ -73,8 +86,9 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
 
         lock (_gate)
         {
-            if (_unregisteredHandlers.Contains(handlerId))
+            if (_unregisteredHandlers.Contains(handlerId) || _streamingHandlers.ContainsKey(handlerId))
             {
+                _registrationRejected = true;
                 return false;
             }
 
@@ -90,6 +104,48 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
             }
 
             _handlers = _handlers.Add(handlerId, handler);
+            return true;
+        }
+    }
+
+    public bool TryRegisterStreamingHandler(IExtensionStreamingHandler handler)
+    {
+        if (handler is null)
+        {
+            return false;
+        }
+
+        var handlerId = handler.HandlerId;
+        if (!ExtensionIdentifierSyntax.IsValid(handlerId))
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (_unregisteredHandlers.Contains(handlerId))
+            {
+                return false;
+            }
+
+            if (_streamingHandlers.TryGetValue(handlerId, out var existing))
+            {
+                if (ReferenceEquals(existing, handler))
+                {
+                    return true;
+                }
+
+                _registrationRejected = true;
+                return false;
+            }
+
+            if (_handlers.ContainsKey(handlerId))
+            {
+                _registrationRejected = true;
+                return false;
+            }
+
+            _streamingHandlers = _streamingHandlers.Add(handlerId, handler);
             return true;
         }
     }
@@ -129,12 +185,14 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
         Action<string>? callback;
         lock (_gate)
         {
-            if (string.IsNullOrWhiteSpace(handlerId) || !_handlers.ContainsKey(handlerId))
+            if (string.IsNullOrWhiteSpace(handlerId) ||
+                (!_handlers.ContainsKey(handlerId) && !_streamingHandlers.ContainsKey(handlerId)))
             {
                 return false;
             }
 
             _handlers = _handlers.Remove(handlerId);
+            _streamingHandlers = _streamingHandlers.Remove(handlerId);
             _unregisteredHandlers = _unregisteredHandlers.Add(handlerId);
             callback = _onHandlerUnregistered;
         }
@@ -167,6 +225,7 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
         lock (_gate)
         {
             _handlers = ImmutableDictionary.Create<string, IExtensionHandler>(StringComparer.Ordinal);
+            _streamingHandlers = ImmutableDictionary.Create<string, IExtensionStreamingHandler>(StringComparer.Ordinal);
             _unregisteredHandlers = ImmutableHashSet.Create<string>(StringComparer.Ordinal);
             _fallback = null;
             _fallbackUnregistered = false;
@@ -177,7 +236,16 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
     {
         lock (_gate)
         {
-            return !_unregisteredHandlers.Contains(handlerId) && _handlers.ContainsKey(handlerId);
+            return !_unregisteredHandlers.Contains(handlerId) &&
+                (_handlers.ContainsKey(handlerId) || _streamingHandlers.ContainsKey(handlerId));
+        }
+    }
+
+    internal bool IsStreamingHandler(string handlerId)
+    {
+        lock (_gate)
+        {
+            return !_unregisteredHandlers.Contains(handlerId) && _streamingHandlers.ContainsKey(handlerId);
         }
     }
 
@@ -190,6 +258,60 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
                 return !_fallbackUnregistered && _fallback is not null;
             }
         }
+    }
+}
+
+/// <summary>Contains the outcome of one streaming extension handler dispatch.</summary>
+public sealed class ExtensionStreamingInvocationResult : IDisposable, IAsyncDisposable
+{
+    private IDisposable? _requestLease;
+
+    private ExtensionStreamingInvocationResult(
+        ExtensionInvocationState state,
+        ExtensionStreamingResponse? response,
+        IDisposable? requestLease)
+    {
+        State = state;
+        Response = response;
+        _requestLease = requestLease;
+    }
+
+    /// <summary>Gets the dispatch outcome.</summary>
+    public ExtensionInvocationState State { get; }
+
+    /// <summary>Gets the streaming response when the callback handled the request.</summary>
+    public ExtensionStreamingResponse? Response { get; }
+
+    /// <summary>Gets a safe unavailable result.</summary>
+    public static ExtensionStreamingInvocationResult Unavailable { get; } =
+        new(ExtensionInvocationState.Unavailable, null, null);
+
+    /// <summary>Gets a safe failed result.</summary>
+    public static ExtensionStreamingInvocationResult Failed { get; } =
+        new(ExtensionInvocationState.Failed, null, null);
+
+    internal static ExtensionStreamingInvocationResult Handled(
+        ExtensionStreamingResponse response,
+        ExtensionInstance instance) =>
+        new(ExtensionInvocationState.Handled, response, new RequestLease(instance));
+
+    /// <summary>Releases the extension request guard after the Host has copied the response.</summary>
+    public void Dispose() => Interlocked.Exchange(ref _requestLease, null)?.Dispose();
+
+    /// <inheritdoc />
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private sealed class RequestLease : IDisposable
+    {
+        private ExtensionInstance? _instance;
+
+        internal RequestLease(ExtensionInstance instance) => _instance = instance;
+
+        public void Dispose() => Interlocked.Exchange(ref _instance, null)?.LeaveRequest();
     }
 }
 

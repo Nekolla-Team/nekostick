@@ -418,6 +418,56 @@ public sealed partial class ExtensionRuntimeTests
                 "after-unload")));
     }
 
+    [Fact]
+    public async Task TargetedCoreEventsReachOnlyTheSelectedServingOwner()
+    {
+        const string firstId = "first.target.extension";
+        const string secondId = "second.target.extension";
+        using var firstFixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson(firstId));
+        using var secondFixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson(secondId));
+        var firstManifest = Discover(firstFixture.RootPath);
+        var secondManifest = Discover(secondFixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        Assert.True((await manager.LoadAsync(
+            firstManifest,
+            Settings(firstId, publishCoreEvents: true, eventCount: 3),
+            TestContext.Current.CancellationToken)).Succeeded);
+        Assert.True((await manager.LoadAsync(
+            secondManifest,
+            Settings(
+                secondId,
+                handlerId: "second.target.handler",
+                publishCoreEvents: true,
+                eventCount: 2),
+            TestContext.Current.CancellationToken)).Succeeded);
+
+        var payload = JsonSerializer.Serialize(new { extensionId = firstId });
+        Assert.Equal(
+            1,
+            manager.PublishCoreEvent(
+                new ExtensionCoreEvent(
+                    ExtensionCoreEventKind.ExtensionSettingsChanged,
+                    1,
+                    payload),
+                firstId));
+
+        var firstResult = await manager.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/targeted"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, firstResult.State);
+        Assert.Contains(payload, Body(firstResult), StringComparison.Ordinal);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        var secondResult = await manager.HandleAsync(
+            "second.target.handler",
+            new ExtensionHandlerRequest("GET", "/targeted"),
+            timeout.Token);
+        Assert.Equal(ExtensionInvocationState.Failed, secondResult.State);
+        Assert.Equal(ExtensionLoadState.Loaded, manager.GetStatus(secondId)!.State);
+    }
+
 
     [Fact]
     public async Task ReloadPublishesExtensionStateEventsThroughServingCandidateQueue()

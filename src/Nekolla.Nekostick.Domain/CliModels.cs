@@ -125,7 +125,8 @@ public static class CliCommandParser
         BootstrapDefaults.ListenAddressOption,
         BootstrapDefaults.ListenPortOption,
         BootstrapDefaults.NodeIdOption,
-        BootstrapDefaults.LogLevelOption
+        BootstrapDefaults.LogLevelOption,
+        BootstrapDefaults.DataDirectoryOption
     ];
 
     /// <summary>Parses arguments against an explicit environment map.</summary>
@@ -247,6 +248,16 @@ public static class CliCommandParser
             return Failure(BootstrapErrorCode.InvalidLogLevel, "The log level is invalid.");
         }
 
+        var dataDirectoryText = Resolve(
+            optionValues,
+            environment,
+            BootstrapDefaults.DataDirectoryOption,
+            BootstrapDefaults.DataDirectoryEnvironmentVariable) ?? BootstrapDefaults.DefaultDataDirectory;
+        if (!TryNormalizeDirectoryPath(dataDirectoryText, out var dataDirectory))
+        {
+            return Failure(BootstrapErrorCode.InvalidDataDirectory, "The data directory is invalid.");
+        }
+
         var includeEfLogs = flags.Contains(BootstrapDefaults.IncludeEfLogsOption);
         if (!includeEfLogs && !TryParseBoolean(
                 environment.TryGetValue(BootstrapDefaults.IncludeEfLogsEnvironmentVariable, out var includeEfLogsValue)
@@ -258,7 +269,13 @@ public static class CliCommandParser
         }
 
         var options = BootstrapOptions.CreateValidated(
-            connectionString, listenAddress, listenPort, nodeId, normalizedLogLevel, includeEfLogs);
+            connectionString,
+            listenAddress,
+            listenPort,
+            nodeId,
+            normalizedLogLevel,
+            includeEfLogs,
+            dataDirectory);
         var runOptions = new RunOptions(
             flags.Contains("--skip-extensions"),
             flags.Contains("--disable-supervisor"),
@@ -314,6 +331,25 @@ public static class CliCommandParser
 
     private static bool IsValidNodeId(string? value) =>
         IsSafeText(value) && value!.Length <= BootstrapDefaults.MaxNodeIdLength;
+
+    private static bool TryNormalizeDirectoryPath(string? value, out string normalized)
+    {
+        normalized = string.Empty;
+        if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        try
+        {
+            normalized = Path.GetFullPath(value);
+            return Path.IsPathFullyQualified(normalized);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
+    }
 
     private static bool TryNormalizeLogLevel(string? value, out string normalized)
     {

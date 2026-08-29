@@ -231,14 +231,22 @@ public sealed partial class ExtensionRuntimeManager
                 }
 
                 var actualHandlers = context.Instance.Handlers;
+                var actualStreamingHandlers = context.Instance.StreamingHandlers;
                 var selectedIds = requested.IsDefaultOrEmpty
-                    ? actualHandlers.Keys.ToImmutableArray()
+                    ? actualHandlers.Keys
+                        .Concat(actualStreamingHandlers.Keys)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToImmutableArray()
                     : requested;
                 var unavailable = selectedIds
-                    .Where(id => !actualHandlers.ContainsKey(id))
+                    .Where(id => !actualHandlers.ContainsKey(id) && !actualStreamingHandlers.ContainsKey(id))
                     .Distinct(StringComparer.Ordinal)
                     .ToImmutableArray();
-                var collision = FindHandlerCollision(selectedIds, actualHandlers, handlers);
+                var collision = FindHandlerCollision(
+                    selectedIds,
+                    actualHandlers,
+                    actualStreamingHandlers,
+                    handlers);
                 var wantsFallback = descriptor.IncludeFallback && context.Instance.Fallback is not null;
                 if (collision != ExtensionFailureCode.None ||
                     (wantsFallback && fallback is not null))
@@ -278,6 +286,10 @@ public sealed partial class ExtensionRuntimeManager
                     if (actualHandlers.TryGetValue(handlerId, out var handler))
                     {
                         handlers.Add(handlerId, new ExtensionDispatchBinding(context, handler, null));
+                    }
+                    else if (actualStreamingHandlers.TryGetValue(handlerId, out var streamingHandler))
+                    {
+                        handlers.Add(handlerId, new ExtensionDispatchBinding(context, null, streamingHandler, null));
                     }
                 }
 

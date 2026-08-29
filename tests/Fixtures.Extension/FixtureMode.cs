@@ -6,6 +6,9 @@ namespace Nekolla.Nekostick.Tests.Fixtures.Extension;
 public sealed record FixtureMode(
         string Label,
         string HandlerId,
+        string StreamingHandlerId,
+        bool RegisterStreamingHandler,
+        bool StreamingHandlerEmptyResponse,
         bool StartFails,
         bool StopFails,
         bool PreviousStoppedFails,
@@ -34,7 +37,9 @@ public sealed record FixtureMode(
         bool RequestLifecycleFromPreviousStopped,
         bool RequestLifecycleFromStop,
         int LifecycleObservationPort,
-        int UnregisterBarrierPort)
+        int UnregisterBarrierPort,
+        bool SubscribeSettingsChanged,
+        bool ReadDataDirectory)
     {
         /// <summary>Reads the small test-only settings document.</summary>
         public static FixtureMode Parse(string? settingsJson)
@@ -49,6 +54,9 @@ public sealed record FixtureMode(
             return new FixtureMode(
                 ReadString(root, "label", "fixture"),
                 ReadString(root, "handlerId", "fixture.handler"),
+                ReadString(root, "streamingHandlerId", "fixture.streaming"),
+                ReadBool(root, "registerStreamingHandler"),
+                ReadBool(root, "streamingHandlerEmptyResponse"),
                 ReadBool(root, "startFails"),
                 ReadBool(root, "stopFails"),
                 ReadBool(root, "previousStoppedFails"),
@@ -77,7 +85,9 @@ public sealed record FixtureMode(
                 ReadBool(root, "requestLifecycleFromPreviousStopped"),
                 ReadBool(root, "requestLifecycleFromStop"),
                 ReadPort(root, "lifecycleObservationPort"),
-                ReadPort(root, "unregisterBarrierPort"));
+                ReadPort(root, "unregisterBarrierPort"),
+                ReadBool(root, "subscribeSettingsChanged"),
+                ReadBool(root, "readDataDirectory"));
         }
 
         private static string ReadString(JsonElement root, string name, string fallback) =>
@@ -111,6 +121,9 @@ public sealed record FixtureMode(
         private static FixtureMode Default { get; } = new(
             "fixture",
             "fixture.handler",
+            "fixture.streaming",
+            false,
+            false,
             false,
             false,
             false,
@@ -139,5 +152,7 @@ public sealed record FixtureMode(
             false,
             false,
             0,
-            0);
+            0,
+            false,
+            false);
     }
