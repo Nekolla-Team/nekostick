@@ -32,7 +32,7 @@ ENV NEKOSTICK_LISTEN_ADDRESS=0.0.0.0 \
 EXPOSE 8080
 
 COPY --from=publish /app/publish .
-RUN mkdir -p /app/extensions
+RUN mkdir -p /app/extensions /app/data
 
 USER $APP_UID
 STOPSIGNAL SIGTERM

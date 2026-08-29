@@ -35,8 +35,5 @@ AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 
-# Extensions are trusted code loaded from /opt/nekostick/extensions and remain read-only.
-ReadOnlyPaths=/opt/nekostick/extensions
-
 [Install]
 WantedBy=multi-user.target

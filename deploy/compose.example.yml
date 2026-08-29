@@ -29,7 +29,8 @@ services:
     expose:
       - "8080"
     volumes:
-      - ./extensions:/app/extensions:ro
+      - ./extensions:/app/extensions:rw
+      - ./data:/app/data:rw
     depends_on:
       postgres:
         condition: service_healthy
