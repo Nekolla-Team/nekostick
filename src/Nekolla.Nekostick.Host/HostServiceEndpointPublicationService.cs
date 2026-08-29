@@ -8,20 +8,20 @@ namespace Nekolla.Nekostick.Host;
 public sealed class HostServiceEndpointPublicationService : BackgroundService
 {
     private readonly IDbContextFactory<NekostickDbContext> _dbContextFactory;
-    private readonly HostServiceEndpointSnapshotPublisher _publisher;
+    private readonly IHostServiceEndpointAuthority _authority;
     private readonly HostRuntimeOptions _options;
 
     /// <summary>Creates the endpoint publication background service.</summary>
     /// <param name="dbContextFactory">The factory for persistence contexts.</param>
-    /// <param name="publisher">The endpoint snapshot publisher.</param>
+    /// <param name="authority">The lifecycle-authoritative endpoint publisher.</param>
     /// <param name="options">The host runtime options containing the node identity.</param>
     public HostServiceEndpointPublicationService(
         IDbContextFactory<NekostickDbContext> dbContextFactory,
-        HostServiceEndpointSnapshotPublisher publisher,
+        IHostServiceEndpointAuthority authority,
         HostRuntimeOptions options)
     {
         _dbContextFactory = dbContextFactory ?? throw new ArgumentNullException(nameof(dbContextFactory));
-        _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
+        _authority = authority ?? throw new ArgumentNullException(nameof(authority));
         _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
@@ -54,7 +54,7 @@ public sealed class HostServiceEndpointPublicationService : BackgroundService
                     service.OwnerExtensionId))
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
-            _publisher.Publish(leases);
+            await _authority.PublishVerifiedEndpointsAsync(leases).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -62,8 +62,7 @@ public sealed class HostServiceEndpointPublicationService : BackgroundService
         }
         catch
         {
-            // Database loss must withdraw endpoints and keep matched proxy requests fail-closed.
-            _publisher.Publish(Array.Empty<HostServiceEndpointLease>());
+            // Keep the lifecycle-authoritative snapshot unchanged while the database is unavailable.
         }
     }
 }

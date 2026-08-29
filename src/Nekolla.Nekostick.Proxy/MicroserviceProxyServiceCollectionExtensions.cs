@@ -23,6 +23,7 @@ public static class MicroserviceProxyServiceCollectionExtensions
             UnavailableMicroserviceEndpointResolver.Instance);
         services.TryAddSingleton<MicroserviceHttpInvokerPool>();
         services.TryAddSingleton<IMicroserviceForwardingTelemetry, MicroserviceForwardingTelemetry>();
+        services.TryAddSingleton<IMicroserviceDrainTracker, MicroserviceDrainTracker>();
         services.TryAddSingleton<MicroserviceHttpExecutor>();
         return services;
     }

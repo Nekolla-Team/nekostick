@@ -6,6 +6,7 @@ using Nekolla.Nekostick.Routing;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Host;
+using Nekolla.Nekostick.Proxy;
 using Nekolla.Nekostick.Supervision;
 using Xunit;
 using ContractHealthCheckType = Nekolla.Nekostick.Contracts.ServiceHealthCheckType;
@@ -198,7 +199,8 @@ public sealed class HostDurableStoreOutageTests
             publisher,
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
-            NullLogger<HostServiceLifecycleManager>.Instance);
+            NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker());
         return new Fixture(manager, snapshot, holder, runtime, executor, leaseStore, publisher);
     }
 

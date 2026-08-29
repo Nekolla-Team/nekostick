@@ -6,6 +6,7 @@ using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Supervision;
+using Nekolla.Nekostick.Proxy;
 using ContractHealthKind = Nekolla.Nekostick.Contracts.ServiceHealthCheckType;
 using ContractRestartPolicy = Nekolla.Nekostick.Contracts.ServiceRestartPolicy;
 using ContractStartMode = Nekolla.Nekostick.Contracts.ServiceStartMode;
@@ -71,7 +72,7 @@ public interface IHostServiceLifecycleCoordinator
 }
 
 /// <summary>Coordinates service generations, leases, health, restart handoff, and endpoint publication.</summary>
-public sealed partial class HostServiceLifecycleManager : BackgroundService, IHostServiceLifecycleCoordinator
+public sealed partial class HostServiceLifecycleManager : BackgroundService, IHostServiceLifecycleCoordinator, IHostServiceEndpointAuthority
 {
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan StopGracePeriod = TimeSpan.FromSeconds(15);
@@ -86,9 +87,11 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly HostServiceEndpointSnapshotPublisher _endpointPublisher;
     private readonly HostRuntimeState _runtimeState;
     private readonly HostRuntimeOptions _options;
+    private readonly IMicroserviceDrainTracker _drainTracker;
     private readonly ExtensionRuntimeManager? _runtimeManager;
     private readonly ILogger _logger;
     private readonly NodeIdentifier _nodeId;
+    private readonly ConcurrentDictionary<ServiceGeneration, RetiringGenerationState> _retiringGenerations = new();
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private readonly object _lifecycleGate = new();
@@ -105,6 +108,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         HostRuntimeState runtimeState,
         HostRuntimeOptions options,
         ILogger<HostServiceLifecycleManager> logger,
+        IMicroserviceDrainTracker drainTracker,
         ExtensionRuntimeManager? runtimeManager = null)
     {
         _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
@@ -114,6 +118,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         _endpointPublisher = endpointPublisher ?? throw new ArgumentNullException(nameof(endpointPublisher));
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _drainTracker = drainTracker ?? throw new ArgumentNullException(nameof(drainTracker));
         _runtimeManager = runtimeManager;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _nodeId = new NodeIdentifier(options.NodeId);
@@ -274,7 +279,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             try
             {
                 using var stopCts = new CancellationTokenSource(SupervisorStopBound);
-                await StopGenerationAsync(slot, generation, stopCts.Token).ConfigureAwait(false);
+                await StopOrReleaseGenerationAfterExitAsync(slot, generation, stopCts.Token).ConfigureAwait(false);
                 PublishServiceState(
                     generation.Configuration.Id,
                     generation.SnapshotVersion,
@@ -314,6 +319,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         {
         }
 
+        _retiringGenerations.Clear();
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
     }
 

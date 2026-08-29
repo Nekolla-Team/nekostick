@@ -341,6 +341,7 @@ internal static class Program
                         serviceProvider.GetRequiredService<HostRuntimeState>(),
                         serviceProvider.GetRequiredService<HostRuntimeOptions>(),
                         serviceProvider.GetRequiredService<ILogger<HostServiceLifecycleManager>>(),
+                        serviceProvider.GetRequiredService<IMicroserviceDrainTracker>(),
                         serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
                 builder.Services.AddSingleton<IPortLeaseStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());
@@ -348,8 +349,11 @@ internal static class Program
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
                 builder.Services.AddSingleton<IHostServiceRuntimeSnapshotAccessor>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
+                builder.Services.AddSingleton<IHostServiceEndpointAuthority>(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
                 builder.Services.AddHostedService(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
+                builder.Services.AddHostedService<HostServiceEndpointPublicationService>();
                 builder.Services.AddHostedService<HostNodeRegistrationService>();
             }
 

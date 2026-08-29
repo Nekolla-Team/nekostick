@@ -42,7 +42,8 @@ public sealed partial class HostServiceLifecycleManager
     private Task<HostServiceReadinessResult> StartOrSwitchAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
-        ServiceConfiguration service)
+        ServiceConfiguration service,
+        bool stopReplacedGeneration = true)
     {
         var startup = new TaskCompletionSource<HostServiceReadinessResult>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -51,7 +52,7 @@ public sealed partial class HostServiceLifecycleManager
             slot.Startup = startup.Task;
         }
 
-        _ = CompleteStartOrSwitchAsync(slot, snapshot, service, startup);
+        _ = CompleteStartOrSwitchAsync(slot, snapshot, service, stopReplacedGeneration, startup);
         return startup.Task;
     }
 
@@ -59,11 +60,16 @@ public sealed partial class HostServiceLifecycleManager
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
+        bool stopReplacedGeneration,
         TaskCompletionSource<HostServiceReadinessResult> startup)
     {
         try
         {
-            var result = await RunStartOrSwitchAsync(slot, snapshot, service).ConfigureAwait(false);
+            var result = await RunStartOrSwitchAsync(
+                slot,
+                snapshot,
+                service,
+                stopReplacedGeneration).ConfigureAwait(false);
             startup.TrySetResult(result);
         }
         catch (Exception exception)
@@ -85,7 +91,8 @@ public sealed partial class HostServiceLifecycleManager
     private async Task<HostServiceReadinessResult> RunStartOrSwitchAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
-        ServiceConfiguration service)
+        ServiceConfiguration service,
+        bool stopReplacedGeneration)
     {
         try
         {
@@ -139,9 +146,9 @@ public sealed partial class HostServiceLifecycleManager
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
             HostLogMessages.ServiceReady(_logger, service.Id, candidate.SnapshotVersion);
             PublishServiceState(service.Id, candidate.SnapshotVersion, "ready");
-            if (old is not null && !ReferenceEquals(old, candidate))
+            if (old is not null && !ReferenceEquals(old, candidate) && stopReplacedGeneration)
             {
-                await StopGenerationAsync(slot, old, CancellationToken.None).ConfigureAwait(false);
+                await DrainAndStopGenerationAsync(slot, old).ConfigureAwait(false);
                 PublishServiceState(old.Configuration.Id, old.SnapshotVersion, "stopped");
             }
 

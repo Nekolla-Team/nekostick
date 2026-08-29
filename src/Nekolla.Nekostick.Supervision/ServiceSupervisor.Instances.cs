@@ -166,7 +166,8 @@ public sealed partial class ServiceSupervisor
         }
         else if (hasTrackedIdentity)
         {
-            return new ProcessOperationResult(ProcessOperationStatus.Rejected, ServiceStateReasonCode.StopRequested);
+            ClearProcessInstance();
+            return new ProcessOperationResult(ProcessOperationStatus.Completed, ServiceStateReasonCode.StopCompleted);
         }
         else
         {
@@ -203,6 +204,32 @@ public sealed partial class ServiceSupervisor
         CancellationToken cancellationToken = default)
     {
         ClearProcessInstance();
+        return RecordProcessExitCore(successfulExit, now, cancellationToken);
+    }
+
+    /// <summary>Records a terminal-health restart decision while retaining the active process identity for a later instance-targeted stop.</summary>
+    /// <param name="successfulExit">Whether the process exited successfully.</param>
+    /// <param name="now">The decision timestamp.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The operation result containing a restart plan.</returns>
+    public SupervisorOperationResult RecordProcessExitPreservingInstance(
+        bool successfulExit,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        RecordProcessExitCore(successfulExit, now, cancellationToken);
+    /// <summary>Clears a process identity and releases its lease after a retiring generation exits during blue-green replacement.</summary>
+    /// <returns>A task that completes after best-effort lease release.</returns>
+    public async ValueTask AcknowledgeProcessExitAsync()
+    {
+        ClearProcessInstance();
+        await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private SupervisorOperationResult RecordProcessExitCore(
+        bool successfulExit,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
         var current = Snapshot;
         var next = Exchange(ServiceStateTransition.RecordProcessExit(current, successfulExit, now));
         var policy = next.Desired == DesiredServiceState.Running

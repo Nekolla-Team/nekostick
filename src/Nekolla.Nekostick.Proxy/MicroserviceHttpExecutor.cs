@@ -189,6 +189,7 @@ public sealed partial class MicroserviceHttpExecutor
     private readonly MicroserviceHttpInvokerPool _invokerPool;
     private readonly ILogger<MicroserviceHttpExecutor> _logger;
     private readonly IMicroserviceForwardingTelemetry _forwardingTelemetry;
+    private readonly IMicroserviceDrainTracker _drainTracker;
 
     /// <summary>Creates an executor with shared YARP transport dependencies.</summary>
     /// <param name="forwarder">The YARP forwarder.</param>
@@ -196,16 +197,19 @@ public sealed partial class MicroserviceHttpExecutor
     /// <param name="invokerPool">The bounded timeout-keyed HTTP invoker pool.</param>
     /// <param name="logger">The safe structured proxy logger.</param>
     /// <param name="forwardingTelemetry">The optional telemetry counter source for logical forwarded requests.</param>
+    /// <param name="drainTracker">The required in-flight endpoint drain tracker.</param>
     public MicroserviceHttpExecutor(
         IHttpForwarder forwarder,
         IMicroserviceEndpointResolver endpointResolver,
         MicroserviceHttpInvokerPool invokerPool,
+        IMicroserviceDrainTracker drainTracker,
         ILogger<MicroserviceHttpExecutor>? logger = null,
         IMicroserviceForwardingTelemetry? forwardingTelemetry = null)
     {
         _forwarder = forwarder ?? throw new ArgumentNullException(nameof(forwarder));
         _endpointResolver = endpointResolver ?? throw new ArgumentNullException(nameof(endpointResolver));
         _invokerPool = invokerPool ?? throw new ArgumentNullException(nameof(invokerPool));
+        _drainTracker = drainTracker ?? throw new ArgumentNullException(nameof(drainTracker));
         _logger = logger ?? NullLogger<MicroserviceHttpExecutor>.Instance;
         _forwardingTelemetry = forwardingTelemetry ?? EmptyMicroserviceForwardingTelemetry.Instance;
     }
@@ -266,6 +270,9 @@ public sealed partial class MicroserviceHttpExecutor
         {
             return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.Unavailable);
         }
+        using var drainScope = _drainTracker.BeginTracking(
+            request.ServiceId,
+            resolution.Endpoint.BaseUri.Port);
 
         var originalPath = httpContext.Request.Path;
         var originalPathBase = httpContext.Request.PathBase;

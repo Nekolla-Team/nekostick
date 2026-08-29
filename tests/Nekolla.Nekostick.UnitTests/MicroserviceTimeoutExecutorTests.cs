@@ -19,7 +19,8 @@ public sealed class MicroserviceTimeoutExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         var request = CreateRequest();
 
         var result = await executor.ExecuteAsync(
@@ -82,7 +83,8 @@ public sealed class MicroserviceTimeoutExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
 
         var result = await executor.ExecuteAsync(
             CreateContext(),
@@ -107,7 +109,8 @@ public sealed class MicroserviceTimeoutExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
 
         var result = await executor.ExecuteAsync(
             CreateContext(),
@@ -129,7 +132,8 @@ public sealed class MicroserviceTimeoutExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
 
         var result = await executor.ExecuteAsync(
             CreateContext(),
@@ -149,7 +153,8 @@ public sealed class MicroserviceTimeoutExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
@@ -212,7 +217,8 @@ public sealed class MicroserviceTimeoutExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         var policy = new MicroserviceTimeoutPolicy(
             connectTimeout: TimeSpan.FromSeconds(2),
             activityTimeout: TimeSpan.FromSeconds(13),

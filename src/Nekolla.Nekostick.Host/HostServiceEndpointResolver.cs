@@ -12,6 +12,14 @@ public interface IHostServiceEndpointSnapshotAccessor
     /// <summary>Gets the atomically published endpoint leases.</summary>
     ImmutableDictionary<Guid, HostServiceEndpointLease> Current { get; }
 }
+/// <summary>Publishes database-verified endpoint leases that match lifecycle-ready generations.</summary>
+public interface IHostServiceEndpointAuthority
+{
+    /// <summary>Publishes the database leases that match the current active-ready lifecycle identities.</summary>
+    /// <param name="dbLeases">The node-local, owner-joined, unexpired leases read from the database.</param>
+    /// <returns>A task that completes after the verified leases are published.</returns>
+    Task PublishVerifiedEndpointsAsync(IReadOnlyList<HostServiceEndpointLease> dbLeases);
+}
 
 /// <summary>Safe endpoint lease data published by Host lifecycle composition.</summary>
 /// <param name="ServiceId">The service identifier associated with the lease.</param>

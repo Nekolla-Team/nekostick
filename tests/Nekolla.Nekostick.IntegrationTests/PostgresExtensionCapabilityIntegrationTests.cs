@@ -904,7 +904,8 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                         endpointPublisher,
                         runtimeState,
                         runtimeOptions,
-                        provider.GetRequiredService<ILogger<HostServiceLifecycleManager>>());
+                        provider.GetRequiredService<ILogger<HostServiceLifecycleManager>>(),
+                        new Nekolla.Nekostick.Proxy.MicroserviceDrainTracker());
                     return manager;
                 });
                 serviceCollection.AddSingleton<ExtensionRuntimeManager>(provider =>

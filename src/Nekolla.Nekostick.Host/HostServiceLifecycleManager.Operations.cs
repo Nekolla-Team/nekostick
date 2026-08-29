@@ -109,6 +109,7 @@ public sealed partial class HostServiceLifecycleManager
         }
 
         ServiceGeneration? generation;
+        RetiringGenerationState? retiring;
         lock (slot.Gate)
         {
             generation = slot.Active;
@@ -117,6 +118,7 @@ public sealed partial class HostServiceLifecycleManager
                 return;
             }
 
+            _retiringGenerations.TryGetValue(generation, out retiring);
             generation.Ready = false;
         }
         if (successfulExit)
@@ -139,6 +141,24 @@ public sealed partial class HostServiceLifecycleManager
             return;
         }
 
+        if (retiring is not null)
+        {
+            if (TryClaimRetiringProcessExit(retiring))
+            {
+                try
+                {
+                    await generation.Supervisor.AcknowledgeProcessExitAsync().ConfigureAwait(false);
+                    generation.Lease = null;
+                }
+                finally
+                {
+                    retiring.ProcessExitAcknowledged.TrySetResult(true);
+                }
+            }
+
+            return;
+        }
+
         SupervisorOperationResult result;
         lock (slot.Gate)
         {
@@ -149,11 +169,12 @@ public sealed partial class HostServiceLifecycleManager
             }
 
             result = generation.Supervisor.RecordProcessExit(successfulExit, exitedAt);
+            generation.ProcessExitRecorded = true;
         }
 
         if (result.Restart is not { ShouldRestart: true, NotBefore: { } notBefore })
         {
-            await StopGenerationAsync(slot, generation, CancellationToken.None).ConfigureAwait(false);
+            await StopOrReleaseGenerationAfterExitAsync(slot, generation, CancellationToken.None).ConfigureAwait(false);
             PublishServiceState(
                 generation.Configuration.Id,
                 generation.SnapshotVersion,
@@ -286,7 +307,7 @@ public sealed partial class HostServiceLifecycleManager
 
         if (generation is not null)
         {
-            await StopGenerationAsync(slot, generation, cancellationToken).ConfigureAwait(false);
+            await StopOrReleaseGenerationAfterExitAsync(slot, generation, cancellationToken).ConfigureAwait(false);
             PublishServiceState(
                 generation.Configuration.Id,
                 generation.SnapshotVersion,
@@ -316,6 +337,60 @@ public sealed partial class HostServiceLifecycleManager
         }
     }
 
+    /// <inheritdoc />
+    public async Task PublishVerifiedEndpointsAsync(
+        IReadOnlyList<HostServiceEndpointLease> dbLeases)
+    {
+        ArgumentNullException.ThrowIfNull(dbLeases);
+        await _publicationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            if (IsStopping)
+            {
+                _endpointPublisher.Publish(Array.Empty<HostServiceEndpointLease>());
+                return;
+            }
+
+            // The fresh-identity/stale-DB-read asymmetry is intentional; the unconditional 1s authoritative republish bounds omissions.
+            var readyIdentities = GetActiveReadyLeases(DateTimeOffset.UtcNow)
+                .Select(static lease => (lease.ServiceId, lease.Port))
+                .ToHashSet();
+            var verifiedLeases = new List<HostServiceEndpointLease>(dbLeases.Count);
+            foreach (var lease in dbLeases)
+            {
+                if (lease is not null && readyIdentities.Contains((lease.ServiceId, lease.Port)))
+                {
+                    verifiedLeases.Add(lease);
+                }
+            }
+
+            _endpointPublisher.Publish(verifiedLeases);
+        }
+        finally
+        {
+            _publicationGate.Release();
+        }
+    }
+
+    private ImmutableArray<PortLease> GetActiveReadyLeases(DateTimeOffset now)
+    {
+        var leases = ImmutableArray.CreateBuilder<PortLease>();
+        foreach (var slot in _slots.Values)
+        {
+            lock (slot.Gate)
+            {
+                if (slot.Active is not { Ready: true, Lease: { } lease } || lease.IsExpired(now))
+                {
+                    continue;
+                }
+
+                leases.Add(lease);
+            }
+        }
+
+        return leases.ToImmutable();
+    }
+
     private async Task PublishReadyEndpointsAsync()
     {
         await _publicationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -330,12 +405,9 @@ public sealed partial class HostServiceLifecycleManager
             var now = DateTimeOffset.UtcNow;
             var serviceOwners = _snapshotHolder.RoutingSnapshot?.ServiceOwners;
             var leases = new List<HostServiceEndpointLease>();
-            foreach (var slot in _slots.Values)
+            foreach (var lease in GetActiveReadyLeases(now))
             {
-                ServiceGeneration? generation;
-                lock (slot.Gate) generation = slot.Active;
-                if (generation is not { Ready: true, Lease: { } lease } || lease.IsExpired(now) ||
-                    serviceOwners is null || !serviceOwners.TryGetValue(lease.ServiceId, out var owner))
+                if (serviceOwners is null || !serviceOwners.TryGetValue(lease.ServiceId, out var owner))
                 {
                     continue;
                 }
@@ -361,6 +433,10 @@ public sealed partial class HostServiceLifecycleManager
 
     private sealed class ServiceGeneration
     {
+        private volatile PortLease? _lease;
+        private volatile bool _ready;
+        private volatile bool _processExitRecorded;
+
         internal ServiceGeneration(
             ServiceConfiguration configuration,
             ServiceSupervisor supervisor,
@@ -371,20 +447,33 @@ public sealed partial class HostServiceLifecycleManager
         {
             Configuration = configuration;
             Supervisor = supervisor;
-            Lease = lease;
+            _lease = lease;
             SnapshotVersion = snapshotVersion;
             HealthRetryState = healthRetryState;
             OwnerExtensionId = ownerExtensionId;
-            Ready = true;
+            _ready = true;
         }
 
         internal ServiceConfiguration Configuration { get; }
         internal ServiceSupervisor Supervisor { get; }
-        internal PortLease? Lease { get; set; }
+        internal PortLease? Lease
+        {
+            get => _lease;
+            set => _lease = value;
+        }
         internal long SnapshotVersion { get; }
         internal HealthRetryState HealthRetryState { get; set; }
         internal string? OwnerExtensionId { get; }
-        internal bool Ready { get; set; }
+        internal bool Ready
+        {
+            get => _ready;
+            set => _ready = value;
+        }
+        internal bool ProcessExitRecorded
+        {
+            get => _processExitRecorded;
+            set => _processExitRecorded = value;
+        }
 
     }
 }

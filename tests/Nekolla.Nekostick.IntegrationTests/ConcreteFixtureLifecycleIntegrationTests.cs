@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Host;
+using Nekolla.Nekostick.Proxy;
 using Nekolla.Nekostick.Supervision;
 using Xunit;
 using ContractRestartPolicy = Nekolla.Nekostick.Contracts.ServiceRestartPolicy;
@@ -952,7 +953,8 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
                 publisher,
                 runtimeState,
                 new HostRuntimeOptions("Host=integration-only", nodeId, false),
-                NullLogger<HostServiceLifecycleManager>.Instance);
+                NullLogger<HostServiceLifecycleManager>.Instance,
+                new MicroserviceDrainTracker());
             await fixture.DisposeAsync().ConfigureAwait(false);
             var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(20));

@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using Nekolla.Nekostick.Proxy;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Extensions;
@@ -67,7 +68,8 @@ public sealed class HostServiceLifecycleManagerTests
             endpointPublisher,
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
-            NullLogger<HostServiceLifecycleManager>.Instance);
+            NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker());
 
         await manager.ReconcileAsync(loadedSnapshot, TestContext.Current.CancellationToken);
         Assert.Equal(new[] { service.Id }, executor.StartedServices);
@@ -149,6 +151,41 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.True(publisher.Current.ContainsKey(service.Id));
     }
     [Fact]
+    public async Task PublishVerifiedEndpointsFiltersByReadyServiceAndPort()
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(snapshot, new RecordingExecutor(), new RecordingProbe(), publisher, leaseStore);
+
+        var readiness = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
+
+        var readyLease = Assert.Single(leaseStore.HeldLeases);
+        publisher.Publish(Array.Empty<HostServiceEndpointLease>());
+        await manager.PublishVerifiedEndpointsAsync(
+        [
+            new HostServiceEndpointLease(service.Id, readyLease.Port + 1, readyLease.ExpiresAt)
+        ]);
+        Assert.Empty(publisher.Current);
+
+        var matchingLease = new HostServiceEndpointLease(
+            service.Id,
+            readyLease.Port,
+            readyLease.ExpiresAt);
+        await manager.PublishVerifiedEndpointsAsync([matchingLease]);
+        Assert.Equal(matchingLease, publisher.Current[service.Id]);
+
+        await manager.StopAsync(CancellationToken.None);
+        await manager.PublishVerifiedEndpointsAsync([matchingLease]);
+        Assert.Empty(publisher.Current);
+    }
+
+    [Fact]
     public async Task ServiceAndEndpointTransitionsReachServingExtensionCoreEventQueue()
     {
         using var fixture = TestExtensionDirectory.CreateJson();
@@ -181,6 +218,7 @@ public sealed class HostServiceLifecycleManagerTests
             runtimeState,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker(),
             extensions);
 
         var ready = await manager.EnsureReadyAsync(
@@ -225,7 +263,8 @@ public sealed class HostServiceLifecycleManagerTests
             publisher,
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
-            NullLogger<HostServiceLifecycleManager>.Instance);
+            NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker());
 
         var ready = await manager.EnsureReadyAsync(snapshot, service.Id, TestContext.Current.CancellationToken);
         Assert.Equal(HostServiceReadinessStatus.Ready, ready.Status);
@@ -442,7 +481,8 @@ public sealed class HostServiceLifecycleManagerTests
             publisher,
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
-            NullLogger<HostServiceLifecycleManager>.Instance);
+            NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker());
     }
 
     private static HostRuntimeState CreateRuntimeState(

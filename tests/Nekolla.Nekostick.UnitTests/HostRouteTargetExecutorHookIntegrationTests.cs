@@ -190,6 +190,7 @@ public sealed class HostRouteTargetExecutorHookIntegrationTests
         services.AddSingleton<IMicroserviceEndpointResolver>(
             serviceId is null ? new FixedEndpointResolver() : new FixedEndpointResolver(serviceId.Value));
         services.AddSingleton<MicroserviceHttpInvokerPool>();
+        services.AddSingleton<IMicroserviceDrainTracker, MicroserviceDrainTracker>();
         services.AddSingleton<MicroserviceHttpExecutor>();
         return services.BuildServiceProvider();
     }

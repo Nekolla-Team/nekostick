@@ -23,7 +23,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         var context = CreateContext();
         var request = CreateRequest(new ProxyRetryConfiguration(
             maxRetries: 1,
@@ -49,7 +50,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         var context = CreateContext();
         context.Request.ContentLength = 3;
         context.Request.Body = new MemoryStream(new byte[] { 1, 2, 3 });
@@ -73,7 +75,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         var context = CreateContext();
         context.Request.Headers["Transfer-Encoding"] = "chunked";
 
@@ -96,7 +99,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
         var context = CreateContext();
         context.Request.Headers["Connection"] = "Upgrade";
         context.Request.Headers["Upgrade"] = "websocket";
@@ -120,7 +124,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
 
         var result = await executor.ExecuteAsync(
             CreateContext(),
@@ -140,7 +145,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
 
         var result = await executor.ExecuteAsync(
             CreateContext(),
@@ -163,7 +169,8 @@ public sealed class ProxyRetryExecutorTests
         var executor = new MicroserviceHttpExecutor(
             forwarder,
             new FixedEndpointResolver(),
-            pool);
+            pool,
+            new MicroserviceDrainTracker());
 
         var result = await executor.ExecuteAsync(
             CreateContext(),
@@ -187,6 +194,7 @@ public sealed class ProxyRetryExecutorTests
             forwarder,
             new FixedEndpointResolver(),
             pool,
+            new MicroserviceDrainTracker(),
             logger);
         var context = CreateContext();
         context.Request.Path = "/" + sensitive;

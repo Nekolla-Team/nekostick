@@ -55,6 +55,27 @@ public sealed class ServiceSupervisorTests
         Assert.Null(supervisor.Lease);
     }
 
+    [Fact]
+    public async Task DeadTrackedIdentityStopReleasesLeaseWithoutServiceScopedStop()
+    {
+        var events = new List<string>();
+        var executor = new DeadLivenessExecutor();
+        var supervisor = Create(executor, new RecordingLeaseStore(events, Lease()));
+
+        var started = await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        Assert.Equal(SupervisorOperationStatus.Applied, started.Status);
+
+        events.Clear();
+        var stopped = await supervisor.StopAsync(Now.AddSeconds(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.Applied, stopped.Status);
+        Assert.Equal(ServiceStateReasonCode.StopCompleted, stopped.Reason);
+        Assert.Equal(["release"], events);
+        Assert.Equal(0, executor.InstanceStopCalls);
+        Assert.Equal(0, executor.ServiceStopCalls);
+        Assert.Null(supervisor.Lease);
+    }
+
     [Theory]
     [InlineData(ProcessOperationStatus.Rejected, SupervisorOperationStatus.Failed, ServiceStateReasonCode.StopRequested)]
     [InlineData(ProcessOperationStatus.Failed, SupervisorOperationStatus.Failed, ServiceStateReasonCode.StopRequested)]
@@ -145,7 +166,7 @@ public sealed class ServiceSupervisorTests
         Assert.Equal(failed || policy == ServiceRestartPolicy.Always, result.Restart!.ShouldRestart);
     }
 
-    private static ServiceSupervisor Create(RecordingExecutor executor, RecordingLeaseStore store, RecordingProbe? probe = null, HealthRetryPolicy? healthPolicy = null, ServiceRestartPolicy restartPolicy = ServiceRestartPolicy.OnFailure)
+    private static ServiceSupervisor Create(IProcessExecutor executor, RecordingLeaseStore store, RecordingProbe? probe = null, HealthRetryPolicy? healthPolicy = null, ServiceRestartPolicy restartPolicy = ServiceRestartPolicy.OnFailure)
     {
         var launch = new ProcessLaunchSpecification(ServiceId, "/bin/service", "/tmp", ImmutableArray<string>.Empty, new ProcessEnvironment(new Dictionary<string, string>()));
         var request = new ServiceHealthProbeRequest(ServiceId, new HealthCheckDefinition(ServiceHealthCheckKind.Process, TimeSpan.FromSeconds(1)));
@@ -188,6 +209,47 @@ public sealed class ServiceSupervisorTests
             return ValueTask.FromResult(StopResult);
         }
     }
+    private sealed class DeadLivenessExecutor : IProcessInstanceExecutor, IProcessLiveness
+    {
+        public int InstanceStopCalls { get; private set; }
+        public int ServiceStopCalls { get; private set; }
+
+        public ValueTask<ProcessOperationResult> StartAsync(
+            ProcessLaunchSpecification specification,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new ProcessOperationResult(
+                ProcessOperationStatus.Accepted,
+                ServiceStateReasonCode.StartAccepted,
+                new ProcessInstanceId(Guid.NewGuid()),
+                startedAt: DateTimeOffset.UtcNow));
+
+        public ValueTask<ProcessOperationResult> StopAsync(
+            Guid serviceId,
+            TimeSpan gracePeriod,
+            CancellationToken cancellationToken = default)
+        {
+            ServiceStopCalls++;
+            return ValueTask.FromResult(new ProcessOperationResult(
+                ProcessOperationStatus.Completed,
+                ServiceStateReasonCode.StopCompleted));
+        }
+
+        public ValueTask<ProcessOperationResult> StopAsync(
+            ProcessInstanceId instanceId,
+            TimeSpan gracePeriod,
+            CancellationToken cancellationToken = default)
+        {
+            InstanceStopCalls++;
+            return ValueTask.FromResult(new ProcessOperationResult(
+                ProcessOperationStatus.Completed,
+                ServiceStateReasonCode.StopCompleted));
+        }
+
+        bool IProcessLiveness.IsRunning(Guid serviceId) => false;
+
+        bool IProcessLiveness.IsRunning(Guid serviceId, ProcessInstanceId instanceId) => false;
+    }
+
     private sealed class RecordingLeaseStore : IPortLeaseStore
     {
         private readonly List<string> _events; private readonly PortLease _lease;
