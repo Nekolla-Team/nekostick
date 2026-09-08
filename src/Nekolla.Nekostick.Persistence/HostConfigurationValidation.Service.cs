@@ -8,10 +8,10 @@ internal static class HostConfigurationServiceValidator
     internal static void Validate(ServiceConfiguration? value)
     {
         if (value is null || !HostConfigurationValueValidator.IsUuidV7(value.Id) || value.Version < 0 ||
-            !HostConfigurationValueValidator.IsSafeAbsolutePath(
+            !HostConfigurationValueValidator.IsSafeServicePath(
                 value.FileName,
                 HostConfigurationValueValidator.MaxTextLength) ||
-            !HostConfigurationValueValidator.IsSafeAbsolutePath(
+            !HostConfigurationValueValidator.IsSafeServicePath(
                 value.WorkingDirectory,
                 HostConfigurationValueValidator.MaxTextLength) ||
             !Enum.IsDefined(value.StartMode) || !Enum.IsDefined(value.RestartPolicy) ||

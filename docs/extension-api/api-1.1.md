@@ -159,9 +159,9 @@ public async ValueTask PublishRouteAsync(IExtensionHostBridge host, Cancellation
 var service = new ExtensionServiceConfiguration(
     id: Guid.CreateVersion7(),
     enabled: true,
-    fileName: "/opt/example/worker",                       // 必须是绝对路径
+    fileName: "/opt/example/worker",                       // 绝对路径，或相对 Host data 目录的相对路径（按节点解析）
     argumentList: ["--port", "$PORT"],                     // $PORT 会被替换为分配到的端口
-    workingDirectory: "/opt/example",                      // 必须是绝对路径
+    workingDirectory: "/opt/example",                      // 绝对路径，或相对 Host data 目录的相对路径（按节点解析）
     startMode: ServiceStartMode.Lazy,                      // Eager = 配置生效即启动；Lazy = 首个请求触发
     restartPolicy: ServiceRestartPolicy.OnFailure,         // Never / OnFailure / Always
     healthCheck: new ServiceHealthCheckConfiguration(

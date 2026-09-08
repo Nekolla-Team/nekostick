@@ -143,8 +143,8 @@ public sealed class ServiceDefinition : EntityBase
 {
     /// <summary>Creates a service definition.</summary>
     /// <param name="uuidGenerator">The UUID v7 generator.</param>
-    /// <param name="fileName">The absolute executable path.</param>
-    /// <param name="workingDirectory">The absolute working directory.</param>
+    /// <param name="fileName">The executable path; absolute, or relative to the host data directory.</param>
+    /// <param name="workingDirectory">The working directory; absolute, or relative to the host data directory.</param>
     /// <param name="arguments">The immutable process arguments.</param>
     /// <param name="environment">The immutable environment overrides.</param>
     /// <param name="startPolicy">The startup policy.</param>
@@ -163,14 +163,14 @@ public sealed class ServiceDefinition : EntityBase
         TimeProvider? timeProvider = null)
         : base(uuidGenerator, timeProvider)
     {
-        if (string.IsNullOrWhiteSpace(fileName) || !Path.IsPathRooted(fileName))
+        if (string.IsNullOrWhiteSpace(fileName))
         {
-            throw new ArgumentException("An absolute executable path is required.", nameof(fileName));
+            throw new ArgumentException("An executable path is required.", nameof(fileName));
         }
 
-        if (string.IsNullOrWhiteSpace(workingDirectory) || !Path.IsPathRooted(workingDirectory))
+        if (string.IsNullOrWhiteSpace(workingDirectory))
         {
-            throw new ArgumentException("An absolute working directory is required.", nameof(workingDirectory));
+            throw new ArgumentException("A working directory is required.", nameof(workingDirectory));
         }
 
         FileName = fileName;
@@ -182,10 +182,10 @@ public sealed class ServiceDefinition : EntityBase
         HealthCheck = healthCheck ?? throw new ArgumentNullException(nameof(healthCheck));
     }
 
-    /// <summary>Gets the absolute executable path.</summary>
+    /// <summary>Gets the executable path; absolute, or relative to the host data directory (resolved per node at launch).</summary>
     public string FileName { get; }
 
-    /// <summary>Gets the absolute working directory.</summary>
+    /// <summary>Gets the working directory; absolute, or relative to the host data directory (resolved per node at launch).</summary>
     public string WorkingDirectory { get; }
 
     /// <summary>Gets immutable process arguments.</summary>

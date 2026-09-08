@@ -69,7 +69,8 @@ public sealed class HostServiceLifecycleManagerTests
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
-            new MicroserviceDrainTracker());
+            new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
 
         await manager.ReconcileAsync(loadedSnapshot, TestContext.Current.CancellationToken);
         Assert.Equal(new[] { service.Id }, executor.StartedServices);
@@ -219,6 +220,7 @@ public sealed class HostServiceLifecycleManagerTests
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
             new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false),
             extensions);
 
         var ready = await manager.EnsureReadyAsync(
@@ -264,7 +266,8 @@ public sealed class HostServiceLifecycleManagerTests
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
-            new MicroserviceDrainTracker());
+            new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
 
         var ready = await manager.EnsureReadyAsync(snapshot, service.Id, TestContext.Current.CancellationToken);
         Assert.Equal(HostServiceReadinessStatus.Ready, ready.Status);
@@ -482,7 +485,8 @@ public sealed class HostServiceLifecycleManagerTests
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
-            new MicroserviceDrainTracker());
+            new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
     }
 
     private static HostRuntimeState CreateRuntimeState(

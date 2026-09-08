@@ -244,7 +244,7 @@ query string 始终原样保留。替换模板的非法变量、未匹配捕获�
 
 service 是独立实体，可被多条 route 引用。其启动配置只公开 `ProcessStartInfo` 的安全子集：`FileName`、`ArgumentList`、`WorkingDirectory` 和 `Environment`；固定 `UseShellExecute = false`。用户若需要 shell 行为，须显式把 shell 本身设为 `FileName` 并传入参数。
 
-- `FileName` 和 `WorkingDirectory` 必须为绝对路径；工作目录不存在时服务启动失败。
+- `FileName` 和 `WorkingDirectory` 可以是绝对路径，也可以是相对路径：相对路径在**启动时**按本节点的 Host data 目录解析为绝对路径后再创建进程；词法归一化后会逃逸出 data 目录的相对路径（如 `../x`）在写入校验时即被拒绝，运行期解析还有 fail-closed 的包含性复查。工作目录不存在时服务启动失败。
 - 服务继承宿主环境变量，再由 service `Environment` 覆盖同名键；机密环境变量绝不写入日志。
 - `ArgumentList` 每一项中的所有字面 `$PORT` 都替换为分配或显式端口。
 - 子进程环境总是附加 `PORT=<port>` 和 `HOST=<configured-loopback-address>`。

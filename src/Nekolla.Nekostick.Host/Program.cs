@@ -373,6 +373,7 @@ internal static class Program
                         serviceProvider.GetRequiredService<HostRuntimeOptions>(),
                         serviceProvider.GetRequiredService<ILogger<HostServiceLifecycleManager>>(),
                         serviceProvider.GetRequiredService<IMicroserviceDrainTracker>(),
+                        serviceProvider.GetRequiredService<HostNodeOptions>(),
                         serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
                 builder.Services.AddSingleton<IPortLeaseStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());

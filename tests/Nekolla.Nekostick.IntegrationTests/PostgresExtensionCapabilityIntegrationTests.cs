@@ -607,6 +607,64 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.True(expectedVersion > initial.Value!.Version);
     }
 
+    [Fact]
+    public async Task ServicePathsMayBeRelativeToTheDataDirectoryButMustNotEscape()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var owner = harness.CreateCapability(OwnerExtensionId, static _ => false);
+
+        var initial = await owner.ConfigurationApi.ReadAsync(cancellationToken);
+        Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+
+        var relativeWrite = await owner.Services.UpsertAsync(
+            initial.Value!.Version,
+            CreateServiceWithPaths(
+                Guid.Parse("018f0f00-0000-7000-8000-000000000110"),
+                fileName: "svc/bin/app",
+                workingDirectory: "svc"),
+            cancellationToken);
+        var committedVersion = RequireCommittedVersion(relativeWrite);
+
+        var escapingFileName = await owner.Services.UpsertAsync(
+            committedVersion,
+            CreateServiceWithPaths(
+                Guid.Parse("018f0f00-0000-7000-8000-000000000111"),
+                fileName: "../outside/app",
+                workingDirectory: "svc"),
+            cancellationToken);
+        AssertConfigurationError(escapingFileName, ConfigurationErrorCode.Validation);
+
+        var escapingWorkingDirectory = await owner.Services.UpsertAsync(
+            committedVersion,
+            CreateServiceWithPaths(
+                Guid.Parse("018f0f00-0000-7000-8000-000000000112"),
+                fileName: "svc/bin/app",
+                workingDirectory: "svc/../../outside"),
+            cancellationToken);
+        AssertConfigurationError(escapingWorkingDirectory, ConfigurationErrorCode.Validation);
+    }
+
+    private static ExtensionServiceConfiguration CreateServiceWithPaths(
+        Guid id,
+        string fileName,
+        string workingDirectory) =>
+        new(
+            id,
+            enabled: true,
+            fileName: fileName,
+            argumentList: ImmutableArray<string>.Empty,
+            workingDirectory: workingDirectory,
+            startMode: ServiceStartMode.Lazy,
+            restartPolicy: ServiceRestartPolicy.OnFailure,
+            healthCheck: new ServiceHealthCheckConfiguration(
+                ServiceHealthCheckType.Process,
+                httpPath: null,
+                timeout: TimeSpan.FromSeconds(1)),
+            createdAt: DateTimeOffset.UtcNow,
+            updatedAt: DateTimeOffset.UtcNow,
+            version: 0);
+
     private static ConfigurationChangeSet CreateFullReplacement(
         HostConfigurationSnapshot snapshot,
         bool includeForeign)
@@ -782,9 +840,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         new(
             id,
             enabled: true,
-            // The supervisor preflights File.Exists before delegating to the executor; the fake
-            // executor never launches the file, so any existing path keeps the fixture honest.
-            fileName: Environment.ProcessPath ?? "/bin/sh",
+            // Relative executable path: resolved per node against the harness data directory,
+            // which CreateAsync provisions with a dummy fixture-service file.
+            fileName: "fixture-service",
             argumentList: ImmutableArray.Create("--integration"),
             workingDirectory: "/tmp",
             startMode: ServiceStartMode.Lazy,
@@ -827,7 +885,8 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             HostConfigurationSnapshotHolder snapshotHolder,
             HostRuntimeState runtimeState,
             HostServiceEndpointSnapshotPublisher endpointPublisher,
-            IExtensionCapabilityFactory capabilityFactory)
+            IExtensionCapabilityFactory capabilityFactory,
+            string dataDirectory)
         {
             this.scope = scope;
             this.services = services;
@@ -837,11 +896,13 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             RuntimeState = runtimeState;
             EndpointPublisher = endpointPublisher;
             CapabilityFactory = capabilityFactory;
+            DataDirectory = dataDirectory;
         }
 
         internal PostgresTestDatabase Database => scope.Database;
         internal HostConfigurationSnapshotHolder SnapshotHolder { get; }
         internal HostRuntimeState RuntimeState { get; }
+        internal string DataDirectory { get; }
         internal HostServiceEndpointSnapshotPublisher EndpointPublisher { get; }
         internal IExtensionCapabilityFactory CapabilityFactory { get; }
 
@@ -896,6 +957,13 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                 serviceCollection.AddSingleton<IHostConfigurationSnapshotReader, EfHostConfigurationSnapshotReader>();
                 serviceCollection.AddSingleton(endpointPublisher);
                 serviceCollection.AddSingleton<IHostServiceEndpointSnapshotAccessor>(endpointPublisher);
+                var dataDirectory = Path.Combine(
+                    Path.GetTempPath(),
+                    "nekostick-cap-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dataDirectory);
+                // The fixture executable only needs to exist: the supervisor preflights File.Exists
+                // on the resolved path and the fake executor never launches it.
+                File.WriteAllBytes(Path.Combine(dataDirectory, "fixture-service"), []);
                 serviceCollection.AddSingleton<IHostServiceLifecycleCoordinator>(provider =>
                 {
                     var manager = new HostServiceLifecycleManager(
@@ -907,7 +975,12 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                         runtimeState,
                         runtimeOptions,
                         provider.GetRequiredService<ILogger<HostServiceLifecycleManager>>(),
-                        new Nekolla.Nekostick.Proxy.MicroserviceDrainTracker());
+                        new Nekolla.Nekostick.Proxy.MicroserviceDrainTracker(),
+                        new HostNodeOptions(
+                            skipExtensions: true,
+                            disableSupervisor: true,
+                            readOnly: false,
+                            dataDirectory: dataDirectory));
                     return manager;
                 });
                 serviceCollection.AddSingleton<ExtensionRuntimeManager>(provider =>
@@ -951,7 +1024,8 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                     snapshotHolder,
                     runtimeState,
                     endpointPublisher,
-                    services.GetRequiredService<IExtensionCapabilityFactory>());
+                    services.GetRequiredService<IExtensionCapabilityFactory>(),
+                    dataDirectory);
             }
             catch
             {
@@ -986,6 +1060,14 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                 await services.DisposeAsync();
                 await scope.DisposeAsync();
                 await SnapshotHolder.DisposeAsync();
+                try
+                {
+                    Directory.Delete(DataDirectory, recursive: true);
+                }
+                catch (IOException)
+                {
+                    // Best-effort temp directory cleanup only.
+                }
             }
         }
 

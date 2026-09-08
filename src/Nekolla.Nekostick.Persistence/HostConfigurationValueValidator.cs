@@ -147,6 +147,50 @@ internal static class HostConfigurationValueValidator
         !string.IsNullOrWhiteSpace(value) && value.Length <= maxLength &&
         Path.IsPathRooted(value) && !ContainsControlCharacter(value);
 
+    /// <summary>
+    /// Accepts a service path that is either a safe absolute path or a safe relative path that
+    /// resolves against the per-node host data directory at launch. Relative paths are rejected
+    /// when lexical normalization would escape the base directory (a leading <c>..</c> chain).
+    /// </summary>
+    internal static bool IsSafeServicePath(string? value, int maxLength) =>
+        IsSafeAbsolutePath(value, maxLength) || IsSafeRelativePath(value, maxLength);
+
+    private static bool IsSafeRelativePath(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > maxLength ||
+            Path.IsPathRooted(value) || ContainsControlCharacter(value))
+        {
+            return false;
+        }
+
+        var depth = 0;
+        foreach (var segment in value.Split(
+                     ['/', Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                if (depth == 0)
+                {
+                    return false;
+                }
+
+                depth--;
+            }
+            else
+            {
+                depth++;
+            }
+        }
+
+        return depth > 0;
+    }
+
     internal static bool IsSafeText(string? value, int maxLength) =>
         !string.IsNullOrWhiteSpace(value) && value.Length <= maxLength && !ContainsControlCharacter(value);
 

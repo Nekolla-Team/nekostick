@@ -298,7 +298,8 @@ public sealed class HostServiceLifecycleRestartTests
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
-            tracker);
+            tracker,
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
         return new Harness(manager, publisher, leaseStore);
     }
 

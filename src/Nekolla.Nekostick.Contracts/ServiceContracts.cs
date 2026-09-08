@@ -75,9 +75,9 @@ public sealed record ServiceConfiguration
     /// <summary>Creates a service configuration DTO.</summary>
     /// <param name="id">The public service identifier.</param>
     /// <param name="enabled">Whether the service may run.</param>
-    /// <param name="fileName">The absolute executable path.</param>
+    /// <param name="fileName">The executable path; absolute, or relative to the host data directory.</param>
     /// <param name="argumentList">The immutable argument list.</param>
-    /// <param name="workingDirectory">The absolute working directory.</param>
+    /// <param name="workingDirectory">The working directory; absolute, or relative to the host data directory.</param>
     /// <param name="environment">Environment overrides, potentially sensitive.</param>
     /// <param name="startMode">The service start mode.</param>
     /// <param name="restartPolicy">The restart policy.</param>
@@ -101,14 +101,14 @@ public sealed record ServiceConfiguration
     {
         Id = IdentityValidation.RequireUuidV7(id, nameof(id));
         Enabled = enabled;
-        if (string.IsNullOrWhiteSpace(fileName) || !Path.IsPathRooted(fileName))
+        if (string.IsNullOrWhiteSpace(fileName))
         {
-            throw new ArgumentException("An absolute executable path is required.", nameof(fileName));
+            throw new ArgumentException("An executable path is required.", nameof(fileName));
         }
 
-        if (string.IsNullOrWhiteSpace(workingDirectory) || !Path.IsPathRooted(workingDirectory))
+        if (string.IsNullOrWhiteSpace(workingDirectory))
         {
-            throw new ArgumentException("An absolute working directory is required.", nameof(workingDirectory));
+            throw new ArgumentException("A working directory is required.", nameof(workingDirectory));
         }
 
         FileName = fileName;
@@ -129,13 +129,13 @@ public sealed record ServiceConfiguration
     /// <summary>Gets whether the service is enabled.</summary>
     public bool Enabled { get; }
 
-    /// <summary>Gets the absolute executable path.</summary>
+    /// <summary>Gets the executable path; absolute, or relative to the host data directory (resolved per node at launch).</summary>
     public string FileName { get; }
 
     /// <summary>Gets the immutable process arguments.</summary>
     public ImmutableArray<string> ArgumentList { get; }
 
-    /// <summary>Gets the absolute working directory.</summary>
+    /// <summary>Gets the working directory; absolute, or relative to the host data directory (resolved per node at launch).</summary>
     public string WorkingDirectory { get; }
 
     /// <summary>Gets environment overrides. Consumers must treat values as sensitive.</summary>

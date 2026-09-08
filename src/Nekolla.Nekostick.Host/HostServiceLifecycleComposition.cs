@@ -105,6 +105,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private readonly object _lifecycleGate = new();
+    private readonly string _dataDirectory;
     private readonly CancellationTokenSource _shutdownCts = new();
     private IDisposable? _processExitSubscription;
     private int _stopping;
@@ -119,6 +120,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         HostRuntimeOptions options,
         ILogger<HostServiceLifecycleManager> logger,
         IMicroserviceDrainTracker drainTracker,
+        HostNodeOptions nodeOptions,
         ExtensionRuntimeManager? runtimeManager = null)
     {
         _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
@@ -129,6 +131,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _drainTracker = drainTracker ?? throw new ArgumentNullException(nameof(drainTracker));
+        _dataDirectory = nodeOptions?.DataDirectory ?? throw new ArgumentNullException(nameof(nodeOptions));
         _runtimeManager = runtimeManager;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _nodeId = new NodeIdentifier(options.NodeId);

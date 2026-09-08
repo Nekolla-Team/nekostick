@@ -954,7 +954,8 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
                 runtimeState,
                 new HostRuntimeOptions("Host=integration-only", nodeId, false),
                 NullLogger<HostServiceLifecycleManager>.Instance,
-                new MicroserviceDrainTracker());
+                new MicroserviceDrainTracker(),
+                new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
             await fixture.DisposeAsync().ConfigureAwait(false);
             var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(20));

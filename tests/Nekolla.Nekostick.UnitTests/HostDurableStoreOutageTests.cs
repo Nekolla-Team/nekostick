@@ -200,7 +200,8 @@ public sealed class HostDurableStoreOutageTests
             runtime,
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
-            new MicroserviceDrainTracker());
+            new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
         return new Fixture(manager, snapshot, holder, runtime, executor, leaseStore, publisher);
     }
 

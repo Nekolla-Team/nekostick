@@ -25,8 +25,8 @@ public sealed partial class HostServiceLifecycleManager
         environment["HOST"] = "127.0.0.1";
         var launch = new ProcessLaunchSpecification(
             service.Id,
-            service.FileName,
-            service.WorkingDirectory,
+            ServicePathResolver.Resolve(_dataDirectory, service.FileName),
+            ServicePathResolver.Resolve(_dataDirectory, service.WorkingDirectory),
             arguments,
             new ProcessEnvironment(environment));
         var healthDefinition = new HealthCheckDefinition(

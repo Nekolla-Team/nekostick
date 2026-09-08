@@ -199,9 +199,11 @@ public sealed class DomainValueObjectTests
         Assert.Same(health, definition.HealthCheck);
         Assert.Equal(1L, definition.Version);
 
+        // Relative paths are legal (resolved per node against the host data directory at
+        // launch); the constructor still rejects blank paths.
         Assert.Throws<ArgumentException>(() => new ServiceDefinition(
             new FixedUuidGenerator(),
-            "relative-service",
+            " ",
             root,
             default,
             ImmutableDictionary<string, string>.Empty,
@@ -212,7 +214,7 @@ public sealed class DomainValueObjectTests
         Assert.Throws<ArgumentException>(() => new ServiceDefinition(
             new FixedUuidGenerator(),
             Path.Combine(root, "service-bin"),
-            "relative-working-directory",
+            "",
             default,
             ImmutableDictionary<string, string>.Empty,
             ServiceStartPolicy.Eager,
