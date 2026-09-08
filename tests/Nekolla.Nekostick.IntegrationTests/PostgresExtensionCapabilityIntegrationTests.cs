@@ -782,7 +782,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         new(
             id,
             enabled: true,
-            fileName: "/usr/bin/fixture-service",
+            // The supervisor preflights File.Exists before delegating to the executor; the fake
+            // executor never launches the file, so any existing path keeps the fixture honest.
+            fileName: Environment.ProcessPath ?? "/bin/sh",
             argumentList: ImmutableArray.Create("--integration"),
             workingDirectory: "/tmp",
             startMode: ServiceStartMode.Lazy,

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -11,6 +11,11 @@ namespace Nekolla.Nekostick.Persistence.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropCheckConstraint(
+                name: "ck_service_runtimes_state",
+                schema: "nekostick",
+                table: "service_runtimes");
+
             migrationBuilder.AddColumn<string>(
                 name: "content_hash",
                 schema: "nekostick",
@@ -33,16 +38,7 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("pk_extension_node_states", x => new { x.node_id, x.extension_record_id });
-                    table.CheckConstraint(
-                        "ck_extension_node_states_state",
-                        "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled') AND length(failure_code) BETWEEN 1 AND 64");
-                    table.ForeignKey(
-                        name: "fk_extension_node_states_nodes_node_id",
-                        column: x => x.node_id,
-                        principalSchema: "nekostick",
-                        principalTable: "nodes",
-                        principalColumn: "node_id",
-                        onDelete: ReferentialAction.Restrict);
+                    table.CheckConstraint("ck_extension_node_states_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled') AND length(failure_code) BETWEEN 1 AND 64");
                     table.ForeignKey(
                         name: "fk_extension_node_states_extension_records_extension_record_id",
                         column: x => x.extension_record_id,
@@ -50,7 +46,20 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         principalTable: "extension_records",
                         principalColumn: "id",
                         onDelete: ReferentialAction.Restrict);
+                    table.ForeignKey(
+                        name: "fk_extension_node_states_nodes_node_id",
+                        column: x => x.node_id,
+                        principalSchema: "nekostick",
+                        principalTable: "nodes",
+                        principalColumn: "node_id",
+                        onDelete: ReferentialAction.Restrict);
                 });
+
+            migrationBuilder.AddCheckConstraint(
+                name: "ck_service_runtimes_state",
+                schema: "nekostick",
+                table: "service_runtimes",
+                sql: "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed', 'Waiting') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
 
             migrationBuilder.CreateIndex(
                 name: "ix_extension_node_states_extension_record_id",
@@ -66,10 +75,21 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                 name: "extension_node_states",
                 schema: "nekostick");
 
+            migrationBuilder.DropCheckConstraint(
+                name: "ck_service_runtimes_state",
+                schema: "nekostick",
+                table: "service_runtimes");
+
             migrationBuilder.DropColumn(
                 name: "content_hash",
                 schema: "nekostick",
                 table: "extension_records");
+
+            migrationBuilder.AddCheckConstraint(
+                name: "ck_service_runtimes_state",
+                schema: "nekostick",
+                table: "service_runtimes",
+                sql: "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
         }
     }
 }

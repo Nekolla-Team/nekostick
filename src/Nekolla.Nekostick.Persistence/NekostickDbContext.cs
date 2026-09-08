@@ -366,6 +366,7 @@ public sealed class NekostickDbContext : DbContext
         builder.Property(value => value.Id).HasColumnName("id").HasColumnType("uuid");
         builder.Property(value => value.ExtensionId).HasColumnName("extension_id").HasMaxLength(128).IsRequired();
         builder.Property(value => value.InstalledVersion).HasColumnName("installed_version").HasMaxLength(128).IsRequired();
+        ConfigureEnum(builder.Property(value => value.LoadState).HasColumnName("load_state"), 32);
         builder.Property(value => value.ContentHash).HasColumnName("content_hash").HasColumnType("text");
         ConfigureUtcTimestamp(builder.Property(value => value.CreatedAt).HasColumnName("created_at"));
         ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
