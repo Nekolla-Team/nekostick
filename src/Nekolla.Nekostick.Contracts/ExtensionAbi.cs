@@ -4,16 +4,16 @@ using System.Diagnostics.CodeAnalysis;
 namespace Nekolla.Nekostick.Contracts;
 
 /// <summary>Identifies the stable in-process extension ABI generation.</summary>
+/// <remarks>
+/// The ABI intentionally carries only one version number. Which API surface a negotiated version
+/// supports is decided and checked by the API caller itself (for example via
+/// <see cref="IsCompatible" /> against the caller-chosen minimum); the contracts package does not
+/// ship per-release helper members.
+/// </remarks>
 public static class ExtensionAbi
 {
-    /// <summary>Gets the minimum host API version that exposes the API 1.3 sibling bridge.</summary>
-    public static HostApiVersion Api13Version { get; } = new(1, 3, 2);
-
-    /// <summary>Gets the minimum host API version that exposes the API 1.3.3 sibling bridge additions.</summary>
-    public static HostApiVersion Api133Version { get; } = new(1, 3, 3);
-
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
-    public static HostApiVersion Version { get; } = Api133Version;
+    public static HostApiVersion Version { get; } = new(1, 3, 3);
 
     /// <summary>Determines whether a host API version can satisfy an extension ABI requirement.</summary>
     /// <param name="required">The required version.</param>
@@ -21,16 +21,6 @@ public static class ExtensionAbi
     /// <returns><see langword="true" /> when the major generation matches and the host is not older.</returns>
     public static bool IsCompatible(HostApiVersion required, HostApiVersion host) =>
         required.Major == host.Major && host >= required;
-
-    /// <summary>Determines whether the negotiated host exposes the API 1.3 sibling bridge.</summary>
-    /// <param name="host">The negotiated host API version.</param>
-    /// <returns><see langword="true" /> only for a compatible API 1.3-or-later host in major generation 1.</returns>
-    public static bool IsApi13Supported(HostApiVersion host) => IsCompatible(Api13Version, host);
-
-    /// <summary>Determines whether the negotiated host exposes API 1.3.3 sibling capabilities.</summary>
-    /// <param name="host">The negotiated host API version.</param>
-    /// <returns><see langword="true" /> only for a compatible API 1.3.3-or-later host in major generation 1.</returns>
-    public static bool IsApi133Supported(HostApiVersion host) => IsCompatible(Api133Version, host);
 }
 
 

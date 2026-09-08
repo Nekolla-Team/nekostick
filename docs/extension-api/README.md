@@ -187,7 +187,8 @@ Host API 使用 SemVer。规则：major 相同且 Host 版本不低于扩展要�
 
 ```csharp
 var api = context.Host.ApiVersion;          // 例如 1.2.0
-var has13 = ExtensionAbi.IsApi13Supported(api); // 是否可用 1.3 能力
+// 是否可用 1.3 能力：调用方自己声明门槛并校验（契约包只提供版本号与 IsCompatible）
+var has13 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), api);
 ```
 
 ## Host 桥能力总览

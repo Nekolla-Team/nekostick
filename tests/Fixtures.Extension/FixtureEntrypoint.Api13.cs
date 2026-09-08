@@ -82,7 +82,7 @@ public sealed partial class FixtureEntrypoint
             return "api13=Unsupported;sibling=False;supervisor=Unsupported;routeSubscribe=False;routeHook=False;logWriter=Unavailable";
         }
 
-        var supported = ExtensionAbi.IsApi13Supported(host.ApiVersion);
+        var supported = ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), host.ApiVersion);
         var supervisor = await bridge.Supervisor.GetAsync(ProbeId, cancellationToken)
             .ConfigureAwait(false);
         var routeSubscribe = bridge.RouteEvents.TrySubscribe(

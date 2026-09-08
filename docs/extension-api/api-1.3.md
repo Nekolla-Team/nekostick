@@ -1,6 +1,6 @@
 # API 1.3：遥测、路由观测、自定义日志、扩展管理与流式处理
 
-本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.3**；`HostApiVersion.Current`、`ExtensionAbi.Version` 均为 `1.3.3`，`ExtensionAbi.Api13Version` 为 `1.3.2`、`ExtensionAbi.Api133Version` 为 `1.3.3`。`1.3.2` / `1.3.3` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.3 Host 满足）。
+本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.3**；`HostApiVersion.Current` 与 `ExtensionAbi.Version` 均为 `1.3.3`。`1.3.2` / `1.3.3` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.3 Host 满足）。
 
 API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加七组能力：
 
@@ -12,13 +12,16 @@ API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加七组能力：
 - 流式请求/响应处理器 `IExtensionStreamingHandler`。
 - 设置内容变更事件 `ExtensionCoreEventKind.ExtensionSettingsChanged`。
 
-`1.3.3` 在同一旁路桥上追加三项能力：`Supervisor` 的节点本地 `ResumeAsync` / `RestartAsync`、桥属性 `HostInfo`（宿主节点状态快照）、服务生命周期新状态 `Waiting`；`ExtensionManagementEntry` 追加 `ContentHash` 内容摘要字段。这些成员由 `ExtensionAbi.IsApi133Supported` 单独门控。
+`1.3.3` 在同一旁路桥上追加三项能力：`Supervisor` 的节点本地 `ResumeAsync` / `RestartAsync`、桥属性 `HostInfo`（宿主节点状态快照）、服务生命周期新状态 `Waiting`；`ExtensionManagementEntry` 追加 `ContentHash` 内容摘要字段。这些成员要求协商版本不低于 `1.3.3`（检查方式见下文「能力探测」）。
 
 ## 能力探测（必读）
 
-`IExtensionHostBridge13` 继承 `IExtensionHostBridge`，内置桥同时实现两个接口。使用 API 1.3 能力前做两步检查：
+`IExtensionHostBridge13` 继承 `IExtensionHostBridge`，内置桥同时实现两个接口。契约包只提供**一个**版本号（`ExtensionAbi.Version` / 桥上的 `ApiVersion`）和通用的 `ExtensionAbi.IsCompatible(required, host)` 谓词；**某个版本号对应哪些能力由调用方自己声明阈值并校验**。使用 API 1.3 能力前做两步检查：
 
 ```csharp
+// 调用方自己声明所需最低版本
+static readonly HostApiVersion Api13Minimum = new(1, 3, 2);
+
 // 第一步：桥是否实现了 1.3 旁路接口
 if (context.Host is not IExtensionHostBridge13 bridge13)
 {
@@ -26,10 +29,10 @@ if (context.Host is not IExtensionHostBridge13 bridge13)
     return;
 }
 
-// 第二步：协商出的版本是否真的支持 API 1.3
-if (!ExtensionAbi.IsApi13Supported(bridge13.ApiVersion))
+// 第二步：协商出的版本是否达到调用方要求的门槛
+if (!ExtensionAbi.IsCompatible(Api13Minimum, bridge13.ApiVersion))
 {
-    // 桥类型存在，但 Host 版本低于 API 1.3.2：能力处于「不受支持」状态
+    // 桥类型存在，但 Host 版本低于要求：能力处于「不受支持」状态
     return;
 }
 
@@ -42,10 +45,12 @@ var management = bridge13.Management;
 - `RouteEvents.TrySubscribe` / `TryRegisterHook` 返回 `false`；
 - `LogWriter.WriteText` 静默丢弃文本。
 
-`1.3.3` 追加的能力需要额外的版本检查（桥类型在 1.3.2 就存在，但新成员在旧 Host 上不可用）：
+`1.3.3` 追加的能力由调用方用更高的自选门槛检查（桥类型在 1.3.2 就存在，但新成员在旧 Host 上不可用）：
 
 ```csharp
-if (ExtensionAbi.IsApi133Supported(bridge13.ApiVersion))
+static readonly HostApiVersion Api133Minimum = new(1, 3, 3);
+
+if (ExtensionAbi.IsCompatible(Api133Minimum, bridge13.ApiVersion))
 {
     // ResumeAsync / RestartAsync 可用; HostInfo 返回真实快照
 }
@@ -500,7 +505,7 @@ context.Host.Events.TrySubscribe(async (@event, token) =>
 - **属主限定**：Host 只把该事件投递给 `extensionId` 对应的扩展；其他扩展不会收到。
 - **内容无关**：载荷仅含扩展 ID，扩展需自行调用 `IExtensionConfigurationApi.ReadSettingsAsync` 读取并 diff。
 - **有序投递**：与扩展内其他事件共用同一条有序事件队列，串行、best-effort。
-- **版本门槛**：低于 1.3.2 的 Host 不会发布该事件；扩展可通过 `ExtensionAbi.IsApi13Supported(host.ApiVersion)` 判断。
+- **版本门槛**：低于 1.3.2 的 Host 不会发布该事件；扩展可自行用 `ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), host.ApiVersion)` 判断。
 
 ## Host 数据目录（DataDirectory）
 
@@ -531,7 +536,7 @@ var extensionDataPath = Path.Combine(bridge13.DataDirectory, "my.extension");
 ```
 
 - `string.Empty` 表示不可用，扩展**不能**将其当作路径使用。
-- 在 manifest 中要求 `>=1.3.2`，或在运行时探测 `ExtensionAbi.IsApi13Supported(host.ApiVersion)`，确认版本后再读取。
+- 在 manifest 中要求 `>=1.3.2`，或在运行时用 `ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), host.ApiVersion)` 探测，确认版本后再读取。
 - 该目录由 Host 所有；扩展只应读写自己命名的子目录/文件，不能删除或覆盖 Host 文件。
 
 ## 流式请求 / 响应处理器
@@ -646,7 +651,7 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 
 - 1.2 及以前的桥契约保持不变，`IExtensionHostBridge` 的全部成员行为不变；`IExtensionHostBridge13` 是旁路接口。
 - Contracts 包升级到 **1.3.2** 即可获得 API 1.3.2 的 `DataDirectory`、流式处理器 `IExtensionStreamingHandler`、设置变更事件 `ExtensionCoreEventKind.ExtensionSettingsChanged`；`ExtensionCapabilitySet` 的旧构造函数仍保留，`ExtensionManagement` 是可空的可选能力。
-- Contracts 包升级到 **1.3.3** 追加 `Supervisor.ResumeAsync` / `RestartAsync`、桥属性 `HostInfo`、生命周期状态 `Waiting` 与 `ExtensionManagementEntry.ContentHash`；用 `ExtensionAbi.IsApi133Supported` 探测。
+- Contracts 包升级到 **1.3.3** 追加 `Supervisor.ResumeAsync` / `RestartAsync`、桥属性 `HostInfo`、生命周期状态 `Waiting` 与 `ExtensionManagementEntry.ContentHash`；用 `ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 3), bridge13.ApiVersion)` 探测。
 - 只需要在用到新能力的地方按本文开头的两步检查做探测；老代码不需要改。
 - API version 仍是 1.3，没有另一个管理 API version。要求 Host API 1.3 的 manifest 不需要改写；新发现扩展的持久化默认状态、显式 refresh 和记录永不自动删除是本版本的生命周期规则。
 - 流式处理器是**追加**的新接口；已有的 `IExtensionHandler` 行为、路由配置和目标绑定均不变。

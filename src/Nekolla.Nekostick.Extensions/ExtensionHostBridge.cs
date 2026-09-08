@@ -38,7 +38,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         Status = new ExtensionStatusSink(reportStatus);
         Logger = new ExtensionLogger(reportLog);
 
-        var api13Supported = ExtensionAbi.IsApi13Supported(apiVersion);
+        var api13Supported = ExtensionApiCapabilityGate.IsApi13Supported(apiVersion);
         Supervisor = api13Supported
             ? capabilities.Supervisor ?? UnsupportedExtensionCapabilities.CreateSupervisor()
             : UnsupportedExtensionCapabilities.CreateSupervisor();
@@ -52,7 +52,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
             ? capabilities.ExtensionManagement ?? UnsupportedExtensionCapabilities.CreateManagement(apiVersion)
             : UnsupportedExtensionCapabilities.CreateManagement(apiVersion);
 
-        _hostInfo = ExtensionAbi.IsApi133Supported(apiVersion)
+        _hostInfo = ExtensionApiCapabilityGate.IsApi133Supported(apiVersion)
             ? capabilities.HostInfo
             : null;
     }

@@ -57,7 +57,7 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             handlerIsOwned);
         var logger = _serviceProvider.GetService<ILoggerFactory>()?.CreateLogger(HostLoggerCategory.Extensions)
             ?? NullLogger.Instance;
-        var management = ExtensionAbi.IsApi13Supported(runtimeManager.ApiVersion)
+        var management = ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), runtimeManager.ApiVersion)
             ? new ExtensionManagementFacade(
                 extensionId,
                 _scopeFactory,

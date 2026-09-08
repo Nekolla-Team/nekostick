@@ -55,7 +55,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                 : _unloadCallback(cancellationToken));
         var capabilities = !ExtensionApiCapabilityGate.IsApi11Supported(hostApiVersion)
             ? UnsupportedExtensionCapabilities.Create(hostApiVersion)
-            : ExtensionAbi.IsApi13Supported(hostApiVersion) &&
+            : ExtensionApiCapabilityGate.IsApi13Supported(hostApiVersion) &&
                 capabilityFactory is IExtensionCapabilityFactoryRouteEvents routeFactory
                     ? routeFactory.CreateWithRouteEvents(manifest.Id, IsHandlerOwned, _routeRegistrations)
                     : capabilityFactory?.Create(manifest.Id, IsHandlerOwned)

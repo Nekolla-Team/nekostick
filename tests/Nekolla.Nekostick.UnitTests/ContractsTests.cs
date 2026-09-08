@@ -199,7 +199,8 @@ public sealed partial class ContractsTests
         Assert.Equal("1.3.3", current.ToString());
         Assert.True(legacyCompatible < current);
         Assert.True(ExtensionAbi.IsCompatible(legacyCompatible, current));
-        Assert.False(ExtensionAbi.IsApi13Supported(legacyCompatible));
+        Assert.False(ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), legacyCompatible));
+        Assert.True(ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), current));
         Assert.True(compatibleFeature.CompareTo(current) > 0);
         Assert.True(compatibleFix.CompareTo(current) > 0);
         Assert.True(incompatible.CompareTo(current) > 0);

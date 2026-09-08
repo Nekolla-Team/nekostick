@@ -7,12 +7,20 @@ internal static class ExtensionApiCapabilityGate
 {
     private static readonly HostApiVersion Api11Version = new(1, 1, 0);
     private static readonly HostApiVersion Api12Version = new(1, 2, 0);
+    private static readonly HostApiVersion Api13Version = new(1, 3, 2);
+    private static readonly HostApiVersion Api133Version = new(1, 3, 3);
 
     internal static bool IsApi11Supported(HostApiVersion host) =>
         host.Major == Api11Version.Major && host >= Api11Version;
 
     internal static bool IsApi12Supported(HostApiVersion host) =>
         host.Major == Api12Version.Major && host >= Api12Version;
+
+    internal static bool IsApi13Supported(HostApiVersion host) =>
+        host.Major == Api13Version.Major && host >= Api13Version;
+
+    internal static bool IsApi133Supported(HostApiVersion host) =>
+        host.Major == Api133Version.Major && host >= Api133Version;
 }
 
 internal enum ExtensionCallbackKind
