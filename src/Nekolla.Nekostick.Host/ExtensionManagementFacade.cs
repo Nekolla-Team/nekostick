@@ -1,5 +1,5 @@
 using System.Collections.Immutable;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Persistence;
@@ -13,6 +13,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly HostRuntimeState _runtimeState;
     private readonly ExtensionRuntimeManager _runtimeManager;
+    private readonly IDbContextFactory<NekostickDbContext>? _dbContextFactory;
     private readonly HostConfigurationPublisher? _publisher;
     private readonly IHostConfigurationSnapshotReader? _snapshotReader;
     private readonly HostServiceLifecycleManager? _lifecycle;
@@ -37,13 +38,14 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _runtimeManager = runtimeManager ?? throw new ArgumentNullException(nameof(runtimeManager));
         ArgumentNullException.ThrowIfNull(serviceProvider);
+        _dbContextFactory = serviceProvider.GetService<IDbContextFactory<NekostickDbContext>>();
         _publisher = serviceProvider.GetService<HostConfigurationPublisher>();
         _snapshotReader = serviceProvider.GetService<IHostConfigurationSnapshotReader>();
         _lifecycle = serviceProvider.GetService<HostServiceLifecycleManager>();
     }
 
     /// <inheritdoc />
-    public HostApiVersion ApiVersion => HostApiVersion.Current;
+    public HostApiVersion ApiVersion => _runtimeManager.ApiVersion;
 
     /// <inheritdoc />
     public async ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>> ListAsync(
@@ -87,7 +89,8 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 running.Contains(record.ExtensionId),
                 scan.Manifests.TryGetValue(record.ExtensionId, out var manifest)
                     ? manifest.Version.ToString()
-                    : null))
+                    : null,
+                record.ContentHash))
             .ToImmutableArray();
         return ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>.Success(entries);
     }
@@ -168,12 +171,44 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             }
         }
 
-        var result = await api.SetExtensionLoadStateAsync(
-                extensionId,
-                record.RecordVersion,
-                ExtensionLoadState.Loaded,
-                cancellationToken)
-            .ConfigureAwait(false);
+        var contentHash = scan.ContentHashes.TryGetValue(extensionId, out var observedHash)
+            ? observedHash
+            : null;
+        ConfigurationWriteResult result;
+        if (_dbContextFactory is null)
+        {
+            result = await api.SetExtensionLoadStateAsync(
+                    extensionId,
+                    record.RecordVersion,
+                    ExtensionLoadState.Loaded,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            try
+            {
+                await using var db = await _dbContextFactory
+                    .CreateDbContextAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var contentPersistence = new EfExtensionRecordContentPersistence(db);
+                result = await contentPersistence.SetLoadStateAndContentHashAsync(
+                        extensionId,
+                        record.RecordVersion,
+                        ExtensionLoadState.Loaded,
+                        contentHash,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                result = FailureWrite(ConfigurationErrorCode.StorageUnavailable);
+            }
+        }
         if (result.IsSuccess)
         {
             await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
@@ -485,6 +520,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             .OrderBy(static id => id, StringComparer.Ordinal)
             .ToArray();
         var versionUpdated = new List<string>();
+        var forceReloadIds = new List<string>();
 
         if (added.Length != 0)
         {
@@ -496,7 +532,8 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     ExtensionLoadState.Disabled,
                     now,
                     now,
-                    recordVersion: 0))
+                    recordVersion: 0,
+                    contentHash: scan.ContentHashes.TryGetValue(id, out var hash) ? hash : null))
                 .ToImmutableArray();
             var persisted = await api.PersistDiscoveredExtensionRecordsAsync(
                     ExtensionLoadState.Disabled,
@@ -511,32 +548,108 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             }
 
         }
-
         foreach (var pair in scan.Manifests.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
         {
-            if (!records.TryGetValue(pair.Key, out var record) ||
-                string.Equals(record.Version, pair.Value.Version.ToString(), StringComparison.Ordinal))
+            if (!records.TryGetValue(pair.Key, out var record))
             {
                 continue;
             }
 
-            var updated = await api.UpdateExtensionInstalledVersionAsync(
-                    pair.Key,
-                    record.RecordVersion,
-                    pair.Value.Version.ToString(),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            var installedVersion = pair.Value.Version.ToString();
+            var versionChanged = !string.Equals(record.Version, installedVersion, StringComparison.Ordinal);
+            var observedHash = scan.ContentHashes.TryGetValue(pair.Key, out var hash) ? hash : null;
+            // A transiently uncomputable digest (file lock or IO blip) must never overwrite the
+            // durable pin or fail the whole refresh: treat the hash as unknown for this pass.
+            var hashObservable = observedHash is not null;
+            var hashChanged = hashObservable &&
+                !string.Equals(record.ContentHash, observedHash, StringComparison.OrdinalIgnoreCase);
+            if (!versionChanged && !hashChanged)
+            {
+                continue;
+            }
+
+            ConfigurationWriteResult updated;
+            if (_dbContextFactory is null)
+            {
+                if (!versionChanged)
+                {
+                    continue;
+                }
+
+                updated = await api.UpdateExtensionInstalledVersionAsync(
+                        pair.Key,
+                        record.RecordVersion,
+                        installedVersion,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else if (versionChanged && !hashObservable)
+            {
+                // Version bumped while the new digest is uncomputable: clear the stale pin
+                // (unknown over stale); the next publish reports the extension ContentHashMissing.
+                updated = await api.UpdateExtensionInstalledVersionAsync(
+                        pair.Key,
+                        record.RecordVersion,
+                        installedVersion,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                try
+                {
+                    await using var db = await _dbContextFactory
+                        .CreateDbContextAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    var contentPersistence = new EfExtensionRecordContentPersistence(db);
+                    updated = versionChanged
+                        ? await contentPersistence.UpdateInstalledVersionAndContentHashAsync(
+                                pair.Key,
+                                record.RecordVersion,
+                                installedVersion,
+                                observedHash!,
+                                cancellationToken)
+                            .ConfigureAwait(false)
+                        : await contentPersistence.SetContentHashAsync(
+                                pair.Key,
+                                record.RecordVersion,
+                                observedHash!,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    updated = FailureWrite(ConfigurationErrorCode.StorageUnavailable);
+                }
+            }
+
             if (!updated.IsSuccess)
             {
                 return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
                     updated.Errors.ToArray());
             }
 
-            versionUpdated.Add(pair.Key);
+            if (versionChanged)
+            {
+                versionUpdated.Add(pair.Key);
+            }
+            else if (record.ContentHash is not null)
+            {
+                // Hash-only drift means the files changed underneath the running instance:
+                // force a reload so this node actually executes the newly pinned content.
+                forceReloadIds.Add(pair.Key);
+            }
         }
 
         // Refresh may bump the caller's own installed version, so it always counts as self-affecting.
-        await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
+        var reloadSet = forceReloadIds.Count == 0
+            ? null
+            : forceReloadIds.ToImmutableHashSet(StringComparer.Ordinal);
+        await CompletePublishTriggerAsync(cancellationToken, reloadSet).ConfigureAwait(false);
 
         var missing = records.Keys
             .Where(id => !scan.Manifests.ContainsKey(id))
@@ -565,18 +678,20 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 dependentManifest.Dependencies.Any(dependency =>
                     string.Equals(dependency.Id, extensionId, StringComparison.Ordinal)));
 
-    private async ValueTask CompletePublishTriggerAsync(CancellationToken cancellationToken)
+    private async ValueTask CompletePublishTriggerAsync(
+        CancellationToken cancellationToken,
+        ImmutableHashSet<string>? forceReloadIds = null)
     {
         // From route/event/scheduler callbacks the awaited publish may need to drain the calling
         // extension itself (its manifest can be drifted even when the write targets another
         // extension), which would deadlock; trigger the publish after the callback returns.
         if (ExtensionCallbackGuard.IsSelfReplacementUnsafe)
         {
-            TriggerPublishDeferred();
+            TriggerPublishDeferred(forceReloadIds);
             return;
         }
 
-        await TriggerPublishAsync(cancellationToken).ConfigureAwait(false);
+        await TriggerPublishAsync(cancellationToken, forceReloadIds).ConfigureAwait(false);
     }
 
     private void TriggerReloadDeferred(string extensionId)
@@ -617,7 +732,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         }
     }
 
-    private void TriggerPublishDeferred()
+    private void TriggerPublishDeferred(ImmutableHashSet<string>? forceReloadIds = null)
     {
         if (_publisher is null || _snapshotReader is null)
         {
@@ -635,7 +750,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 // Yield first so synchronously-completing readers cannot re-enter the publication
                 // pipeline before the calling callback unwinds.
                 await Task.Yield();
-                await TriggerPublishAsync(CancellationToken.None).ConfigureAwait(false);
+                await TriggerPublishAsync(CancellationToken.None, forceReloadIds).ConfigureAwait(false);
             }
             catch
             {
@@ -643,7 +758,9 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         }
     }
 
-    private async ValueTask TriggerPublishAsync(CancellationToken cancellationToken)
+    private async ValueTask TriggerPublishAsync(
+        CancellationToken cancellationToken,
+        ImmutableHashSet<string>? forceReloadIds = null)
     {
         if (_publisher is null || _snapshotReader is null)
         {
@@ -657,7 +774,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             return;
         }
 
-        if (await _publisher.PublishAsync(snapshot, cancellationToken: cancellationToken).ConfigureAwait(false))
+        if (await _publisher.PublishAsync(snapshot, forceReloadIds, cancellationToken).ConfigureAwait(false))
         {
             _runtimeState.MarkSnapshotAccepted();
         }
@@ -670,12 +787,13 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     private ExtensionScanResult ScanExtensions(CancellationToken cancellationToken)
     {
         var manifests = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
+        var contentHashes = new Dictionary<string, string?>(StringComparer.Ordinal);
         var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
         var hasUnreadableDirectories = false;
         var installRoot = _runtimeState.NodeOptions.ExtensionsRootPath;
         if (!Directory.Exists(installRoot))
         {
-            return ExtensionScanResult.Success(manifests, duplicateIds, hasUnreadableDirectories);
+            return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, hasUnreadableDirectories);
         }
 
         string[] directories;
@@ -719,11 +837,15 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             if (!manifests.TryAdd(manifest.Id, manifest))
             {
                 manifests.Remove(manifest.Id);
+                contentHashes.Remove(manifest.Id);
                 duplicateIds.Add(manifest.Id);
+                continue;
             }
-        }
 
-        return ExtensionScanResult.Success(manifests, duplicateIds, hasUnreadableDirectories);
+            contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest);
+        }
+        return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, hasUnreadableDirectories);
+
     }
 
     private static ConfigurationWriteResult ToWriteFailure(
@@ -746,17 +868,20 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         bool Succeeded,
         ConfigurationErrorCode ErrorCode,
         ImmutableDictionary<string, ExtensionManifest> Manifests,
+        ImmutableDictionary<string, string?> ContentHashes,
         ImmutableHashSet<string> DuplicateIds,
         bool HasUnreadableDirectories)
     {
         internal static ExtensionScanResult Success(
             Dictionary<string, ExtensionManifest> manifests,
+            Dictionary<string, string?> contentHashes,
             HashSet<string> duplicateIds,
             bool hasUnreadableDirectories) =>
             new(
                 true,
                 ConfigurationErrorCode.Validation,
                 manifests.ToImmutableDictionary(StringComparer.Ordinal),
+                contentHashes.ToImmutableDictionary(StringComparer.Ordinal),
                 duplicateIds.ToImmutableHashSet(StringComparer.Ordinal),
                 hasUnreadableDirectories);
 
@@ -765,6 +890,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 false,
                 errorCode,
                 ImmutableDictionary<string, ExtensionManifest>.Empty,
+                ImmutableDictionary<string, string?>.Empty,
                 ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal),
                 false);
     }

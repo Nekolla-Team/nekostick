@@ -48,7 +48,8 @@ internal static class EfHostConfigDtoEntityMapper
                     (ContractExtensionLoadState)value.LoadState,
                     value.CreatedAt,
                     value.UpdatedAt,
-                    value.Version))
+                    value.Version,
+                    value.ContentHash))
                 .ToImmutableArray(),
             mappedSettings);
     }

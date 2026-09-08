@@ -11,9 +11,9 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
 | [api-1.0.md](api-1.0.md) | 1.0.0 | 入口点、路由处理器、fallback、注册表、设置读取、后台任务、事件、状态、日志、共享契约 |
 | [api-1.1.md](api-1.1.md) | 1.1.0 | 属主配置 API、属主路由 CRUD、属主服务 CRUD 与生命周期、端点租约、自身生命周期 |
 | [api-1.2.md](api-1.2.md) | 1.2.0 | 全量配置读写（`FullConfiguration`） |
-| [api-1.3.md](api-1.3.md) | 1.3.1 / 1.3.2 patch | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新；1.3.2 追加设置内容变更事件、Host 数据目录、流式请求/响应处理器 |
+| [api-1.3.md](api-1.3.md) | 1.3.1 / 1.3.2 / 1.3.3 patch | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新；1.3.2 追加设置内容变更事件、Host 数据目录、流式请求/响应处理器；1.3.3 追加节点本地 Resume/Restart、HostInfo、Waiting 状态与内容摘要 |
 
-当前 Contracts 包版本为 **1.3.2**（`HostApiVersion.Current`）。
+当前 Contracts 包版本为 **1.3.3**（`HostApiVersion.Current`）。
 
 ## 快速开始
 
@@ -30,7 +30,7 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Nekolla.Nekostick.Contracts" Version="1.3.2" />
+    <PackageReference Include="Nekolla.Nekostick.Contracts" Version="1.3.3" />
   </ItemGroup>
 </Project>
 ```
@@ -117,6 +117,30 @@ Host 启动时扫描 `extensions/`。首次启动（数据库中没有任何扩�
 
 让流量到达 handler：用配置 API 创建一条 `target` 指向该 handler ID 的路由，见 [api-1.1.md](api-1.1.md#属主路由 routes) 的完整示例。
 
+## 内容摘要与多节点部署
+
+扩展的持久化记录保存在共享的 PostgreSQL 中，而 manifest 与程序集文件位于**各节点本地磁盘**。Host 用内容摘要检测节点间文件漂移：
+
+- **摘要内容**：对 manifest 字节与入口程序集字节做 SHA-256（8 字节大端长度前缀拼接），格式为 `sha256:<64 位小写十六进制>`。
+- **漂移检测**：每次发布时，各节点用本地文件重算摘要并与持久化值比较。不一致的扩展在**该节点**被隔离（quarantine，不加载、不路由），节点状态上报 `ContentMismatch`；摘要暂时无法计算（文件被占用等）时仍 fail-closed 隔离，但上报 `ContentHashMissing` 以便区分。持久化摘要缺失（`null`）时宽容跳过比较并上报 `ContentHashMissing`。隔离只影响本节点，不修改全局记录。
+- **何时钉死**：扩展被启用（`EnableAsync`）、bootstrap 首次登记、以及 `RequestRefreshAsync` 观察到版本或内容变化时，Host 把摘要写入持久化记录（`ExtensionManagementEntry.ContentHash`）。例外：版本已变更但新摘要暂时无法计算时，Host 清除旧摘要（记为未知，胜过保留错误的旧值），下次可计算时重新钉死；摘要暂不可算不会导致 refresh 整体失败。
+- **内容变更生效**：仅内容（同版本号）变化被 refresh 钉死新摘要后，该节点会强制重载扩展以运行新代码。
+
+**多节点更新扩展的正确顺序：**
+
+1. 在所有节点部署相同的扩展文件（部署系统负责，Host 不同步文件）。
+2. 任一可写节点调用 `RequestRefreshAsync` 钉死新版本 / 新摘要。
+3. 用 CLI `status` / `doctor` 检查各节点的扩展状态：所有节点应显示 `Loaded` 且无 `ContentMismatch` / `ContentHashMissing`。
+
+**微服务二进制同理自管**：Host 不校验、不同步 service `FileName` 指向的二进制。需要内容一致性的部署方扩展应把预期摘要存进自己的设置文档，在各节点本地校验（不一致时让服务停在 `Waiting`，就绪后用 `Supervisor.ResumeAsync` 恢复，或用 `RestartAsync` 强制重跑），并通过自己的遥测上报结果。
+
+### 设置的语义边界
+
+设置文档是每个扩展**全局单行**的（按扩展 ID 唯一），不是 per-node 通道：
+
+- 写入遵从乐观并发（`expectedVersion` 不匹配返回 `ConcurrencyConflict`），后写覆盖先写（last-writer-wins）；不要用设置做多节点分别上报状态，会互相覆盖。
+- `Configuration.Settings` 是加载时固定的代次快照；`ConfigurationApi.ReadSettingsAsync` 实时读数据库（read-latest），但其他节点的写入要等本节点刷新快照后才体现在快照视图里。
+
 ## 入口点与生命周期
 
 入口类型实现 `IExtensionEntrypoint`（或使用更短的别名 `IExtensionEntry`）：
@@ -188,7 +212,8 @@ var has13 = ExtensionAbi.IsApi13Supported(api); // 是否可用 1.3 能力
 | `Supervisor`（经 `IExtensionHostBridge13`） | 1.3 | 全局服务运行遥测。 |
 | `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3 | 路由观测订阅与动作钩子。 |
 | `LogWriter`（经 `IExtensionHostBridge13`） | 1.3 | 自定义文本日志。 |
-| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
+| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.3） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
+| `HostInfo`（经 `IExtensionHostBridge13`） | 1.3.3 | 本节点宿主状态即时快照（节点 ID、readiness、数据库可用性等，不含机密）。 |
 
 ## 通用约定
 
@@ -238,6 +263,10 @@ ConfigurationWriteResult    // IsSuccess / NewVersion / Errors
 | `StorageUnavailable` | 配置存储暂不可用。 |
 
 DTO 本身的构造参数非法（如相对路径、空 ID、超限文本）仍会抛 `ArgumentException`，这属于调用方编程错误，应尽早发现。
+
+### 配置的读取一致性
+
+所有节点最终读到同一份已发布快照，但传播有延迟：本节点写入后经 `NOTIFY` 立即生效，其他节点在 `NOTIFY` 或轮询兜底（默认 30 秒）后收敛。跨节点的「写后读」不是即时的；需要严格一致的协调（如选举、计数）不要用配置文档实现。
 
 ### 不可变性
 

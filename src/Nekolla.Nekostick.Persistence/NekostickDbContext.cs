@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence.Entities;
+using PersistenceExtensionNodeState = Nekolla.Nekostick.Persistence.Entities.ExtensionNodeState;
 
 namespace Nekolla.Nekostick.Persistence;
 
@@ -31,6 +32,9 @@ public sealed class NekostickDbContext : DbContext
     /// <summary>Gets the extension record set.</summary>
     public DbSet<ExtensionRecord> ExtensionRecords => Set<ExtensionRecord>();
 
+    /// <summary>Gets node-local extension state rows.</summary>
+    public DbSet<PersistenceExtensionNodeState> ExtensionNodeStates => Set<PersistenceExtensionNodeState>();
+
     /// <summary>Gets the extension settings set.</summary>
     public DbSet<ExtensionSetting> ExtensionSettings => Set<ExtensionSetting>();
 
@@ -57,6 +61,7 @@ public sealed class NekostickDbContext : DbContext
         ConfigureRoute(modelBuilder.Entity<Route>());
         ConfigureService(modelBuilder.Entity<Service>());
         ConfigureExtensionRecord(modelBuilder.Entity<ExtensionRecord>());
+        ConfigureExtensionNodeState(modelBuilder.Entity<PersistenceExtensionNodeState>());
         ConfigureExtensionSetting(modelBuilder.Entity<ExtensionSetting>());
         ConfigureServiceRuntime(modelBuilder.Entity<ServiceRuntime>());
         ConfigureNode(modelBuilder.Entity<Node>());
@@ -68,7 +73,7 @@ public sealed class NekostickDbContext : DbContext
     {
         builder.ToTable("service_runtimes", PersistenceDatabaseDefaults.Schema, table =>
         {
-            table.HasCheckConstraint("ck_service_runtimes_state", "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
+            table.HasCheckConstraint("ck_service_runtimes_state", "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed', 'Waiting') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
         });
         builder.HasKey(value => new { value.NodeId, value.ServiceId }).HasName("pk_service_runtimes");
         builder.HasIndex(value => value.ServiceId).HasDatabaseName("ix_service_runtimes_service_id");
@@ -361,10 +366,41 @@ public sealed class NekostickDbContext : DbContext
         builder.Property(value => value.Id).HasColumnName("id").HasColumnType("uuid");
         builder.Property(value => value.ExtensionId).HasColumnName("extension_id").HasMaxLength(128).IsRequired();
         builder.Property(value => value.InstalledVersion).HasColumnName("installed_version").HasMaxLength(128).IsRequired();
-        ConfigureEnum(builder.Property(value => value.LoadState).HasColumnName("load_state"), 32);
+        builder.Property(value => value.ContentHash).HasColumnName("content_hash").HasColumnType("text");
         ConfigureUtcTimestamp(builder.Property(value => value.CreatedAt).HasColumnName("created_at"));
         ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
         ConfigureVersion(builder.Property(value => value.Version));
+    }
+
+    private static void ConfigureExtensionNodeState(EntityTypeBuilder<PersistenceExtensionNodeState> builder)
+    {
+        builder.ToTable("extension_node_states", PersistenceDatabaseDefaults.Schema, table =>
+        {
+            table.HasCheckConstraint(
+                "ck_extension_node_states_state",
+                "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled') AND length(failure_code) BETWEEN 1 AND 64");
+        });
+
+        builder.HasKey(value => new { value.NodeId, value.ExtensionRecordId }).HasName("pk_extension_node_states");
+        builder.HasIndex(value => value.ExtensionRecordId).HasDatabaseName("ix_extension_node_states_extension_record_id");
+        builder.Property(value => value.NodeId).HasColumnName("node_id").HasMaxLength(128).IsRequired();
+        builder.Property(value => value.ExtensionRecordId).HasColumnName("extension_record_id").HasColumnType("uuid").IsRequired();
+        builder.Property(value => value.ObservedContentHash).HasColumnName("observed_content_hash").HasColumnType("text");
+        ConfigureEnum(builder.Property(value => value.LoadState).HasColumnName("load_state"), 32);
+        builder.Property(value => value.FailureCode).HasColumnName("failure_code").HasMaxLength(64).HasDefaultValue("None").IsRequired();
+        ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
+
+        builder.HasOne(value => value.Node)
+            .WithMany(value => value.ExtensionNodeStates)
+            .HasForeignKey(value => value.NodeId)
+            .HasPrincipalKey(value => value.NodeId)
+            .HasConstraintName("fk_extension_node_states_nodes_node_id")
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(value => value.ExtensionRecord)
+            .WithMany(value => value.NodeStates)
+            .HasForeignKey(value => value.ExtensionRecordId)
+            .HasConstraintName("fk_extension_node_states_extension_records_extension_record_id")
+            .OnDelete(DeleteBehavior.Restrict);
     }
 
     private static void ConfigureExtensionSetting(EntityTypeBuilder<ExtensionSetting> builder)

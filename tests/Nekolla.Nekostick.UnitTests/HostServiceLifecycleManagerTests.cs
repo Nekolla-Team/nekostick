@@ -243,7 +243,7 @@ public sealed class HostServiceLifecycleManagerTests
 
 
     [Fact]
-    public async Task FailedRenewalWithdrawsEndpointAndDisablesNewServices()
+    public async Task FailedRenewalKeepsEndpointAndDisablesNewServices()
     {
         var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
         var snapshot = CreateSnapshot(service);
@@ -273,13 +273,13 @@ public sealed class HostServiceLifecycleManagerTests
         leaseStore.FailRenewal = true;
         await manager.RenewLeasesAsync(CancellationToken.None);
 
-        Assert.Empty(publisher.Current);
+        Assert.True(publisher.Current.ContainsKey(service.Id));
         Assert.False(runtime.Status.DatabaseAvailable);
         Assert.False(runtime.NewServicesAllowed);
         var endpoint = await new HostServiceEndpointResolver(publisher).ResolveAsync(
             service.Id,
             TestContext.Current.CancellationToken);
-        Assert.False(endpoint.IsAvailable);
+        Assert.True(endpoint.IsAvailable);
     }
     [Fact]
     public async Task StopAsyncQuiescesBlockedAutomaticStartupBeforeExecutorCleanup()
@@ -543,7 +543,7 @@ public sealed class HostServiceLifecycleManagerTests
         new(
             id,
             enabled,
-            "/bin/service",
+            "/bin/sh",
             ImmutableArray<string>.Empty,
             "/tmp",
             ImmutableDictionary<string, string>.Empty,
@@ -562,7 +562,7 @@ public sealed class HostServiceLifecycleManagerTests
         new(
             id,
             true,
-            "/bin/service",
+            "/bin/sh",
             ImmutableArray<string>.Empty,
             "/tmp",
             environment,

@@ -100,6 +100,36 @@ public static class ServiceStateTransition
             consecutiveHealthFailures: 0);
     }
 
+    /// <summary>Records that the executable is absent and schedules a bounded retry.</summary>
+    /// <param name="current">The current immutable snapshot.</param>
+    /// <param name="retryAt">The next retry instant.</param>
+    /// <param name="now">The UTC transition instant.</param>
+    /// <returns>The next immutable snapshot.</returns>
+    public static ServiceRuntimeSnapshot RecordExecutableMissing(
+        ServiceRuntimeSnapshot current,
+        DateTimeOffset retryAt,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+
+        if (current.Desired != DesiredServiceState.Running)
+        {
+            return current;
+        }
+
+        return NewSnapshot(
+            current,
+            current.Desired,
+            ServiceLifecycleState.Waiting,
+            ServiceHealthState.Unknown,
+            ServiceStateReasonCode.ExecutableMissing,
+            now,
+            new ServiceDeadline(ServiceDeadlineKind.WaitingBackoff, retryAt),
+            observation: null,
+            consecutiveHealthFailures: 0,
+            restartAttempts: RestartAttemptState.Empty);
+    }
+
     /// <summary>Records cancellation of a start operation without mutating the prior snapshot.</summary>
     /// <param name="current">The current immutable snapshot.</param>
     /// <param name="now">The UTC transition instant.</param>
@@ -188,7 +218,10 @@ public static class ServiceStateTransition
                 now,
                 deadline: null,
                 observation: observation,
-                consecutiveHealthFailures: 0);
+                consecutiveHealthFailures: 0,
+                restartAttempts: current.Desired == DesiredServiceState.Running
+                    ? RestartAttemptState.Empty
+                    : current.RestartAttempts);
         }
 
         var failures = checked(current.ConsecutiveHealthFailures + 1);
@@ -308,6 +341,12 @@ public static class ServiceStateTransition
         {
             return current;
         }
+        if (current.ObservedLifecycle == ServiceLifecycleState.Waiting &&
+            deadline.Kind == ServiceDeadlineKind.WaitingBackoff)
+        {
+            return current;
+        }
+
 
         return NewSnapshot(
             current,

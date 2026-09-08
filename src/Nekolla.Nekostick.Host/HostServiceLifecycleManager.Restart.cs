@@ -13,6 +13,180 @@ namespace Nekolla.Nekostick.Host;
 
 public sealed partial class HostServiceLifecycleManager
 {
+    /// <inheritdoc />
+    public async ValueTask<ConfigurationWriteResult> ResumeAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (IsStopping)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        var snapshot = _snapshotHolder.Current;
+        if (snapshot is null)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                _slots.ContainsKey(serviceId)
+                    ? ConfigurationErrorCode.StorageUnavailable
+                    : ConfigurationErrorCode.NotFound));
+        }
+
+        var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
+        if (service is null)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+        }
+
+        if (!_runtimeState.NewServicesAllowed)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        if (!_slots.TryGetValue(serviceId, out var slot))
+        {
+            return ConfigurationWriteResult.NoOp();
+        }
+
+        Task<HostServiceReadinessResult> retryTask;
+        lock (_lifecycleGate)
+        {
+            lock (slot.Gate)
+            {
+                if (slot.Active is not { } generation ||
+                    generation.Configuration.Version != service.Version ||
+                    generation.Supervisor.Snapshot.ObservedLifecycle != ServiceLifecycleState.Waiting)
+                {
+                    return ConfigurationWriteResult.NoOp();
+                }
+
+                if (slot.Startup is { } existing)
+                {
+                    retryTask = existing;
+                }
+                else
+                {
+                    slot.StartupGeneration = service.Version;
+                    retryTask = RetryWaitingGenerationAsync(slot, generation, snapshot, cancellationToken);
+                    slot.Startup = retryTask;
+                }
+            }
+        }
+
+        try
+        {
+            var result = await retryTask.ConfigureAwait(false);
+            return result.Status switch
+            {
+                HostServiceReadinessStatus.Ready => ConfigurationWriteResult.Success(),
+                HostServiceReadinessStatus.DatabaseUnavailable => ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)),
+                HostServiceReadinessStatus.Disabled => ConfigurationWriteResult.NoOp(),
+                HostServiceReadinessStatus.Cancelled => ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)),
+                // The retry finished without the service becoming ready: the prerequisite is
+                // still missing, so no resume actually happened.
+                _ => ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation)),
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+        }
+        finally
+        {
+            lock (slot.Gate)
+            {
+                if (ReferenceEquals(slot.Startup, retryTask))
+                {
+                    slot.Startup = null;
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<ConfigurationWriteResult> RestartAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (IsStopping)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        var snapshot = _snapshotHolder.Current;
+        if (snapshot is null)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                _slots.ContainsKey(serviceId)
+                    ? ConfigurationErrorCode.StorageUnavailable
+                    : ConfigurationErrorCode.NotFound));
+        }
+
+        var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
+        if (service is null)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+        }
+
+        if (!service.Enabled || !IsServiceEnabledForSnapshot(snapshot, serviceId))
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+        }
+
+        if (!_runtimeState.NewServicesAllowed)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        Task<HostServiceReadinessResult>? existingStartup = null;
+        if (_slots.TryGetValue(serviceId, out var slot))
+        {
+            lock (slot.Gate)
+            {
+                existingStartup = slot.Startup;
+            }
+        }
+
+        if (existingStartup is not null)
+        {
+            try
+            {
+                await existingStartup.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+        }
+
+        await WithdrawAsync(serviceId, CancellationToken.None).ConfigureAwait(false);
+        if (IsStopping)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        var readiness = await EnsureReadyAsync(snapshot, serviceId, cancellationToken).ConfigureAwait(false);
+        if (readiness.Status == HostServiceReadinessStatus.Cancelled && cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+        }
+
+        return ConfigurationWriteResult.Success();
+    }
+
     private async Task HandleTerminalHealthAsync(ServiceSlot slot, ServiceGeneration generation)
     {
         if (IsStopping)

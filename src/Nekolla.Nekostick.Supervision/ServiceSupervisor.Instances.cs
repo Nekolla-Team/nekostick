@@ -230,14 +230,27 @@ public sealed partial class ServiceSupervisor
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var current = Snapshot;
-        var next = Exchange(ServiceStateTransition.RecordProcessExit(current, successfulExit, now));
-        var policy = next.Desired == DesiredServiceState.Running
-            ? restartPolicy
-            : ServiceRestartPolicy.Never;
-        var plan = RestartPlanner.Plan(policy, successfulExit, next.RestartAttempts, now, restartBackoff, restartJitter, cancellationToken);
-        var planned = Exchange(ServiceStateTransition.RecordRestartPlan(next, plan, now));
-        return Result(plan.ShouldRestart ? SupervisorOperationStatus.Applied : SupervisorOperationStatus.Rejected, plan.Reason, planned, Lease, plan);
+        // Synchronous gate acquisition: the critical section below awaits nothing, and no
+        // lifecycleGate holder calls back into this method, so the brief blocking wait cannot
+        // deadlock. Gating keeps the epoch increment and snapshot exchange atomic against
+        // ApplyHealthObservationAsync's check-then-commit.
+        lifecycleGate.Wait(CancellationToken.None);
+        try
+        {
+            Interlocked.Increment(ref lifecycleEpoch);
+            var current = Snapshot;
+            var next = Exchange(ServiceStateTransition.RecordProcessExit(current, successfulExit, now));
+            var policy = next.Desired == DesiredServiceState.Running
+                ? restartPolicy
+                : ServiceRestartPolicy.Never;
+            var plan = RestartPlanner.Plan(policy, successfulExit, next.RestartAttempts, now, restartBackoff, restartJitter, cancellationToken);
+            var planned = Exchange(ServiceStateTransition.RecordRestartPlan(next, plan, now));
+            return Result(plan.ShouldRestart ? SupervisorOperationStatus.Applied : SupervisorOperationStatus.Rejected, plan.Reason, planned, Lease, plan);
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
     }
 
     private async ValueTask ReleaseLeaseBestEffort(CancellationToken cancellationToken)
@@ -272,8 +285,10 @@ public sealed partial class ServiceSupervisor
         ServiceRuntimeSnapshot current,
         PortLease? currentLease = null,
         RestartPlan? restart = null,
-        HealthRetryDecision? health = null) =>
-        new(status, reason, current, currentLease, restart, health);
+        HealthRetryDecision? health = null,
+        string? failureMessage = null,
+        bool leaseOwnershipLost = false) =>
+        new(status, reason, current, currentLease, restart, health, failureMessage, leaseOwnershipLost);
 
     /// <summary>Releases the supervisor lifecycle gate.</summary>
     public async ValueTask DisposeAsync()

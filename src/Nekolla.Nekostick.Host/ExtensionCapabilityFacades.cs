@@ -46,15 +46,18 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             throw new ArgumentException("An extension identifier is required.", nameof(extensionId));
         }
 
+        var runtimeManager = _serviceProvider.GetService<ExtensionRuntimeManager>()
+            ?? throw new InvalidOperationException("The extension runtime manager is unavailable.");
+        var lifecycle = _serviceProvider.GetService<IHostServiceLifecycleCoordinator>();
         var configuration = new ExtensionConfigurationFacade(
             extensionId,
             _scopeFactory,
             _runtimeState,
+            runtimeManager.ApiVersion,
             handlerIsOwned);
         var logger = _serviceProvider.GetService<ILoggerFactory>()?.CreateLogger(HostLoggerCategory.Extensions)
             ?? NullLogger.Instance;
-        var runtimeManager = _serviceProvider.GetService<ExtensionRuntimeManager>();
-        var management = ExtensionAbi.IsApi13Supported(HostApiVersion.Current) && runtimeManager is not null
+        var management = ExtensionAbi.IsApi13Supported(runtimeManager.ApiVersion)
             ? new ExtensionManagementFacade(
                 extensionId,
                 _scopeFactory,
@@ -70,17 +73,48 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 configuration,
                 _scopeFactory,
                 _runtimeState,
-                _serviceProvider.GetService<IHostServiceLifecycleCoordinator>()),
+                lifecycle),
             new ExtensionEndpointFacade(
                 extensionId,
                 _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
             new ExtensionFullConfigurationFacade(_scopeFactory, _runtimeState),
             new ExtensionSupervisorFacade(
+                extensionId,
+                _runtimeState,
+                lifecycle,
                 _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>(),
                 _serviceProvider.GetService<IMicroserviceForwardingTelemetry>()),
             routeEvents,
             new ExtensionLogWriter(extensionId, logger),
-            management);
+            management,
+            BuildHostInfoSnapshot);
+    }
+    private ExtensionHostInfoSnapshot BuildHostInfoSnapshot()
+    {
+        var status = _runtimeState.Status;
+        var snapshot = _runtimeState.CurrentSnapshot;
+        var observation = _runtimeState.ReadLastSnapshotObservation();
+        var runtimeOptions = _serviceProvider.GetService<HostRuntimeOptions>();
+        var readiness = status.Readiness switch
+        {
+            HostReadinessState.Ready => ExtensionHostReadinessState.Ready,
+            HostReadinessState.Degraded => ExtensionHostReadinessState.Degraded,
+            HostReadinessState.Unready => ExtensionHostReadinessState.Unready,
+            _ => ExtensionHostReadinessState.Unknown
+        };
+
+        return new ExtensionHostInfoSnapshot(
+            runtimeOptions?.NodeId,
+            _runtimeState.NodeOptions.ReadOnly,
+            _runtimeState.NodeOptions.SkipExtensions,
+            _runtimeState.NodeOptions.DisableSupervisor,
+            status.DatabaseAvailable,
+            status.SnapshotAvailable,
+            status.ConfigurationValid,
+            snapshot?.Version,
+            observation.State,
+            observation.At,
+            readiness);
     }
 }
 
@@ -181,21 +215,24 @@ internal sealed class ExtensionConfigurationFacade : IExtensionConfigurationApi
     private readonly string _extensionId;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly HostRuntimeState _runtimeState;
+    private readonly HostApiVersion _hostApiVersion;
     private readonly Func<string, bool> _handlerIsOwned;
 
     internal ExtensionConfigurationFacade(
         string extensionId,
         IServiceScopeFactory scopeFactory,
         HostRuntimeState runtimeState,
+        HostApiVersion hostApiVersion,
         Func<string, bool> handlerIsOwned)
     {
         _extensionId = extensionId;
         _scopeFactory = scopeFactory;
         _runtimeState = runtimeState;
+        _hostApiVersion = hostApiVersion;
         _handlerIsOwned = handlerIsOwned;
     }
 
-    public HostApiVersion ApiVersion => HostApiVersion.Current;
+    public HostApiVersion ApiVersion => _hostApiVersion;
 
     public ValueTask<ConfigurationReadResult<ExtensionConfigurationSnapshot>> ReadAsync(
         CancellationToken cancellationToken = default) =>

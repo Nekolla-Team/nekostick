@@ -3,13 +3,16 @@ namespace Nekolla.Nekostick.Persistence;
 /// <summary>Defines the authored PostgreSQL schema objects and their catalog contracts.</summary>
 internal static class PostgresMigrationSchemaMetadata
 {
+
     internal static readonly string[] RequiredRelations =
     [
         "configuration_revisions",
         "routes",
         "services",
         "global_settings",
+        "service_runtimes",
         "extension_records",
+        "extension_node_states",
         "extension_settings",
         "nodes",
         "port_leases",
@@ -21,7 +24,9 @@ internal static class PostgresMigrationSchemaMetadata
         new("configuration_revisions", 7),
         new("global_settings", 27),
         new("services", 15),
-        new("extension_records", 7),
+        new("service_runtimes", 8),
+        new("extension_records", 8),
+        new("extension_node_states", 6),
         new("nodes", 9),
         new("routes", 36),
         new("extension_settings", 7),
@@ -83,6 +88,15 @@ internal static class PostgresMigrationSchemaMetadata
         new("services", "version", "bigint", false),
 
         new("services", "owner_extension_id", "character varying(128)", true),
+        new("service_runtimes", "service_id", "uuid", false),
+        new("service_runtimes", "node_id", "character varying(128)", false),
+        new("service_runtimes", "lifecycle", "character varying(16)", false),
+        new("service_runtimes", "health", "character varying(16)", false),
+        new("service_runtimes", "restart_count", "integer", false),
+        new("service_runtimes", "created_at", "timestamp with time zone", false),
+        new("service_runtimes", "updated_at", "timestamp with time zone", false),
+        new("service_runtimes", "version", "bigint", false),
+
 
         new("extension_records", "id", "uuid", false),
         new("extension_records", "extension_id", "character varying(128)", false),
@@ -91,6 +105,14 @@ internal static class PostgresMigrationSchemaMetadata
         new("extension_records", "created_at", "timestamp with time zone", false),
         new("extension_records", "updated_at", "timestamp with time zone", false),
         new("extension_records", "version", "bigint", false),
+        new("extension_records", "content_hash", "text", true),
+
+        new("extension_node_states", "node_id", "character varying(128)", false),
+        new("extension_node_states", "extension_record_id", "uuid", false),
+        new("extension_node_states", "observed_content_hash", "text", true),
+        new("extension_node_states", "load_state", "character varying(32)", false),
+        new("extension_node_states", "failure_code", "character varying(64)", false),
+        new("extension_node_states", "updated_at", "timestamp with time zone", false),
 
         new("nodes", "id", "uuid", false),
         new("nodes", "node_id", "character varying(128)", false),
@@ -169,7 +191,13 @@ internal static class PostgresMigrationSchemaMetadata
         new("configuration_revisions", "pk_configuration_revisions", "p", "id", "", ""),
         new("global_settings", "pk_global_settings", "p", "id", "", ""),
         new("services", "pk_services", "p", "id", "", ""),
+        new("service_runtimes", "pk_service_runtimes", "p", "node_id,service_id", "", ""),
+        new("service_runtimes", "fk_service_runtimes_services_service_id", "f", "service_id", "services", "id"),
         new("extension_records", "pk_extension_records", "p", "id", "", ""),
+        new("extension_node_states", "pk_extension_node_states", "p", "node_id,extension_record_id", "", ""),
+        new("extension_node_states", "fk_extension_node_states_nodes_node_id", "f", "node_id", "nodes", "node_id"),
+        new("extension_node_states", "fk_extension_node_states_extension_records_extension_record_id", "f", "extension_record_id", "extension_records", "id"),
+
         new("nodes", "pk_nodes", "p", "id", "", ""),
         new("nodes", "ak_nodes_node_id", "u", "node_id", "", ""),
         new("routes", "pk_routes", "p", "id", "", ""),
@@ -198,11 +226,14 @@ internal static class PostgresMigrationSchemaMetadata
         new("services", "ck_services_id_uuid_v7"),
         new("services", "ck_services_paths"),
         new("services", "ck_services_process_json"),
+        new("service_runtimes", "ck_service_runtimes_state"),
         new("services", "ck_services_enum_values"),
         new("services", "ck_services_health"),
         new("extension_records", "ck_extension_records_id_uuid_v7"),
         new("extension_records", "ck_extension_records_text"),
         new("extension_records", "ck_extension_records_load_state"),
+        new("extension_node_states", "ck_extension_node_states_state"),
+
         new("nodes", "ck_nodes_id_uuid_v7"),
         new("nodes", "ck_nodes_node_id"),
         new("nodes", "ck_nodes_versions"),
@@ -228,7 +259,9 @@ internal static class PostgresMigrationSchemaMetadata
         new("configuration_revisions", 2),
         new("global_settings", 10),
         new("services", 5),
+        new("service_runtimes", 1),
         new("extension_records", 3),
+        new("extension_node_states", 1),
         new("nodes", 3),
         new("routes", 10),
         new("extension_settings", 3),
@@ -244,7 +277,9 @@ internal static class PostgresMigrationSchemaMetadata
         new("routes", "ix_routes_owner_extension_id", false, "owner_extension_id", 1, false, ""),
         new("services", "ix_services_enabled", false, "enabled", 1, false, ""),
         new("services", "ix_services_owner_extension_id", false, "owner_extension_id", 1, false, ""),
+        new("service_runtimes", "ix_service_runtimes_service_id", false, "service_id", 1, false, ""),
         new("extension_records", "ux_extension_records_extension_id", true, "extension_id", 1, false, ""),
+        new("extension_node_states", "ix_extension_node_states_extension_record_id", false, "extension_record_id", 1, false, ""),
         new("extension_settings", "ux_extension_settings_extension_record_id", true, "extension_record_id", 1, false, ""),
         new("nodes", "ux_nodes_default_node_id_active", true, "node_id", 1, true, "%node_id%0%is_active%"),
         new("port_leases", "ux_port_leases_node_id_port", true, "node_id,port", 2, false, ""),

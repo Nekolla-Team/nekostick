@@ -22,6 +22,26 @@ public sealed class NoRestartJitter : IRestartJitter
     public TimeSpan GetJitter(TimeSpan maximumJitter, int attempt) => TimeSpan.Zero;
 }
 
+/// <summary>Provides bounded pseudo-random jitter for production retry schedules.</summary>
+public sealed class RandomRestartJitter : IRestartJitter
+{
+    /// <summary>Returns a non-negative pseudo-random duration within the supplied bound.</summary>
+    /// <param name="maximumJitter">The permitted jitter bound.</param>
+    /// <param name="attempt">The one-based retry attempt.</param>
+    /// <returns>A bounded jitter duration.</returns>
+    public TimeSpan GetJitter(TimeSpan maximumJitter, int attempt)
+    {
+        _ = attempt;
+        if (maximumJitter <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var ticks = (long)(maximumJitter.Ticks * Random.Shared.NextDouble());
+        return TimeSpan.FromTicks(Math.Clamp(ticks, 0, maximumJitter.Ticks));
+    }
+}
+
 /// <summary>Defines an immutable exponential restart backoff.</summary>
 public sealed record RestartBackoffPolicy
 {

@@ -173,7 +173,7 @@ public sealed class HostConfigurationSnapshotTests
 
         Assert.True(holder.TryStage(candidate));
 
-        Assert.True(holder.HasSnapshot);
+        Assert.False(holder.HasSnapshot);
         Assert.Null(holder.Current);
         Assert.Null(holder.RoutingSnapshot);
     }
@@ -189,10 +189,10 @@ public sealed class HostConfigurationSnapshotTests
         Assert.True(holder.TryStage(staged));
         Assert.False(holder.TryStage(older));
         Assert.True(holder.TryStage(newer));
-        Assert.True(holder.HasSnapshot);
+        Assert.False(holder.HasSnapshot);
 
         holder.ClearStaged(staged);
-        Assert.True(holder.HasSnapshot);
+        Assert.False(holder.HasSnapshot);
         Assert.False(holder.TryStage(older));
 
         holder.ClearStaged(newer);

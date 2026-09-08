@@ -9,8 +9,11 @@ public static class ExtensionAbi
     /// <summary>Gets the minimum host API version that exposes the API 1.3 sibling bridge.</summary>
     public static HostApiVersion Api13Version { get; } = new(1, 3, 2);
 
+    /// <summary>Gets the minimum host API version that exposes the API 1.3.3 sibling bridge additions.</summary>
+    public static HostApiVersion Api133Version { get; } = new(1, 3, 3);
+
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
-    public static HostApiVersion Version { get; } = Api13Version;
+    public static HostApiVersion Version { get; } = Api133Version;
 
     /// <summary>Determines whether a host API version can satisfy an extension ABI requirement.</summary>
     /// <param name="required">The required version.</param>
@@ -23,6 +26,11 @@ public static class ExtensionAbi
     /// <param name="host">The negotiated host API version.</param>
     /// <returns><see langword="true" /> only for a compatible API 1.3-or-later host in major generation 1.</returns>
     public static bool IsApi13Supported(HostApiVersion host) => IsCompatible(Api13Version, host);
+
+    /// <summary>Determines whether the negotiated host exposes API 1.3.3 sibling capabilities.</summary>
+    /// <param name="host">The negotiated host API version.</param>
+    /// <returns><see langword="true" /> only for a compatible API 1.3.3-or-later host in major generation 1.</returns>
+    public static bool IsApi133Supported(HostApiVersion host) => IsCompatible(Api133Version, host);
 }
 
 

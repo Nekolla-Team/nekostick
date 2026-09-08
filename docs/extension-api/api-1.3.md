@@ -1,6 +1,6 @@
 # API 1.3：遥测、路由观测、自定义日志、扩展管理与流式处理
 
-本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.2**；`HostApiVersion.Current`、`ExtensionAbi.Version` 与 `ExtensionAbi.Api13Version` 均为 `1.3.2`。`1.3.2` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.2 Host 满足）。
+本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.3**；`HostApiVersion.Current`、`ExtensionAbi.Version` 均为 `1.3.3`，`ExtensionAbi.Api13Version` 为 `1.3.2`、`ExtensionAbi.Api133Version` 为 `1.3.3`。`1.3.2` / `1.3.3` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.3 Host 满足）。
 
 API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加七组能力：
 
@@ -11,6 +11,8 @@ API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加七组能力：
 - `DataDirectory`：Host 配置的数据目录路径。
 - 流式请求/响应处理器 `IExtensionStreamingHandler`。
 - 设置内容变更事件 `ExtensionCoreEventKind.ExtensionSettingsChanged`。
+
+`1.3.3` 在同一旁路桥上追加三项能力：`Supervisor` 的节点本地 `ResumeAsync` / `RestartAsync`、桥属性 `HostInfo`（宿主节点状态快照）、服务生命周期新状态 `Waiting`；`ExtensionManagementEntry` 追加 `ContentHash` 内容摘要字段。这些成员由 `ExtensionAbi.IsApi133Supported` 单独门控。
 
 ## 能力探测（必读）
 
@@ -39,6 +41,17 @@ var management = bridge13.Management;
 - `Supervisor.ReadAsync` / `ReadForExtensionAsync` / `GetAsync` 返回 `ConfigurationErrorCode.Unsupported`；
 - `RouteEvents.TrySubscribe` / `TryRegisterHook` 返回 `false`；
 - `LogWriter.WriteText` 静默丢弃文本。
+
+`1.3.3` 追加的能力需要额外的版本检查（桥类型在 1.3.2 就存在，但新成员在旧 Host 上不可用）：
+
+```csharp
+if (ExtensionAbi.IsApi133Supported(bridge13.ApiVersion))
+{
+    // ResumeAsync / RestartAsync 可用; HostInfo 返回真实快照
+}
+```
+
+版本不足时 `HostInfo` 返回 `ExtensionHostInfoSnapshot.Unavailable`（所有字段为未知/空，不抛异常）；`ResumeAsync` / `RestartAsync` 所在的 `Supervisor` 能力与既有成员同一规则：桥存在但版本不足时整个能力为 unsupported stub。
 
 ## 结果与失败代码
 
@@ -96,7 +109,7 @@ foreach (var service in read.Value!)
 | `ProcessId` | `int?` | 当前操作系统进程号；未知时为 `null`。 |
 | `StartedAt` | `DateTimeOffset?` | 当前进程代次的启动时间（UTC）。 |
 | `Uptime` | `TimeSpan?` | 当前进程代次的运行时长。 |
-| `LifecycleState` | 枚举 | `Unknown` / `Disabled` / `Starting` / `Running` / `Stopping` / `Failed`。 |
+| `LifecycleState` | 枚举 | `Unknown` / `Disabled` / `Starting` / `Running` / `Stopping` / `Failed` / `Waiting`（1.3.3 追加，见下文「节点本地服务恢复与重启」）。 |
 | `HealthState` | 枚举 | `Unknown` / `Healthy` / `Unhealthy`。 |
 | `ForwardedRequestCount` | `long` | 累计转发请求数。 |
 | `ActiveForwardedRequestCount` | `long` | 正在转发的请求数。 |
@@ -106,6 +119,75 @@ foreach (var service in read.Value!)
 
 这是只读遥测，不授予启动、停止或修改服务的权限。
 
+## 节点本地服务恢复与重启（1.3.3）
+
+`IExtensionSupervisorApi` 在 1.3.3 追加两个**只影响本节点、绝不写全局配置**的生命周期操作。这是管理面操作：扩展是受信运营方，**不做属主过滤**——包括 Host 自有服务（无扩展属主）在内的任何已存在服务都可操作（Host 自有服务没有其他管理入口）；只有未知服务 ID 返回 `NotFound`：
+
+```csharp
+ValueTask<ConfigurationWriteResult> ResumeAsync(Guid serviceId, CancellationToken cancellationToken = default);
+ValueTask<ConfigurationWriteResult> RestartAsync(Guid serviceId, CancellationToken cancellationToken = default);
+```
+
+### `Waiting` 状态与 `ResumeAsync`
+
+服务启动缺少本节点前置条件（典型场景：部署方扩展尚未把微服务二进制同步到本节点）时，Host 不再反复硬失败，而是把服务置于 `Waiting` 状态并以退避自动重试；`ExtensionServiceRuntimeSnapshot.LifecycleState` 出现 `Waiting` 即表示这种「等待内容」状态。`ResumeAsync` 用于在条件就绪后主动催一次：
+
+- 服务处于 `Waiting`：恢复本节点启动流程；**确实离开 Waiting** 才返回 `Success()`，尝试结束但前置条件仍缺失时返回 `Validation` 失败（不假报成功）。
+- 服务已在运行或处于其他已知状态：忽略请求，返回 `NoOp()`。
+- 未知 ID：`NotFound`。
+
+### `RestartAsync`（严格重启）
+
+`RestartAsync` 在本节点**严格先停后起**：
+
+- 除「管理性禁用」外的任何状态都执行停-起；成功结果**永不**返回 `NoOp()`。
+- 管理性禁用的服务必须拒绝（`Validation`），不会被启动。
+- 未知 ID：`NotFound`。
+- 即使本节点当前没有该服务的运行槽位，只要它处于启用状态，严格重启也会把它拉起来。
+
+### 与 1.1 `Services.RestartAsync` 的区别（重要）
+
+两个同名操作的语义不同，按场景选择：
+
+| | `Services.RestartAsync`（1.1） | `Supervisor.RestartAsync`（1.3.3） |
+| --- | --- | --- |
+| 定位 | 属主服务的常规生命周期请求 | 节点本地的严格恢复手段 |
+| 结果类型 | `ExtensionServiceOperationResult`（`Accepted` 等异步受理码） | `ConfigurationWriteResult`（`Success` / `NoOp` / 错误码） |
+| 语义 | 请求式：受理后异步停起，可能与当前状态冲突（`Conflict`） | 严格式：除禁用外任何状态都执行停-起，成功即真实发生 |
+| 典型用途 | 日常重启自己部署的后端 | 内容同步完成后强制本节点重跑微服务 |
+
+二者都不写全局配置版本；1.1 `Services` 是属主作用域（只能操作自己的服务），`Supervisor` 是管理面（无属主过滤，可操作任意已存在服务）。
+
+> 注意：1.1 `Services` 的 `StopAsync` / `RestartAsync` 在当前 Host 实现中**尚返回 `Unsupported`**（只有 `StartAsync` 与 CRUD 生效）。需要停止服务时请移除或禁用对应配置（`RemoveAsync` / 禁用属主扩展会停止其服务进程）；需要严格重启时用本节的 `Supervisor.RestartAsync`。
+
+## Host 信息面（HostInfo，1.3.3）
+
+`IExtensionHostBridge13.HostInfo` 返回当前 Host 节点状态的即时快照 `ExtensionHostInfoSnapshot`。每次读取都现算（不是缓存对象），适合巡检与决策：
+
+```csharp
+var info = bridge13.HostInfo;
+if (info.Readiness != ExtensionHostReadinessState.Ready)
+{
+    // 例如：数据库暂不可用或快照尚未发布时跳过依赖配置的主动作
+}
+```
+
+| 属性 | 类型 | 说明 |
+| --- | --- | --- |
+| `NodeId` | `string?` | 稳定节点标识；不可用时为 `null`。 |
+| `ReadOnly` | `bool` | 本进程是否禁用配置写入。 |
+| `ExtensionsSkipped` | `bool` | 本进程是否禁用扩展加载。 |
+| `SupervisorDisabled` | `bool` | 本进程是否禁用进程监督。 |
+| `DatabaseAvailable` | `bool` | 最近一次运行时操作中数据库是否可达。 |
+| `SnapshotAvailable` | `bool` | 当前是否已发布完整配置快照。 |
+| `ConfigurationValid` | `bool` | 当前已发布快照是否有效。 |
+| `PublishedConfigurationVersion` | `long?` | 当前已发布的配置版本；未知为 `null`。 |
+| `LastSnapshotState` | 枚举 | 最近一次快照接受 / 拒绝状态。 |
+| `LastSnapshotStateAt` | `DateTimeOffset?` | 最近一次快照状态迁移时间（UTC）。 |
+| `Readiness` | 枚举 | `Unknown` / `Unready` / `Ready` / `Degraded`。 |
+
+协商版本低于 1.3.3 时返回 `ExtensionHostInfoSnapshot.Unavailable`（所有字段未知/空）。快照绝不包含连接串、机密、环境变量值、进程句柄等宿主实现细节；扩展不应依赖它做安全判定，只用作可观测性与降级提示。
+
 ## 扩展管理（Management）
 
 `IExtensionHostBridge13.Management` 暴露 `IExtensionManagementApi`。它是 1.3 桥上的高权限、身份绑定能力：调用方可以按稳定 ID 管理任意扩展记录，而不是只管理自己的记录。它不依赖 manifest capability flag；是否能访问由 Host API 版本门控。所有返回值仍使用安全结果类型：
@@ -114,6 +196,7 @@ foreach (var service in read.Value!)
 IExtensionManagementApi management = bridge13.Management;
 var records = await management.ListAsync(cancellationToken);
 ```
+
 `IExtensionManagementApi.ApiVersion` 返回当前协商的 `HostApiVersion`；它用于记录能力版本，不会改变七个操作的结果类型或错误码。
 
 ### 管理记录 DTO
@@ -129,6 +212,7 @@ var records = await management.ListAsync(cancellationToken);
 | `RecordVersion` | 记录的乐观并发版本。 |
 | `IsRunning` | 当前运行时是否有该扩展的 Loaded 代次；它不是持久化启用意图。 |
 | `ManifestVersion` | 最近一次目录扫描观察到的 manifest 版本；manifest 缺失时为 `null`。 |
+| `ContentHash` | 扩展目录内容的 SHA-256 摘要（`sha256:<64 位小写十六进制>`），未记录时为 `null`。用于多节点内容一致性检测，见 [README](README.md#内容摘要与多节点部署)。 |
 
 `RequestRefreshAsync` 返回 `ExtensionRefreshSummary`：
 
@@ -222,7 +306,7 @@ ValueTask<ConfigurationReadResult<ExtensionRefreshSummary>> RequestRefreshAsync(
 2. 已有记录的 manifest 版本改变时更新 `installed_version`，并计入 `VersionUpdated`。
 3. 记录仍在数据库但本次扫描没有 manifest 时计入 `Missing`；这只是报告，不删除记录。
 
-refresh 完成后触发 publish pipeline。已是 `Loaded` 的扩展在版本更新后的下一次 publish 中因 descriptor 身份变化而自动加载新 generation；同版本文件替换不会由 refresh 自动猜测为 reload，必须显式调用 `ReloadAsync`。
+refresh 完成后触发 publish pipeline。已是 `Loaded` 的扩展在版本更新后的下一次 publish 中因 descriptor 身份变化而自动加载新 generation；版本不变但内容摘要漂移时，refresh 钉死新摘要并**强制本节点重载**该扩展以运行新代码（1.3.3 起）；两者之外的场景仍可用 `ReloadAsync` 显式重载。
 
 重复 manifest ID 返回 `Validation`；目录根或持久化不可用返回 `StorageUnavailable`；乐观并发竞争返回 `ConcurrencyConflict`；read-only / 版本不足 / 生命周期回调重入返回 `Unsupported`。refresh 的 durable writes 成功后返回 summary；即时 publish 触发是 best-effort，不会把发布失败映射为 `StorageUnavailable`，PG revision `NOTIFY` 的 refresh 会继续收敛。初次启动的“零记录例外”见下文；它是启动 bootstrap 规则，不改变 refresh 新增记录的默认 `Disabled` 状态。
 对于 `EnableAsync`、`DisableAsync`、`DeleteRecordAsync` 和 `RequestRefreshAsync`，数据库 durable write 与运行时 publish 是两个阶段：写入提交后会触发即时 publish，但即时失败由 revision `NOTIFY` refresh 重试并最终收敛，业务写结果不会伪报为发布失败。
@@ -233,7 +317,7 @@ refresh 完成后触发 publish pipeline。已是 `Loaded` 的扩展在版本更
 - **扫描新增默认 Disabled。** 在已有任意持久化记录后，扫描到的新扩展先以 `Disabled` 注册，不会因为文件刚出现就加载。
 - **首次启动例外。** 如果启动时数据库中完全没有扩展记录，bootstrap 扫描到的所有扩展仍按既有 out-of-box 行为加载；首次写入后的后续扫描都遵循新增即 `Disabled`。
 - **启用 / 禁用是持久状态。** `EnableAsync` / `DisableAsync` 写入记录状态，并通过 write → publish pipeline 应用，而不是只改变当前进程；下一次启动会按持久状态决定是否加载。
-- **版本变更与热替换不同。** refresh 更新 manifest 版本后，`Loaded` 记录会在下一次 publish 自动替换 generation；manifest 版本不变时不会自动热替换，必须显式 `ReloadAsync`。
+- **版本变更与热替换不同。** refresh 更新 manifest 版本后，`Loaded` 记录会在下一次 publish 自动替换 generation；版本不变但内容摘要变化的，1.3.3 起 refresh 钉死新摘要后强制重载本节点；其余需要重载的场景（如依赖的外部状态变化）仍须显式 `ReloadAsync`。
 - **Disabled 的运行时效果。** Disabled 扩展不进入可加载 desired set；其 handler route 配置可保留但请求 fail closed，拥有的服务进程停止，配置行不因此删除。
 
 ## 路由观测订阅（RouteEvents.TrySubscribe）
@@ -523,17 +607,20 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 | `Endpoints` | 1.1 | 已发布的服务端点租约。 |
 | `Lifecycle` | 1.1 | 自身状态查询、请求 reload / unload。 |
 | `FullConfiguration` | 1.2 | 全量 Host 配置读写。 |
-| `Supervisor`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 全局服务运行遥测与属主过滤。 |
-| `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 路由观测订阅与动作钩子。 |
-| `LogWriter`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 自定义文本日志。 |
-| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.2） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
+| `Supervisor`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.3） | 全局服务运行遥测与属主过滤；1.3.3 追加节点本地 `ResumeAsync` / `RestartAsync`。 |
+| `RouteEvents`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.3） | 路由观测订阅与动作钩子。 |
+| `LogWriter`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.3） | 自定义文本日志。 |
+| `Management`（经 `IExtensionHostBridge13`） | 1.3（当前 Contracts 1.3.3） | 跨扩展记录管理、刷新、启用 / 禁用、reload、`ReloadSoon` 与显式删除。 |
 | `DataDirectory`（经 `IExtensionHostBridge13`） | 1.3.2 | Host 配置的数据目录路径。 |
 | `IExtensionRegistration.TryRegisterStreamingHandler` | 1.3.2 | 流式请求 / 响应处理器注册。 |
 | `ExtensionCoreEventKind.ExtensionSettingsChanged` | 1.3.2 | 设置内容变更事件。 |
+| `HostInfo`（经 `IExtensionHostBridge13`） | 1.3.3 | 本节点宿主状态即时快照。 |
+| `ExtensionServiceLifecycleState.Waiting` | 1.3.3 | 服务等待节点本地启动前置的生命周期状态。 |
+| `ExtensionManagementEntry.ContentHash` | 1.3.3 | 扩展内容 SHA-256 摘要，多节点漂移检测。 |
 
 ## 操作限制与已知限制
 
-- **多节点版本偏斜。** 记录存储在 PostgreSQL 中，但 manifest 和程序集文件位于各节点本地。节点 A 的 refresh 更新全局 `installed_version` 后，如果节点 B 的文件尚未同步，B 可能因版本不匹配而降级；部署应保持节点文件与记录一致。本文按单节点或部署一致前提描述。
+- **多节点内容偏斜检测。** 记录存储在 PostgreSQL 中，但 manifest 和程序集文件位于各节点本地。1.3.3 起 Host 用 `ContentHash` 摘要检测偏斜：节点文件与持久化摘要不一致的扩展会被隔离（quarantine）并上报节点状态 `ContentMismatch`；摘要暂时无法计算时报 `ContentHashMissing`。偏斜是**节点本地**判定，不影响其他节点；`status` / `doctor` 可查看各节点分歧。部署仍应保持节点文件一致，检测是兜底而非同步机制（见 [README](README.md#内容摘要与多节点部署)）。
 - **写能力。** `EnableAsync`、`DisableAsync`、`ReloadAsync`、`DeleteRecordAsync`、`RequestRefreshAsync` 和 `ReloadSoon` 等改变持久化或发布状态的操作要求节点具备 configuration write capability。read-only 节点上的异步写操作返回 `Unsupported`，`ReloadSoon` 返回 `false`，并跳过 bootstrap 的持久化写入；`ListAsync` 是读取操作，但仍可能受到节点 snapshot / 磁盘状态的最终一致性影响。
 - **生命周期回调重入。** 在扩展的 `StartAsync`、`StopAsync` 或 `OnPreviousStoppedAsync` 生命周期回调中调用 `EnableAsync`、`DisableAsync`、`ReloadAsync`、`DeleteRecordAsync` 或 `RequestRefreshAsync` 会与 publication gate 形成死锁风险，因此返回 `Unsupported`，不会等待或部分提交；`ReloadSoon` 是允许在这些回调中调度 reload 的例外。
 - **其他回调上下文。** route handler、event subscriber 或 scheduler callback 中允许调用 `EnableAsync`、`DisableAsync`、`DeleteRecordAsync` 和 `RequestRefreshAsync`；无论目标是哪一个扩展，这些写操作的 publish 都会延迟到 callback 返回之后，以避免 generation drain 自己造成死锁。上述回调上下文中的 `ReloadAsync` 对任何目标都返回 `Unsupported`，应改用可在任意上下文调用的 `ReloadSoon`；后者只确认调度成功，不确认 reload 已完成。
@@ -541,7 +628,7 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 - **停止是 best-effort。** 禁用或删除前的 owned-service stop 不能保证外部进程在每个瞬间都已退出；后续 publish 会继续收敛 desired set。
 - **发布异常窗口。** 极少数 `Ready` 之后的替换失败窗口中，abort 不会重启已经停止的旧代次，可能留下短暂的 zombie 状态；后续发布会尝试重新收敛。
 - **generation / snapshot 配对竞态。** S1 generation 与 S2 snapshot 之间可能出现短暂配对竞态；下一次 publish 会自我收敛。
-- **属主映射读取失败。** 读取 disabled-owner 映射失败时，本次 publish 会延迟停止该属主服务到下一次成功 publish；过滤逻辑是 fail-static，只会阻止启动，不会因为一次读取失败而启动服务。
+- **属主映射读取失败。** 1.3.3 起读取服务 / 路由属主映射失败（数据库故障等）会使**整次 publish 失败**：节点保持当前已发布快照继续服务并标记数据库不可用，恢复后按下一次 publish 收敛。属主校验不再在读取失败时静默降级——宁可发布失败也不基于未知属主做启动 / 停止决策。
 
 ## 上限汇总
 
@@ -559,6 +646,7 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 
 - 1.2 及以前的桥契约保持不变，`IExtensionHostBridge` 的全部成员行为不变；`IExtensionHostBridge13` 是旁路接口。
 - Contracts 包升级到 **1.3.2** 即可获得 API 1.3.2 的 `DataDirectory`、流式处理器 `IExtensionStreamingHandler`、设置变更事件 `ExtensionCoreEventKind.ExtensionSettingsChanged`；`ExtensionCapabilitySet` 的旧构造函数仍保留，`ExtensionManagement` 是可空的可选能力。
+- Contracts 包升级到 **1.3.3** 追加 `Supervisor.ResumeAsync` / `RestartAsync`、桥属性 `HostInfo`、生命周期状态 `Waiting` 与 `ExtensionManagementEntry.ContentHash`；用 `ExtensionAbi.IsApi133Supported` 探测。
 - 只需要在用到新能力的地方按本文开头的两步检查做探测；老代码不需要改。
 - API version 仍是 1.3，没有另一个管理 API version。要求 Host API 1.3 的 manifest 不需要改写；新发现扩展的持久化默认状态、显式 refresh 和记录永不自动删除是本版本的生命周期规则。
 - 流式处理器是**追加**的新接口；已有的 `IExtensionHandler` 行为、路由配置和目标绑定均不变。

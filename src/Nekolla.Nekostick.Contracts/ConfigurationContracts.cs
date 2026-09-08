@@ -97,37 +97,59 @@ public sealed class ConfigurationReadResult<T>
         new(errors.ToImmutableArray());
 }
 
-/// <summary>Represents the result of an atomic configuration write.</summary>
+/// <summary>Represents the result of an atomic configuration or node-local lifecycle operation.</summary>
 public sealed class ConfigurationWriteResult
 {
     private ConfigurationWriteResult(long newVersion)
     {
         IsSuccess = true;
+        IsNoOp = false;
         NewVersion = newVersion;
+        Errors = ImmutableArray<ConfigurationError>.Empty;
+    }
+
+    private ConfigurationWriteResult(bool isNoOp)
+    {
+        IsSuccess = true;
+        IsNoOp = isNoOp;
+        NewVersion = null;
         Errors = ImmutableArray<ConfigurationError>.Empty;
     }
 
     private ConfigurationWriteResult(ImmutableArray<ConfigurationError> errors)
     {
         IsSuccess = false;
+        IsNoOp = false;
+        NewVersion = null;
         Errors = errors.IsDefaultOrEmpty
             ? throw new ArgumentException("At least one configuration error is required.", nameof(errors))
             : errors;
     }
 
-    /// <summary>Gets whether the write was committed.</summary>
+    /// <summary>Gets whether the operation completed successfully.</summary>
     public bool IsSuccess { get; }
 
-    /// <summary>Gets the committed global version when successful.</summary>
+    /// <summary>Gets whether the operation was intentionally ignored as a no-op.</summary>
+    public bool IsNoOp { get; }
+
+    /// <summary>Gets the committed global version when a configuration version was committed; otherwise <see langword="null" />.</summary>
     public long? NewVersion { get; }
 
-    /// <summary>Gets safe errors when the write was rejected.</summary>
+    /// <summary>Gets safe errors when the operation was rejected.</summary>
     public ImmutableArray<ConfigurationError> Errors { get; }
 
     /// <summary>Creates a successful write result.</summary>
     /// <param name="newVersion">The committed global version.</param>
     /// <returns>A successful result.</returns>
     public static ConfigurationWriteResult Success(long newVersion) => new(newVersion);
+
+    /// <summary>Creates a successful result for an accepted operation that changed no global configuration.</summary>
+    /// <returns>A successful result with no committed global version.</returns>
+    public static ConfigurationWriteResult Success() => new(isNoOp: false);
+
+    /// <summary>Creates a successful result for an operation intentionally ignored as a no-op.</summary>
+    /// <returns>A successful no-op result with no committed global version.</returns>
+    public static ConfigurationWriteResult NoOp() => new(isNoOp: true);
 
     /// <summary>Creates a failed write result.</summary>
     /// <param name="errors">The safe errors.</param>

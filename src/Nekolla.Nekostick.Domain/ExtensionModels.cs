@@ -117,15 +117,18 @@ public sealed class ExtensionDefinition : EntityBase
     /// <param name="identifier">The stable extension identifier.</param>
     /// <param name="version">The extension semantic version.</param>
     /// <param name="timeProvider">The UTC time provider.</param>
+    /// <param name="contentHash">The optional SHA-256 content hash.</param>
     public ExtensionDefinition(
         IUuidV7Generator uuidGenerator,
         ExtensionIdentifier identifier,
         SemanticVersion version,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        string? contentHash = null)
         : base(uuidGenerator, timeProvider)
     {
         Identifier = identifier;
         ExtensionVersion = version;
+        ContentHash = contentHash;
         LoadState = ExtensionLoadState.Discovered;
     }
 
@@ -134,6 +137,9 @@ public sealed class ExtensionDefinition : EntityBase
 
     /// <summary>Gets the installed extension version.</summary>
     public SemanticVersion ExtensionVersion { get; }
+
+    /// <summary>Gets the optional SHA-256 content hash.</summary>
+    public string? ContentHash { get; }
 
     /// <summary>Gets the current load state.</summary>
     public ExtensionLoadState LoadState { get; private set; }
@@ -146,4 +152,90 @@ public sealed class ExtensionDefinition : EntityBase
         LoadState = state;
         Touch(updatedAt);
     }
+}
+
+/// <summary>Describes node-local observable state for one extension record.</summary>
+public readonly record struct ExtensionNodeState
+{
+    /// <summary>Creates node-local extension state.</summary>
+    /// <param name="nodeId">The stable node identifier.</param>
+    /// <param name="extensionRecordId">The persisted extension record identifier.</param>
+    /// <param name="observedContentHash">The optional content hash observed by the node.</param>
+    /// <param name="loadState">The node-local extension load state.</param>
+    /// <param name="failureCode">The safe node-local failure code.</param>
+    /// <param name="updatedAt">The UTC state update timestamp.</param>
+    public ExtensionNodeState(
+        string nodeId,
+        Guid extensionRecordId,
+        string? observedContentHash,
+        ExtensionLoadState loadState,
+        string failureCode,
+        DateTimeOffset updatedAt)
+    {
+        if (string.IsNullOrWhiteSpace(nodeId) || nodeId.Length > 128 || nodeId.Any(char.IsControl))
+        {
+            throw new ArgumentException("A safe node identifier is required.", nameof(nodeId));
+        }
+
+        if (extensionRecordId == Guid.Empty)
+        {
+            throw new ArgumentException("An extension record identifier is required.", nameof(extensionRecordId));
+        }
+
+        if (failureCode is null || failureCode.Length is 0 or > 64 || failureCode.Any(char.IsControl))
+        {
+            throw new ArgumentException("A safe failure code is required.", nameof(failureCode));
+        }
+
+        NodeId = nodeId;
+        ExtensionRecordId = extensionRecordId;
+        ObservedContentHash = ValidateContentHash(observedContentHash);
+        LoadState = loadState;
+        FailureCode = failureCode;
+        UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    private static string? ValidateContentHash(string? contentHash)
+    {
+        if (contentHash is null)
+        {
+            return null;
+        }
+
+        if (contentHash.Length != 71 || !contentHash.StartsWith("sha256:", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The content hash must use sha256:<hex> form with 64 hexadecimal digits.", nameof(contentHash));
+        }
+
+        for (var index = 7; index < contentHash.Length; index++)
+        {
+            var character = contentHash[index];
+            if ((character is < '0' or > '9') &&
+                (character is < 'a' or > 'f') &&
+                (character is < 'A' or > 'F'))
+            {
+                throw new ArgumentException("The content hash must use sha256:<hex> form with 64 hexadecimal digits.", nameof(contentHash));
+            }
+        }
+
+        return contentHash;
+    }
+
+    /// <summary>Gets the stable node identifier.</summary>
+    public string NodeId { get; }
+
+    /// <summary>Gets the persisted extension record identifier.</summary>
+    public Guid ExtensionRecordId { get; }
+
+    /// <summary>Gets the optional content hash observed by the node.</summary>
+    public string? ObservedContentHash { get; }
+
+    /// <summary>Gets the node-local extension load state.</summary>
+    public ExtensionLoadState LoadState { get; }
+
+    /// <summary>Gets the safe node-local failure code.</summary>
+    public string FailureCode { get; }
+
+    /// <summary>Gets the UTC state update timestamp.</summary>
+    public DateTimeOffset UpdatedAt { get; }
 }

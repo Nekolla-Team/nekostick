@@ -98,6 +98,10 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("timestamptz")
                         .HasColumnName("created_at");
 
+                    b.Property<string>("ContentHash")
+                        .HasColumnType("text")
+                        .HasColumnName("content_hash");
+
                     b.Property<string>("ExtensionId")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -141,6 +145,50 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                             t.HasCheckConstraint("ck_extension_records_load_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled')");
 
                             t.HasCheckConstraint("ck_extension_records_text", "length(extension_id) BETWEEN 1 AND 128 AND length(installed_version) BETWEEN 1 AND 128");
+                        });
+                });
+
+            modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ExtensionNodeState", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("node_id");
+
+                    b.Property<Guid>("ExtensionRecordId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("extension_record_id");
+
+                    b.Property<string>("FailureCode")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasDefaultValue("None")
+                        .HasColumnName("failure_code");
+
+                    b.Property<string>("LoadState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("load_state");
+
+                    b.Property<string>("ObservedContentHash")
+                        .HasColumnType("text")
+                        .HasColumnName("observed_content_hash");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("NodeId", "ExtensionRecordId")
+                        .HasName("pk_extension_node_states");
+
+                    b.HasIndex("ExtensionRecordId")
+                        .HasDatabaseName("ix_extension_node_states_extension_record_id");
+
+                    b.ToTable("extension_node_states", "nekostick", t =>
+                        {
+                            t.HasCheckConstraint("ck_extension_node_states_state", "load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled') AND length(failure_code) BETWEEN 1 AND 64");
                         });
                 });
 
@@ -867,8 +915,30 @@ namespace Nekolla.Nekostick.Persistence.Migrations
 
                     b.ToTable("service_runtimes", "nekostick", t =>
                         {
-                            t.HasCheckConstraint("ck_service_runtimes_state", "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
+                            t.HasCheckConstraint("ck_service_runtimes_state", "lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed', 'Waiting') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0");
                         });
+                });
+
+            modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ExtensionNodeState", b =>
+                {
+                    b.HasOne("Nekolla.Nekostick.Persistence.Entities.ExtensionRecord", "ExtensionRecord")
+                        .WithMany("NodeStates")
+                        .HasForeignKey("ExtensionRecordId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_extension_node_states_extension_records_extension_record_id");
+
+                    b.HasOne("Nekolla.Nekostick.Persistence.Entities.Node", "Node")
+                        .WithMany("ExtensionNodeStates")
+                        .HasForeignKey("NodeId")
+                        .HasPrincipalKey("NodeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_extension_node_states_nodes_node_id");
+
+                    b.Navigation("ExtensionRecord");
+
+                    b.Navigation("Node");
                 });
 
             modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ExtensionSetting", b =>
@@ -930,11 +1000,15 @@ namespace Nekolla.Nekostick.Persistence.Migrations
 
             modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.ExtensionRecord", b =>
                 {
+                    b.Navigation("NodeStates");
+
                     b.Navigation("Settings");
                 });
 
             modelBuilder.Entity("Nekolla.Nekostick.Persistence.Entities.Node", b =>
                 {
+                    b.Navigation("ExtensionNodeStates");
+
                     b.Navigation("PortLeases");
                 });
 

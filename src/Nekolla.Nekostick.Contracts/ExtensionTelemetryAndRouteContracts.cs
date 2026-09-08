@@ -14,6 +14,7 @@ public enum ExtensionServiceLifecycleState
     /// <summary>The service is starting.</summary>
     Starting,
 
+
     /// <summary>The service is running.</summary>
     Running,
 
@@ -21,7 +22,10 @@ public enum ExtensionServiceLifecycleState
     Stopping,
 
     /// <summary>The service failed to start or remain healthy.</summary>
-    Failed
+    Failed,
+
+    /// <summary>The service is waiting for its content or another startup prerequisite.</summary>
+    Waiting
 }
 
 /// <summary>Identifies the safe health state of a supervised service.</summary>
@@ -151,7 +155,11 @@ public sealed record ExtensionServiceRuntimeSnapshot
 /// <summary>Provides global, read-only supervisor telemetry to an extension.</summary>
 /// <remarks>
 /// The API exposes the Host-wide safe runtime snapshot set, indexed by stable service ID. An unavailable service is
-/// reported through the safe result contract rather than exposing runtime handles.
+/// reported through the safe result contract rather than exposing runtime handles. The surface remains read-only
+/// for global configuration. Starting with API 1.3.3, it also includes node-local lifecycle operations. They are
+/// management-plane operations: extensions are trusted operators, so any existing service — including Host-owned
+/// services with no extension owner — can be resumed or restarted, and those operations never write or synchronize
+/// global configuration.
 /// </remarks>
 public interface IExtensionSupervisorApi
 {
@@ -174,6 +182,42 @@ public interface IExtensionSupervisorApi
     /// <param name="cancellationToken">The operation cancellation token.</param>
     /// <returns>The snapshot when the service is available, or a safe error.</returns>
     ValueTask<ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>> GetAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Resumes one service when it is waiting for content or another startup prerequisite.</summary>
+    /// <remarks>
+    /// This operation is available from API 1.3.3. When the service is in <see cref="ExtensionServiceLifecycleState.Waiting" />,
+    /// the Host resumes its node-local startup and returns <c>Success()</c>; it never commits a global configuration
+    /// version. When the service is already running or in any other known state, the request is ignored and returns
+    /// <c>NoOp()</c>. If the resume attempt finishes without the service becoming ready (the prerequisite is still
+    /// missing), the result is a failed result with <see cref="ConfigurationErrorCode.Validation" /> — success is
+    /// only reported when the service actually left the waiting state. An unknown service ID returns a failed result
+    /// with <see cref="ConfigurationErrorCode.NotFound" />. The operation affects only this node and does not write
+    /// or synchronize global configuration. No ownership filtering applies: this is a management-plane operation and
+    /// Host-owned services (no extension owner) are manageable here.
+    /// </remarks>
+    /// <param name="serviceId">The stable identifier of the target service.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns><c>Success()</c> when waiting startup resumed, <c>NoOp()</c> when ignored, or a safe error.</returns>
+    ValueTask<ConfigurationWriteResult> ResumeAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Strictly restarts one service on this node.</summary>
+    /// <remarks>
+    /// This operation is available from API 1.3.3. For every state except administrative disablement, the Host
+    /// strictly stops and then starts the service on this node. An administratively disabled service MUST be rejected
+    /// and MUST NOT be started. An unknown service ID returns a failed result with
+    /// <see cref="ConfigurationErrorCode.NotFound" />. A successful restart never returns <c>NoOp()</c>, never
+    /// commits a global configuration version, and never writes or synchronizes global configuration. No ownership
+    /// filtering applies: this is a management-plane operation and Host-owned services (no extension owner) are
+    /// manageable here.
+    /// </remarks>
+    /// <param name="serviceId">The stable identifier of the target service.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns>A successful non-no-op lifecycle result, or a safe error.</returns>
+    ValueTask<ConfigurationWriteResult> RestartAsync(
         Guid serviceId,
         CancellationToken cancellationToken = default);
 }

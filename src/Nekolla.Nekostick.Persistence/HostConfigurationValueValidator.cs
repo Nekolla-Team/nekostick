@@ -118,8 +118,7 @@ internal static class HostConfigurationValueValidator
                 {
                     Throw();
                 }
-
-                if (!IsSafeEnvironmentKey(pair.Key) || pair.Value is null)
+                if (!IsSafeEnvironmentKey(pair.Key) || !IsSafeEnvironmentValueForRead(pair.Value))
                 {
                     Throw();
                 }
@@ -153,6 +152,14 @@ internal static class HostConfigurationValueValidator
 
     internal static bool IsSafeEnvironmentKey(string? value) =>
         IsSafeText(value, MaxEnvironmentKeyLength) && value!.IndexOf('=') < 0;
+
+    internal static bool IsSafeEnvironmentValue(string? value) =>
+        value is not null && value.Length <= MaxEnvironmentValueLength &&
+        !ContainsControlCharacter(value) && !ContainsInvalidHostPlaceholder(value);
+
+    internal static bool IsSafeEnvironmentValueForRead(string? value) =>
+        value is not null && value.Length <= MaxEnvironmentValueLength &&
+        !ContainsControlCharacter(value);
 
     internal static bool IsSafeHttpPath(string? value) =>
         IsSafeText(value, MaxHealthPathLength) && value!.StartsWith('/');
@@ -264,6 +271,49 @@ internal static class HostConfigurationValueValidator
     internal static void Throw() => throw new HostConfigurationSemanticValidator.ConfigurationValidationException();
 
     private static bool ContainsControlCharacter(string value) => value.Any(char.IsControl);
+
+    private static bool ContainsInvalidHostPlaceholder(string value)
+    {
+        var offset = 0;
+        while (true)
+        {
+            var start = value.IndexOf("${", offset, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                return false;
+            }
+
+            if (start > 0 && value[start - 1] == '\\')
+            {
+                return true;
+            }
+
+            var end = value.IndexOf('}', start + 2);
+            if (end < 0 || end - start + 1 > 256 ||
+                value.IndexOf("${HOST:", start, StringComparison.Ordinal) != start)
+            {
+                return true;
+            }
+
+            var variableStart = start + 7;
+            if (end <= variableStart ||
+                !(char.IsAsciiLetter(value[variableStart]) || value[variableStart] == '_'))
+            {
+                return true;
+            }
+
+            for (var index = variableStart + 1; index < end; index++)
+            {
+                var character = value[index];
+                if (!(char.IsAsciiLetterOrDigit(character) || character == '_'))
+                {
+                    return true;
+                }
+            }
+
+            offset = end + 1;
+        }
+    }
 
     private static JsonSerializerOptions CreateJsonOptions()
     {

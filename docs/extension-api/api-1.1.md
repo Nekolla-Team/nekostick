@@ -195,6 +195,8 @@ ValueTask<ExtensionServiceOperationResult> RestartAsync(Guid serviceId, ...);
 | `AlreadyStopped` | 服务本来就处于停止状态。 |
 | `Reentrant` | 在扩展回调内重入调用（见下文生命周期一节）。 |
 
+> 当前 Host 实现中 `StopAsync` / `RestartAsync` **尚返回 `Unsupported`**（`StartAsync` 与 CRUD 已生效）。停止服务请经 `RemoveAsync` 或禁用属主扩展（会停止其服务进程）；严格的本节点重启见 [api-1.3.md](api-1.3.md#节点本地服务恢复与重启133) 的 `Supervisor.RestartAsync`（1.3.3）。
+
 ### 示例：部署并启动一个后端服务，再给它配一条路由
 
 ```csharp

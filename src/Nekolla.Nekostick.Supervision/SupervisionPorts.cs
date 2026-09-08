@@ -49,16 +49,24 @@ public sealed record ProcessOperationResult
     /// <param name="instanceId">The opaque process generation, when a start was accepted.</param>
     /// <param name="processId">The operating-system process ID, when safely known.</param>
     /// <param name="startedAt">The executor-established UTC process start instant, when known.</param>
+    /// <param name="failureMessage">The optional host placeholder name for a safe launch failure.</param>
     public ProcessOperationResult(
         ProcessOperationStatus status,
         ServiceStateReasonCode reason,
         ProcessInstanceId? instanceId = null,
         int? processId = null,
-        DateTimeOffset? startedAt = null)
+        DateTimeOffset? startedAt = null,
+        string? failureMessage = null)
     {
         if (processId is <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(processId));
+        }
+
+        if (failureMessage is not null &&
+            (status != ProcessOperationStatus.Rejected || !IsSafeHostPlaceholder(failureMessage)))
+        {
+            throw new ArgumentException("The launch failure message must be a host placeholder name.", nameof(failureMessage));
         }
 
         Status = status;
@@ -66,6 +74,7 @@ public sealed record ProcessOperationResult
         InstanceId = instanceId;
         ProcessId = processId;
         StartedAt = startedAt?.ToUniversalTime();
+        FailureMessage = failureMessage;
     }
 
     /// <summary>Gets the fixed process operation status.</summary>
@@ -82,6 +91,37 @@ public sealed record ProcessOperationResult
 
     /// <summary>Gets the executor-established UTC process start instant when safely known.</summary>
     public DateTimeOffset? StartedAt { get; }
+
+    /// <summary>Gets the missing host placeholder name, never its expanded environment value.</summary>
+    public string? FailureMessage { get; }
+
+    private static bool IsSafeHostPlaceholder(string value)
+    {
+        if (value.Length is < 9 or > 256 ||
+            !value.StartsWith("${HOST:", StringComparison.Ordinal) ||
+            value[^1] != '}')
+        {
+            return false;
+        }
+
+        var variableStart = 7;
+        var variableEnd = value.Length - 1;
+        if (!(char.IsAsciiLetter(value[variableStart]) || value[variableStart] == '_'))
+        {
+            return false;
+        }
+
+        for (var index = variableStart + 1; index < variableEnd; index++)
+        {
+            var character = value[index];
+            if (!(char.IsAsciiLetterOrDigit(character) || character == '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
 
 /// <summary>Contains one safe observation for a tracked process generation exit.</summary>

@@ -36,7 +36,7 @@ public sealed class ServiceSupervisorStopGraceTests
             new RecordingLeaseStore(Lease()),
             new ProcessLaunchSpecification(
                 ServiceId,
-                "/bin/service",
+                "/bin/sh",
                 "/tmp",
                 ImmutableArray<string>.Empty,
                 new ProcessEnvironment(new Dictionary<string, string>())),

@@ -241,6 +241,20 @@ internal static class UnsupportedExtensionCapabilities
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationWriteResult> ResumeAsync(
+            Guid serviceId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+
+        public ValueTask<ConfigurationWriteResult> RestartAsync(
+            Guid serviceId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
     }
 
     private sealed class UnsupportedManagementApi : IExtensionManagementApi

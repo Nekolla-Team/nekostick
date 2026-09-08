@@ -295,6 +295,9 @@ public sealed class ExtensionRecord
     /// <summary>Gets or sets the installed semantic version text.</summary>
     public string InstalledVersion { get; set; } = string.Empty;
 
+    /// <summary>Gets or sets the optional SHA-256 content hash.</summary>
+    public string? ContentHash { get; set; }
+
     /// <summary>Gets or sets the public extension load state.</summary>
     public DomainExtensionLoadState LoadState { get; set; }
 
@@ -309,6 +312,37 @@ public sealed class ExtensionRecord
 
     /// <summary>Gets or sets extension settings rows.</summary>
     public ICollection<ExtensionSetting> Settings { get; set; } = new List<ExtensionSetting>();
+
+    /// <summary>Gets or sets node-local extension state rows.</summary>
+    public ICollection<ExtensionNodeState> NodeStates { get; set; } = new List<ExtensionNodeState>();
+}
+
+/// <summary>Stores one node-local observable state for an extension record.</summary>
+public sealed class ExtensionNodeState
+{
+    /// <summary>Gets or sets the owning stable node identifier.</summary>
+    public string NodeId { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the referenced extension record identifier.</summary>
+    public Guid ExtensionRecordId { get; set; }
+
+    /// <summary>Gets or sets the optional content hash observed by the node.</summary>
+    public string? ObservedContentHash { get; set; }
+
+    /// <summary>Gets or sets the node-local extension load state.</summary>
+    public DomainExtensionLoadState LoadState { get; set; }
+
+    /// <summary>Gets or sets the safe node-local failure code.</summary>
+    public string FailureCode { get; set; } = "None";
+
+    /// <summary>Gets or sets the UTC state update timestamp.</summary>
+    public DateTimeOffset UpdatedAt { get; set; }
+
+    /// <summary>Gets or sets the node navigation.</summary>
+    public Node? Node { get; set; }
+
+    /// <summary>Gets or sets the extension record navigation.</summary>
+    public ExtensionRecord? ExtensionRecord { get; set; }
 }
 
 /// <summary>Stores one extension-owned sensitive JSON settings document.</summary>
@@ -368,6 +402,9 @@ public sealed class Node
 
     /// <summary>Gets or sets the bigint optimistic-concurrency version.</summary>
     public long Version { get; set; }
+
+    /// <summary>Gets or sets node-local extension state rows.</summary>
+    public ICollection<ExtensionNodeState> ExtensionNodeStates { get; set; } = new List<ExtensionNodeState>();
 
     /// <summary>Gets or sets port leases owned by this node.</summary>
     public ICollection<PortLease> PortLeases { get; set; } = new List<PortLease>();

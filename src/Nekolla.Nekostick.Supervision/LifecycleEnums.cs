@@ -89,7 +89,13 @@ public enum ServiceStateReasonCode
     DeadlineExpired,
 
     /// <summary>An operation was superseded by a newer immutable snapshot.</summary>
-    Superseded
+    Superseded,
+
+    /// <summary>The configured executable is not present yet.</summary>
+    ExecutableMissing,
+
+    /// <summary>The configured host environment variable was unavailable.</summary>
+    MissingHostEnvironment
 }
 
 /// <summary>Identifies the kind of deadline held by a service state snapshot.</summary>
@@ -104,6 +110,9 @@ public enum ServiceDeadlineKind
     /// <summary>The deadline for a steady-state health result.</summary>
     SteadyHealth,
 
-    /// <summary>The time before a planned restart may be attempted.</summary>
-    RestartBackoff
+    /// <summary>The backoff deadline before a crashed process may be restarted.</summary>
+    RestartBackoff,
+
+    /// <summary>The bounded backoff deadline before a missing startup prerequisite (e.g. an absent executable) is retried.</summary>
+    WaitingBackoff
 }

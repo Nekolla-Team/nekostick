@@ -813,3 +813,64 @@ BEGIN
 END $EF$;
 COMMIT;
 
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260907120000_AddExtensionContentAndNodeState') THEN
+    ALTER TABLE nekostick.extension_records ADD content_hash text;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260907120000_AddExtensionContentAndNodeState') THEN
+    CREATE TABLE nekostick.extension_node_states (
+        node_id character varying(128) NOT NULL,
+        extension_record_id uuid NOT NULL,
+        observed_content_hash text,
+        load_state character varying(32) NOT NULL,
+        failure_code character varying(64) NOT NULL DEFAULT 'None',
+        updated_at timestamptz NOT NULL,
+        CONSTRAINT pk_extension_node_states PRIMARY KEY (node_id, extension_record_id),
+        CONSTRAINT ck_extension_node_states_state CHECK (load_state IN ('Discovered', 'Loaded', 'Stopped', 'Failed', 'Unloading', 'Disabled') AND length(failure_code) BETWEEN 1 AND 64),
+        CONSTRAINT fk_extension_node_states_nodes_node_id FOREIGN KEY (node_id) REFERENCES nekostick.nodes (node_id) ON DELETE RESTRICT,
+        CONSTRAINT fk_extension_node_states_extension_records_extension_record_id FOREIGN KEY (extension_record_id) REFERENCES nekostick.extension_records (id) ON DELETE RESTRICT
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260907120000_AddExtensionContentAndNodeState') THEN
+    CREATE INDEX ix_extension_node_states_extension_record_id ON nekostick.extension_node_states (extension_record_id);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260907120000_AddExtensionContentAndNodeState') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260907120000_AddExtensionContentAndNodeState', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260907130000_AddWaitingServiceRuntimeState') THEN
+    ALTER TABLE nekostick.service_runtimes DROP CONSTRAINT ck_service_runtimes_state;
+    ALTER TABLE nekostick.service_runtimes ADD CONSTRAINT ck_service_runtimes_state CHECK (lifecycle IN ('Disabled', 'Starting', 'Running', 'Stopping', 'Failed', 'Waiting') AND health IN ('Unknown', 'Healthy', 'Unhealthy') AND restart_count >= 0);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20260907130000_AddWaitingServiceRuntimeState') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20260907130000_AddWaitingServiceRuntimeState', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;

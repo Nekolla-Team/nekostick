@@ -6,7 +6,7 @@ namespace Nekolla.Nekostick.Host;
 /// <summary>Owns the process-level activity boundary for the host node.</summary>
 public interface IHostNodeActivityLease : IAsyncDisposable
 {
-    /// <summary>Acquires the default-node activity lease before heartbeat work starts.</summary>
+    /// <summary>Acquires or rebinds the default-node activity lease to the supplied connection.</summary>
     Task AcquireAsync(DbConnection connection, CancellationToken cancellationToken = default);
 
     /// <summary>Verifies that the PostgreSQL session still owns the activity lease.</summary>
@@ -48,7 +48,14 @@ public sealed class PostgresHostNodeActivityLease : IHostNodeActivityLease
             ThrowIfDisposed();
             if (_connection is not null)
             {
-                return;
+                if (ReferenceEquals(_connection, connection))
+                {
+                    return;
+                }
+
+                var previousConnection = _connection;
+                _connection = null;
+                await ReleaseConnectionAsync(previousConnection);
             }
 
             await using var command = connection.CreateCommand();
@@ -135,35 +142,38 @@ public sealed class PostgresHostNodeActivityLease : IHostNodeActivityLease
         {
             var connection = _connection;
             _connection = null;
-            if (connection is null)
+            if (connection is not null)
             {
-                return;
-            }
-
-            try
-            {
-                await using var command = connection.CreateCommand();
-                command.CommandText = "SELECT pg_advisory_unlock(@lock_key);";
-                AddAdvisoryLockKeyParameter(command);
-                await command.ExecuteScalarAsync(CancellationToken.None);
-            }
-            catch (Exception)
-            {
-                // Closing the PostgreSQL session also releases a session advisory lock.
-            }
-
-            try
-            {
-                await connection.CloseAsync();
-            }
-            catch (Exception)
-            {
-                // The connection is owned by the node service and is disposed with its context.
+                await ReleaseConnectionAsync(connection);
             }
         }
         finally
         {
             _gate.Release();
+        }
+
+    }
+    private static async Task ReleaseConnectionAsync(DbConnection connection)
+    {
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT pg_advisory_unlock(@lock_key);";
+            AddAdvisoryLockKeyParameter(command);
+            await command.ExecuteScalarAsync(CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Closing the PostgreSQL session also releases a session advisory lock.
+        }
+
+        try
+        {
+            await connection.CloseAsync();
+        }
+        catch (Exception)
+        {
+            // The connection is owned by the node service and is disposed with its context.
         }
     }
 

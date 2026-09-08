@@ -18,6 +18,8 @@ internal static class HostEventIds
     internal static readonly EventId StaticRejection = new(1012, "StaticRejection");
     internal static readonly EventId ProxyFailure = new(1013, "ProxyFailure");
     internal static readonly EventId ExtensionText = new(1014, "ExtensionText");
+    internal static readonly EventId HostNodeActivityLost = new(1017, "HostNodeActivityLost");
+    internal static readonly EventId ServiceLaunchMissingHostEnvironment = new(1018, "ServiceLaunchMissingHostEnvironment");
 }
 
 internal static class HostLoggerCategory
@@ -76,6 +78,22 @@ internal static partial class HostLogMessages
         Level = LogLevel.Error,
         Message = "Node registration or heartbeat is unavailable.")]
     internal static partial void NodeHeartbeatUnavailable(ILogger logger);
+
+    [LoggerMessage(
+        EventId = 1017,
+        Level = LogLevel.Critical,
+        Message = "Host node activity lease could not be reacquired; another node may have taken ownership. NodeId: {NodeId}.")]
+    internal static partial void HostNodeActivityLost(ILogger logger, string nodeId);
+
+    [LoggerMessage(
+        EventId = 1018,
+        Level = LogLevel.Warning,
+        Message = "Service launch failed because a required host environment placeholder is missing. ServiceId: {ServiceId}. Version: {Version}. Placeholder: {Placeholder}.")]
+    internal static partial void ServiceLaunchMissingHostEnvironment(
+        ILogger logger,
+        Guid serviceId,
+        long version,
+        string placeholder);
 
     [LoggerMessage(
         EventId = 1007,
@@ -208,6 +226,18 @@ internal static partial class HostLogMessages
         Level = LogLevel.Information,
         Message = "Nekostick initialization finished. Press Ctrl+C to shutdown.")]
     internal static partial void ApplicationStarted(ILogger logger);
+
+    [LoggerMessage(
+        EventId = 1019,
+        Level = LogLevel.Warning,
+        Message = "Extension node state persistence was not applied; node-reported extension states may be stale.")]
+    internal static partial void NodeStatePersistenceFailed(ILogger logger, Exception? exception);
+
+    [LoggerMessage(
+        EventId = 1020,
+        Level = LogLevel.Warning,
+        Message = "Host node activity lock still held on reconnect (attempt {Attempt}); tolerating a possible zombie session before declaring a takeover.")]
+    internal static partial void HostNodeActivityContended(ILogger logger, int attempt);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

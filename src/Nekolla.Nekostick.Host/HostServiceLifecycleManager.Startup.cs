@@ -143,6 +143,23 @@ public sealed partial class HostServiceLifecycleManager
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
 
+            if (!candidate.Ready)
+            {
+                await PublishReadyEndpointsAsync().ConfigureAwait(false);
+                PublishServiceState(service.Id, candidate.SnapshotVersion, "waiting");
+                if (old is not null && !ReferenceEquals(old, candidate) && stopReplacedGeneration)
+                {
+                    await DrainAndStopGenerationAsync(slot, old).ConfigureAwait(false);
+                    PublishServiceState(old.Configuration.Id, old.SnapshotVersion, "stopped");
+                }
+
+                return new(
+                    service.Id,
+                    snapshot.Version,
+                    HostServiceReadinessStatus.Unavailable,
+                    candidate.Supervisor.Snapshot);
+            }
+
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
             HostLogMessages.ServiceReady(_logger, service.Id, candidate.SnapshotVersion);
             PublishServiceState(service.Id, candidate.SnapshotVersion, "ready");
@@ -283,6 +300,34 @@ public sealed partial class HostServiceLifecycleManager
             return null;
         }
 
+        if (started.Reason == ServiceStateReasonCode.MissingHostEnvironment &&
+            started.FailureMessage is { } placeholder)
+        {
+            HostLogMessages.ServiceLaunchMissingHostEnvironment(
+                _logger,
+                service.Id,
+                snapshot.Version,
+                placeholder);
+        }
+
+        if (started.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
+        {
+            var waitingOwnerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
+                service.Id,
+                out var waitingOwner)
+                == true
+                ? waitingOwner
+                : null;
+            return new ServiceGeneration(
+                service,
+                supervisor,
+                null,
+                snapshot.Version,
+                HealthRetryState.Start(service.Id, DateTimeOffset.UtcNow, HealthPolicy.StartupTimeout),
+                waitingOwnerExtensionId,
+                ready: false);
+        }
+
         if (started.Status != SupervisorOperationStatus.Applied || supervisor.Lease is null)
         {
             if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
@@ -299,38 +344,48 @@ public sealed partial class HostServiceLifecycleManager
             return null;
         }
 
-        var retry = HealthRetryState.Start(service.Id, DateTimeOffset.UtcNow, HealthPolicy.StartupTimeout);
-        while (true)
+        var healthy = await WaitForHealthyAsync(supervisor, service.Id, cancellationToken).ConfigureAwait(false);
+        if (healthy is not { } ready)
+        {
+            await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+            return null;
+        }
+
+        var ownerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
+            service.Id,
+            out var owner)
+            == true
+            ? owner
+            : null;
+        return new ServiceGeneration(
+            service,
+            supervisor,
+            ready.Lease,
+            snapshot.Version,
+            ready.Retry,
+            ownerExtensionId);
+     }
+
+    private async Task<(PortLease Lease, HealthRetryState Retry)?> WaitForHealthyAsync(
+        ServiceSupervisor supervisor,
+        Guid serviceId,
+        CancellationToken cancellationToken)
+    {
+        var retry = HealthRetryState.Start(serviceId, DateTimeOffset.UtcNow, HealthPolicy.StartupTimeout);
+        while (!IsStopping)
         {
             var observationAt = DateTimeOffset.UtcNow;
             var health = await supervisor.ObserveHealthAsync(retry, observationAt, cancellationToken).ConfigureAwait(false);
             var decision = health.Health;
-            if (decision?.Action == HealthRetryAction.Healthy && supervisor.Lease is { } readyLease && !readyLease.IsExpired(observationAt))
+            if (decision?.Action == HealthRetryAction.Healthy &&
+                supervisor.Lease is { } readyLease &&
+                !readyLease.IsExpired(observationAt))
             {
-                if (IsStopping)
-                {
-                    await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-                    return null;
-                }
-
-                var ownerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
-                    service.Id,
-                    out var owner)
-                    == true
-                    ? owner
-                    : null;
-                return new ServiceGeneration(
-                    service,
-                    supervisor,
-                    readyLease,
-                    snapshot.Version,
-                    decision.NextState,
-                    ownerExtensionId);
+                return (readyLease, decision.NextState);
             }
 
             if (decision is null || decision.Action is HealthRetryAction.Cancelled or HealthRetryAction.Failed or HealthRetryAction.TimedOut)
             {
-                await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
                 return null;
             }
 
@@ -340,10 +395,12 @@ public sealed partial class HostServiceLifecycleManager
                 var delay = next - DateTimeOffset.UtcNow;
                 if (delay > TimeSpan.Zero)
                 {
-                    await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 }
             }
         }
+
+        return null;
     }
 
 

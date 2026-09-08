@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
+using DomainExtensionLoadState = Nekolla.Nekostick.Domain.ExtensionLoadState;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Proxy;
@@ -171,7 +172,7 @@ internal static class Program
                 HostLogMessages.ApplicationStarted(startupLogger);
             });
             await app.RunAsync(cancellationToken);
-            return 0;
+            return app.Services.GetRequiredService<HostTerminationState>().ExitCode;
         }
 
         if (inspection.Revision is null ||
@@ -191,16 +192,28 @@ internal static class Program
         var configurationVersion = inspection.Revision.Value.Version;
         if (command.Kind == CliCommandKind.Status)
         {
-            var report = new StatusReport(configurationVersion, "ready", "valid", 0);
+            var extensionSummary = await ReadExtensionStatusAsync(app, cancellationToken);
+            var statusExitCode = extensionSummary.State == "unavailable" ? 1 : 0;
+            var report = new StatusReport(
+                configurationVersion,
+                "ready",
+                "valid",
+                statusExitCode,
+                extensionSummary);
             return DiagnosticJson.Write(report);
         }
 
+        var doctorInspection = await InspectLocalExtensionsAsync(app, cancellationToken);
+        var doctorExitCode = doctorInspection.IsHealthy ? 0 : 1;
         var doctorSuccessReport = new DoctorReport(
             configurationVersion,
             "passed",
             "passed",
             "unavailable",
-            0);
+            doctorExitCode,
+            doctorInspection.ExtensionState,
+            doctorInspection.LocalDirectoryState,
+            doctorInspection.Checks);
         return DiagnosticJson.Write(doctorSuccessReport);
     }
 
@@ -261,7 +274,20 @@ internal static class Program
                     .GetRequiredService<ILoggerFactory>()
                     .CreateLogger(HostLoggerCategory.Extensions),
                 dataDirectory: serviceProvider.GetRequiredService<HostNodeOptions>().DataDirectory));
-        builder.Services.AddSingleton<HostConfigurationPublisher>();
+        builder.Services.AddSingleton<HostConfigurationPublisher>(serviceProvider =>
+        {
+            var runtimeManager = serviceProvider.GetRequiredService<ExtensionRuntimeManager>();
+            return new HostConfigurationPublisher(
+                serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>(),
+                runtimeManager,
+                serviceProvider.GetRequiredService<HostNodeOptions>(),
+                serviceProvider.GetRequiredService<ILogger<HostConfigurationPublisher>>(),
+                dbContextFactory: serviceProvider.GetRequiredService<IDbContextFactory<NekostickDbContext>>(),
+                runtimeState: serviceProvider.GetRequiredService<HostRuntimeState>(),
+                snapshotReader: serviceProvider.GetRequiredService<IHostConfigurationSnapshotReader>(),
+                runtimeOptions: serviceProvider.GetRequiredService<HostRuntimeOptions>(),
+                hostApiVersion: runtimeManager.ApiVersion);
+        });
         builder.Services.AddSingleton<IRouteFallbackDispatcher, ExtensionRouteFallbackDispatcher>();
         builder.Services.AddMicroserviceProxy();
         builder.Services.AddSingleton<IRouteTargetExecutor>(serviceProvider =>
@@ -281,6 +307,7 @@ internal static class Program
                     .GetRequiredService<ILoggerFactory>()
                     .CreateLogger(HostLoggerCategory.Routing)));
         builder.Services.AddSingleton<HostRuntimeState>();
+        builder.Services.AddSingleton<HostTerminationState>();
         builder.Services.AddDbContextFactory<NekostickDbContext>(dbContextOptions =>
             dbContextOptions.UseNekostickPostgres(bootstrap.ConnectionString));
         builder.Services.AddSingleton<IMigrationSchemaValidator, PostgresMigrationSchemaValidator>();
@@ -400,6 +427,225 @@ internal static class Program
         return new DatabaseInspection(migration, revision);
     }
 
+    private static async Task<ExtensionSummary> ReadExtensionStatusAsync(
+        WebApplication app,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var dbContext = await app.Services
+                .GetRequiredService<IDbContextFactory<NekostickDbContext>>()
+                .CreateDbContextAsync(cancellationToken);
+            var records = await dbContext.ExtensionRecords
+                .AsNoTracking()
+                .OrderBy(value => value.ExtensionId)
+                .ToListAsync(cancellationToken);
+            var nodeStates = await dbContext.ExtensionNodeStates
+                .AsNoTracking()
+                .OrderBy(value => value.NodeId)
+                .ToListAsync(cancellationToken);
+
+            var groups = new List<ExtensionNodeGroup>(records.Count);
+            var loaded = 0;
+            var failed = 0;
+            foreach (var record in records)
+            {
+                var states = nodeStates
+                    .Where(value => value.ExtensionRecordId == record.Id)
+                    .OrderBy(value => value.NodeId, StringComparer.Ordinal)
+                    .Select(value =>
+                    {
+                        var loadState = value.LoadState.ToString();
+                        if (string.Equals(loadState, nameof(DomainExtensionLoadState.Loaded), StringComparison.Ordinal))
+                        {
+                            loaded++;
+                        }
+                        else if (string.Equals(loadState, nameof(DomainExtensionLoadState.Failed), StringComparison.Ordinal))
+                        {
+                            failed++;
+                        }
+
+                        return new ExtensionNodeStatus(
+                            value.NodeId,
+                            loadState,
+                            value.FailureCode,
+                            value.ObservedContentHash);
+                    })
+                    .ToArray();
+                groups.Add(new ExtensionNodeGroup(
+                    record.ExtensionId,
+                    record.ContentHash,
+                    GetContentHashConsistency(record.ContentHash, states.Select(value => value.ObservedContentHash).ToArray()),
+                    states));
+            }
+
+            var state = groups.Count == 0
+                ? "not-started"
+                : failed > 0 || groups.Any(value => value.ContentHashConsistency is "inconsistent" or "missing" or "unobserved")
+                    ? "degraded"
+                    : "ready";
+            return new ExtensionSummary(loaded, failed, state, groups);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new ExtensionSummary(0, 0, "unavailable");
+        }
+    }
+
+    private static async Task<DoctorExtensionInspection> InspectLocalExtensionsAsync(
+        WebApplication app,
+        CancellationToken cancellationToken)
+    {
+        var nodeOptions = app.Services.GetRequiredService<HostNodeOptions>();
+        var localHashes = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
+        var hasUnreadableDirectories = false;
+        var localDirectoryState = "passed";
+        try
+        {
+            if (Directory.Exists(nodeOptions.ExtensionsRootPath))
+            {
+                foreach (var directory in Directory.EnumerateDirectories(nodeOptions.ExtensionsRootPath))
+                {
+                    var discovery = ExtensionManifestDiscovery.Discover(directory);
+                    if (!discovery.Succeeded || discovery.Manifest is not { } manifest)
+                    {
+                        hasUnreadableDirectories = true;
+                        continue;
+                    }
+
+                    if (!localHashes.TryAdd(manifest.Id, ExtensionContentDigest.TryCompute(manifest)))
+                    {
+                        duplicateIds.Add(manifest.Id);
+                        hasUnreadableDirectories = true;
+                    }
+                }
+
+                localDirectoryState = hasUnreadableDirectories ? "failed" : "passed";
+            }
+        }
+        catch (Exception)
+        {
+            localDirectoryState = "failed";
+        }
+
+        try
+        {
+            await using var dbContext = await app.Services
+                .GetRequiredService<IDbContextFactory<NekostickDbContext>>()
+                .CreateDbContextAsync(cancellationToken);
+            var records = await dbContext.ExtensionRecords
+                .AsNoTracking()
+                .OrderBy(value => value.ExtensionId)
+                .ToListAsync(cancellationToken);
+            var checks = new List<ExtensionLocalCheck>(records.Count);
+            foreach (var record in records)
+            {
+                if (duplicateIds.Contains(record.ExtensionId))
+                {
+                    checks.Add(new ExtensionLocalCheck(
+                        record.ExtensionId,
+                        "failed",
+                        "duplicate",
+                        record.ContentHash,
+                        null));
+                    continue;
+                }
+
+                if (!localHashes.TryGetValue(record.ExtensionId, out var observedHash))
+                {
+                    checks.Add(new ExtensionLocalCheck(
+                        record.ExtensionId,
+                        "failed",
+                        "missing",
+                        record.ContentHash,
+                        null));
+                    continue;
+                }
+
+                if (record.ContentHash is null)
+                {
+                    checks.Add(new ExtensionLocalCheck(
+                        record.ExtensionId,
+                        "passed",
+                        "not-required",
+                        null,
+                        observedHash));
+                    continue;
+                }
+
+                if (observedHash is null)
+                {
+                    checks.Add(new ExtensionLocalCheck(
+                        record.ExtensionId,
+                        "failed",
+                        "unavailable",
+                        record.ContentHash,
+                        null));
+                    continue;
+                }
+
+                var consistency = string.Equals(record.ContentHash, observedHash, StringComparison.OrdinalIgnoreCase)
+                    ? "consistent"
+                    : "inconsistent";
+                checks.Add(new ExtensionLocalCheck(
+                    record.ExtensionId,
+                    consistency == "consistent" ? "passed" : "failed",
+                    consistency,
+                    record.ContentHash,
+                    observedHash));
+            }
+
+            var healthy = localDirectoryState == "passed" && checks.All(value => value.Status == "passed");
+            return new DoctorExtensionInspection(
+                healthy ? "passed" : "failed",
+                localDirectoryState,
+                checks,
+                healthy);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new DoctorExtensionInspection(
+                "unavailable",
+                localDirectoryState,
+                Array.Empty<ExtensionLocalCheck>(),
+                false);
+        }
+    }
+
+    private static string GetContentHashConsistency(
+        string? expectedContentHash,
+        string?[] observedContentHashes)
+    {
+        if (expectedContentHash is null)
+        {
+            return "not-required";
+        }
+
+        if (observedContentHashes.Length == 0)
+        {
+            return "unobserved";
+        }
+
+        if (observedContentHashes.Any(value => value is null))
+        {
+            return "missing";
+        }
+
+        return observedContentHashes.All(value =>
+                string.Equals(expectedContentHash, value, StringComparison.OrdinalIgnoreCase))
+            ? "consistent"
+            : "inconsistent";
+    }
+
     private static void ConfigureRunPipeline(WebApplication app)
     {
         app.UseWebSockets();
@@ -499,4 +745,9 @@ internal static class Program
     private sealed record DatabaseInspection(
         StartupDatabaseResult Migration,
         ConfigurationReadResult<ConfigurationRevisionStatus>? Revision);
+    private sealed record DoctorExtensionInspection(
+        string ExtensionState,
+        string LocalDirectoryState,
+        IReadOnlyList<ExtensionLocalCheck> Checks,
+        bool IsHealthy);
 }

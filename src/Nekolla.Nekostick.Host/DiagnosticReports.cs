@@ -5,10 +5,10 @@ namespace Nekolla.Nekostick.Host;
 internal static class DiagnosticJson
 {
     private const string StatusSerializationFallback =
-        "{\"command\":\"status\",\"configurationVersion\":null,\"databaseState\":\"unavailable\",\"configurationRevisionState\":\"not-read\",\"nodeRegistrationState\":\"not-registered\",\"extensionSummary\":{\"loaded\":0,\"failed\":0,\"state\":\"not-started\"},\"processSummary\":{\"managed\":0,\"running\":0,\"state\":\"not-started\"},\"exitCode\":1}";
+        "{\"command\":\"status\",\"configurationVersion\":null,\"databaseState\":\"unavailable\",\"configurationRevisionState\":\"not-read\",\"nodeRegistrationState\":\"not-registered\",\"extensionSummary\":{\"loaded\":0,\"failed\":0,\"state\":\"not-started\",\"extensions\":[]},\"processSummary\":{\"managed\":0,\"running\":0,\"state\":\"not-started\"},\"exitCode\":1}";
 
     private const string DoctorSerializationFallback =
-        "{\"command\":\"doctor\",\"configurationVersion\":null,\"database\":\"unavailable\",\"migration\":\"unavailable\",\"snapshotValidity\":\"unavailable\",\"extension\":\"not-checked\",\"localDirectory\":\"not-checked\",\"exitCode\":1}";
+        "{\"command\":\"doctor\",\"configurationVersion\":null,\"database\":\"unavailable\",\"migration\":\"unavailable\",\"snapshotValidity\":\"unavailable\",\"extension\":\"not-checked\",\"localDirectory\":\"not-checked\",\"extensionChecks\":[],\"exitCode\":1}";
 
     private const string GenericSerializationFallback =
         "{\"command\":\"diagnostic\",\"exitCode\":1}";
@@ -76,11 +76,13 @@ internal sealed record StatusReport
         long? configurationVersion,
         string databaseState,
         string configurationRevisionState,
-        int exitCode)
+        int exitCode,
+        ExtensionSummary? extensionSummary = null)
     {
         ConfigurationVersion = configurationVersion;
         DatabaseState = databaseState;
         ConfigurationRevisionState = configurationRevisionState;
+        ExtensionSummary = extensionSummary ?? new ExtensionSummary();
         ExitCode = exitCode;
     }
 
@@ -89,16 +91,69 @@ internal sealed record StatusReport
     public string DatabaseState { get; }
     public string ConfigurationRevisionState { get; }
     public string NodeRegistrationState { get; } = "not-registered";
-    public ExtensionSummary ExtensionSummary { get; } = new();
+    public ExtensionSummary ExtensionSummary { get; }
     public ProcessSummary ProcessSummary { get; } = new();
     public int ExitCode { get; }
 }
 
 internal sealed record ExtensionSummary
 {
+    internal ExtensionSummary(
+        int loaded = 0,
+        int failed = 0,
+        string state = "not-started",
+        IReadOnlyList<ExtensionNodeGroup>? extensions = null)
+    {
+        Loaded = loaded;
+        Failed = failed;
+        State = state;
+        Extensions = extensions ?? Array.Empty<ExtensionNodeGroup>();
+    }
+
     public int Loaded { get; }
     public int Failed { get; }
-    public string State { get; } = "not-started";
+    public string State { get; }
+    public IReadOnlyList<ExtensionNodeGroup> Extensions { get; }
+}
+
+internal sealed record ExtensionNodeGroup
+{
+    internal ExtensionNodeGroup(
+        string extensionId,
+        string? expectedContentHash,
+        string contentHashConsistency,
+        IReadOnlyList<ExtensionNodeStatus> nodes)
+    {
+        ExtensionId = extensionId;
+        ExpectedContentHash = expectedContentHash;
+        ContentHashConsistency = contentHashConsistency;
+        Nodes = nodes;
+    }
+
+    public string ExtensionId { get; }
+    public string? ExpectedContentHash { get; }
+    public string ContentHashConsistency { get; }
+    public IReadOnlyList<ExtensionNodeStatus> Nodes { get; }
+}
+
+internal sealed record ExtensionNodeStatus
+{
+    internal ExtensionNodeStatus(
+        string nodeId,
+        string loadState,
+        string failureCode,
+        string? observedContentHash)
+    {
+        NodeId = nodeId;
+        LoadState = loadState;
+        FailureCode = failureCode;
+        ObservedContentHash = observedContentHash;
+    }
+
+    public string NodeId { get; }
+    public string LoadState { get; }
+    public string FailureCode { get; }
+    public string? ObservedContentHash { get; }
 }
 
 internal sealed record ProcessSummary
@@ -115,12 +170,18 @@ internal sealed record DoctorReport
         string database,
         string migration,
         string snapshotValidity,
-        int exitCode)
+        int exitCode,
+        string extension = "not-checked",
+        string localDirectory = "not-checked",
+        IReadOnlyList<ExtensionLocalCheck>? extensionChecks = null)
     {
         ConfigurationVersion = configurationVersion;
         Database = database;
         Migration = migration;
         SnapshotValidity = snapshotValidity;
+        Extension = extension;
+        LocalDirectory = localDirectory;
+        ExtensionChecks = extensionChecks ?? Array.Empty<ExtensionLocalCheck>();
         ExitCode = exitCode;
     }
 
@@ -129,7 +190,31 @@ internal sealed record DoctorReport
     public string Database { get; }
     public string Migration { get; }
     public string SnapshotValidity { get; }
-    public string Extension { get; } = "not-checked";
-    public string LocalDirectory { get; } = "not-checked";
+    public string Extension { get; }
+    public string LocalDirectory { get; }
+    public IReadOnlyList<ExtensionLocalCheck> ExtensionChecks { get; }
     public int ExitCode { get; }
+}
+
+internal sealed record ExtensionLocalCheck
+{
+    internal ExtensionLocalCheck(
+        string extensionId,
+        string status,
+        string contentHashConsistency,
+        string? expectedContentHash,
+        string? observedContentHash)
+    {
+        ExtensionId = extensionId;
+        Status = status;
+        ContentHashConsistency = contentHashConsistency;
+        ExpectedContentHash = expectedContentHash;
+        ObservedContentHash = observedContentHash;
+    }
+
+    public string ExtensionId { get; }
+    public string Status { get; }
+    public string ContentHashConsistency { get; }
+    public string? ExpectedContentHash { get; }
+    public string? ObservedContentHash { get; }
 }

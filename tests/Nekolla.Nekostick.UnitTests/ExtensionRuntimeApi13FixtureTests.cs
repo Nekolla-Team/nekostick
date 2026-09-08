@@ -34,7 +34,7 @@ public sealed partial class ExtensionRuntimeTests
             TestContext.Current.CancellationToken);
         Assert.Equal(ExtensionInvocationState.Handled, currentResult.State);
         var currentBody = Body(currentResult);
-        Assert.Contains("api=1.3.2", currentBody, StringComparison.Ordinal);
+        Assert.Contains("api=1.3.3", currentBody, StringComparison.Ordinal);
         Assert.Contains(
             "api13=Supported;sibling=True;supervisor=NotFound;routeSubscribe=True;routeHook=True;logWriter=Called;dataDirectory=empty",
             currentBody,
@@ -129,6 +129,21 @@ public sealed partial class ExtensionRuntimeTests
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.NotFound)));
+
+        public ValueTask<ConfigurationWriteResult> ResumeAsync(
+            Guid serviceId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+
+        public ValueTask<ConfigurationWriteResult> RestartAsync(
+            Guid serviceId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+
     }
 
     private sealed class RecordingLogWriter : IExtensionLogWriter

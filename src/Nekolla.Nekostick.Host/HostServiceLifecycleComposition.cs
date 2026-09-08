@@ -69,6 +69,16 @@ public interface IHostServiceLifecycleCoordinator
         HostConfigurationSnapshot snapshot,
         Guid serviceId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Retries a service whose executable is currently unavailable.</summary>
+    ValueTask<ConfigurationWriteResult> ResumeAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Restarts one local service generation without changing global configuration.</summary>
+    ValueTask<ConfigurationWriteResult> RestartAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Coordinates service generations, leases, health, restart handoff, and endpoint publication.</summary>
@@ -171,6 +181,17 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 {
                     return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Ready, active.Supervisor.Snapshot);
                 }
+                if (slot.Active is { Ready: false } waiting &&
+                    waiting.Configuration.Version == service.Version &&
+                    waiting.Supervisor.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
+                {
+                    return new(
+                        serviceId,
+                        snapshot.Version,
+                        HostServiceReadinessStatus.Unavailable,
+                        waiting.Supervisor.Snapshot);
+                }
+
 
                 if (!_runtimeState.NewServicesAllowed)
                 {
@@ -236,6 +257,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 await ReconcileAsync(snapshot, stoppingToken).ConfigureAwait(false);
             }
 
+            await RetryWaitingServicesAsync(stoppingToken).ConfigureAwait(false);
             await RenewLeasesAsync(stoppingToken).ConfigureAwait(false);
             await ObserveReadyHealthAsync(stoppingToken).ConfigureAwait(false);
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
@@ -382,6 +404,225 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             .ToArray();
         await Task.WhenAll(eagerStarts).ConfigureAwait(false);
     }
+
+    private async Task RetryWaitingServicesAsync(CancellationToken cancellationToken)
+    {
+        foreach (var slot in _slots.Values)
+        {
+            if (IsStopping || cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            ServiceGeneration? generation;
+            Task<HostServiceReadinessResult>? retryTask = null;
+            HostConfigurationSnapshot? snapshot = _snapshotHolder.Current;
+            lock (_lifecycleGate)
+            {
+                lock (slot.Gate)
+                {
+                    generation = slot.Active;
+                    var current = generation?.Supervisor.Snapshot;
+                    if (slot.Startup is not null ||
+                        generation is null ||
+                        generation.Ready ||
+                        current is null ||
+                        current.ObservedLifecycle != ServiceLifecycleState.Waiting ||
+                        current.Deadline is not { } deadline ||
+                        !deadline.IsReached(DateTimeOffset.UtcNow) ||
+                        snapshot is null ||
+                        !_runtimeState.NewServicesAllowed ||
+                        !snapshot.Services.Any(value =>
+                            value.Id == generation.Configuration.Id &&
+                            value.Version == generation.Configuration.Version &&
+                            value.Enabled) ||
+                        !IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id))
+                    {
+                        continue;
+                    }
+
+                    slot.StartupGeneration = generation.Configuration.Version;
+                    retryTask = RetryWaitingGenerationAsync(slot, generation, snapshot, cancellationToken);
+                    slot.Startup = retryTask;
+                }
+            }
+
+            if (retryTask is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                await retryTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(RetryWaitingServicesAsync));
+            }
+            finally
+            {
+                lock (slot.Gate)
+                {
+                    if (ReferenceEquals(slot.Startup, retryTask))
+                    {
+                        slot.Startup = null;
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task<HostServiceReadinessResult> RetryWaitingGenerationAsync(
+        ServiceSlot slot,
+        ServiceGeneration generation,
+        HostConfigurationSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        SupervisorOperationResult started;
+        try
+        {
+            started = await generation.Supervisor.StartAsync(
+                DateTimeOffset.UtcNow,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(generation.Configuration.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled, generation.Supervisor.Snapshot);
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(RetryWaitingGenerationAsync));
+            await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
+            return new(generation.Configuration.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable, generation.Supervisor.Snapshot);
+        }
+        if (started.Reason == ServiceStateReasonCode.MissingHostEnvironment &&
+            started.FailureMessage is { } placeholder)
+        {
+            HostLogMessages.ServiceLaunchMissingHostEnvironment(
+                _logger,
+                generation.Configuration.Id,
+                snapshot.Version,
+                placeholder);
+        }
+        if (started.Status == SupervisorOperationStatus.Cancelled && cancellationToken.IsCancellationRequested)
+        {
+            await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
+            throw new OperationCanceledException(cancellationToken);
+        }
+        if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
+        {
+            _runtimeState.MarkDatabaseUnavailable();
+            return new(
+                generation.Configuration.Id,
+                snapshot.Version,
+                HostServiceReadinessStatus.DatabaseUnavailable,
+                started.Snapshot);
+        }
+
+
+        if (started.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
+        {
+            PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "waiting");
+            return new(
+                generation.Configuration.Id,
+                snapshot.Version,
+                HostServiceReadinessStatus.Unavailable,
+                started.Snapshot);
+        }
+
+        if (started.Status != SupervisorOperationStatus.Applied || generation.Supervisor.Lease is null)
+        {
+            if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
+            {
+                _runtimeState.MarkDatabaseUnavailable();
+                return new(
+                    generation.Configuration.Id,
+                    snapshot.Version,
+                    HostServiceReadinessStatus.DatabaseUnavailable,
+                    started.Snapshot);
+            }
+
+            await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
+            return new(
+                generation.Configuration.Id,
+                snapshot.Version,
+                HostServiceReadinessStatus.Unavailable,
+                started.Snapshot);
+        }
+
+        (PortLease Lease, HealthRetryState Retry)? healthy;
+        try
+        {
+            healthy = await WaitForHealthyAsync(
+                generation.Supervisor,
+                generation.Configuration.Id,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
+            throw;
+        }
+
+        if (healthy is not { } ready)
+        {
+            await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return new(
+                generation.Configuration.Id,
+                snapshot.Version,
+                HostServiceReadinessStatus.Unavailable,
+                generation.Supervisor.Snapshot);
+        }
+
+        lock (slot.Gate)
+        {
+            if (!ReferenceEquals(slot.Active, generation))
+            {
+                return new(
+                    generation.Configuration.Id,
+                    snapshot.Version,
+                    HostServiceReadinessStatus.Cancelled,
+                    generation.Supervisor.Snapshot);
+            }
+
+            generation.Lease = ready.Lease;
+            generation.HealthRetryState = ready.Retry;
+            generation.Ready = true;
+        }
+
+        await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        HostLogMessages.ServiceReady(_logger, generation.Configuration.Id, generation.SnapshotVersion);
+        PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "ready");
+        return new(
+            generation.Configuration.Id,
+            snapshot.Version,
+            HostServiceReadinessStatus.Ready,
+            generation.Supervisor.Snapshot);
+    }
+
+    private async Task WithdrawFailedWaitingGenerationAsync(ServiceSlot slot, ServiceGeneration generation)
+    {
+        lock (slot.Gate)
+        {
+            generation.Ready = false;
+            if (ReferenceEquals(slot.Active, generation))
+            {
+                slot.Active = null;
+            }
+        }
+
+        await StopOrReleaseGenerationAfterExitAsync(slot, generation, CancellationToken.None).ConfigureAwait(false);
+        await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "stopped");
+    }
     internal async Task StopOwnedServicesAsync(
         string extensionId,
         CancellationToken cancellationToken = default)
@@ -444,10 +685,35 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 DateTimeOffset.UtcNow,
                 LeasePolicy,
                 cancellationToken).ConfigureAwait(false);
-            if (result.Status != SupervisorOperationStatus.Applied || result.Lease is null)
+            if (result.LeaseOwnershipLost)
+            {
+                lock (slot.Gate)
+                {
+                    if (ReferenceEquals(slot.Active, generation))
+                    {
+                        slot.Active = null;
+                    }
+
+                    generation.Ready = false;
+                }
+
+                await StopOrReleaseGenerationAfterExitAsync(
+                    slot,
+                    generation,
+                    CancellationToken.None).ConfigureAwait(false);
+                PublishServiceState(
+                    generation.Configuration.Id,
+                    generation.SnapshotVersion,
+                    "stopped");
+                await PublishReadyEndpointsAsync().ConfigureAwait(false);
+            }
+            else if (result.Reason == ServiceStateReasonCode.DatabaseUnavailable)
+            {
+                _runtimeState.MarkDatabaseUnavailable();
+            }
+            else if (result.Status != SupervisorOperationStatus.Applied || result.Lease is null)
             {
                 generation.Ready = false;
-                _runtimeState.MarkDatabaseUnavailable();
                 PublishServiceState(
                     generation.Configuration.Id,
                     generation.SnapshotVersion,

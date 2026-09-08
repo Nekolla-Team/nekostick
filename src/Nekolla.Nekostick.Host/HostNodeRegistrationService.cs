@@ -15,8 +15,12 @@ public sealed class HostNodeRegistrationService : BackgroundService
     private readonly HostRuntimeState _runtimeState;
     private readonly HostRuntimeOptions _options;
     private readonly IHostNodeActivityLease _activityLease;
+    private readonly IHostApplicationLifetime? _applicationLifetime;
+    private readonly HostTerminationState _terminationState;
     private readonly ILogger<HostNodeRegistrationService> _logger;
     private NekostickDbContext? _dbContext;
+    private int _retryAttempt;
+    private int _alreadyActiveAttempts;
 
     /// <summary>Creates the node registration and heartbeat service.</summary>
     public HostNodeRegistrationService(
@@ -25,7 +29,9 @@ public sealed class HostNodeRegistrationService : BackgroundService
         HostRuntimeState runtimeState,
         HostRuntimeOptions options,
         ILogger<HostNodeRegistrationService> logger,
-        IHostNodeActivityLease? activityLease = null)
+        IHostNodeActivityLease? activityLease = null,
+        IHostApplicationLifetime? applicationLifetime = null,
+        HostTerminationState? terminationState = null)
     {
         _dbContextFactory = dbContextFactory ?? throw new ArgumentNullException(nameof(dbContextFactory));
         _snapshotAccessor = snapshotAccessor ?? throw new ArgumentNullException(nameof(snapshotAccessor));
@@ -33,6 +39,8 @@ public sealed class HostNodeRegistrationService : BackgroundService
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _activityLease = activityLease ?? new PostgresHostNodeActivityLease(options);
+        _applicationLifetime = applicationLifetime;
+        _terminationState = terminationState ?? new HostTerminationState();
     }
 
     /// <inheritdoc />
@@ -46,6 +54,15 @@ public sealed class HostNodeRegistrationService : BackgroundService
                 _dbContext.Database.GetDbConnection(),
                 cancellationToken);
             await base.StartAsync(cancellationToken);
+        }
+        catch (HostNodeAlreadyActiveException exception)
+        {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StartAsync));
+            HostLogMessages.HostNodeActivityLost(_logger, _options.NodeId);
+            _terminationState.MarkFatal();
+            _applicationLifetime?.StopApplication();
+            await DisposeResourcesAsync();
+            throw;
         }
         catch (Exception exception)
         {
@@ -65,31 +82,23 @@ public sealed class HostNodeRegistrationService : BackgroundService
                 try
                 {
                     await RegisterOrHeartbeatAsync(stoppingToken);
+                    _retryAttempt = 0;
                     await Task.Delay(_options.HeartbeatInterval, stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     return;
                 }
-                catch (HostNodeActivityLostException exception)
-                {
-                    HostLogMessages.FailureDetails(_logger, exception, nameof(RegisterOrHeartbeatAsync));
-                    _runtimeState.MarkDatabaseUnavailable();
-                    HostLogMessages.NodeHeartbeatUnavailable(_logger);
-                    return;
-                }
                 catch (Exception exception)
                 {
                     HostLogMessages.FailureDetails(_logger, exception, nameof(RegisterOrHeartbeatAsync));
                     _runtimeState.MarkDatabaseUnavailable();
-                    _dbContext?.ChangeTracker.Clear();
                     HostLogMessages.NodeHeartbeatUnavailable(_logger);
-                    await Task.Delay(
-                        HostRetryPolicy.GetDelay(
-                            _options.ReconnectInitialDelay,
-                            _options.ReconnectMaximumDelay,
-                            0),
-                        stoppingToken);
+
+                    if (!await RecoverConnectionAsync(stoppingToken))
+                    {
+                        return;
+                    }
                 }
             }
         }
@@ -109,6 +118,80 @@ public sealed class HostNodeRegistrationService : BackgroundService
         finally
         {
             await DisposeResourcesAsync();
+        }
+    }
+
+    private async Task<bool> RecoverConnectionAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var delay = HostRetryPolicy.GetDelay(
+                _options.ReconnectInitialDelay,
+                _options.ReconnectMaximumDelay,
+                _retryAttempt++);
+            await Task.Delay(delay, cancellationToken);
+
+            try
+            {
+                await ReconnectAsync(cancellationToken);
+                _retryAttempt = 0;
+                _alreadyActiveAttempts = 0;
+                _runtimeState.MarkDatabaseAvailable();
+                return true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (HostNodeAlreadyActiveException exception)
+            {
+                // A dropped connection can leave our own zombie session holding the advisory lock
+                // until the server reaps it; grant a bounded number of grace retries (the loop's
+                // backoff delay applies) before declaring a real takeover fatal.
+                if (++_alreadyActiveAttempts <= 3)
+                {
+                    HostLogMessages.FailureDetails(_logger, exception, nameof(ReconnectAsync));
+                    HostLogMessages.HostNodeActivityContended(_logger, _alreadyActiveAttempts);
+                    continue;
+                }
+
+                HostLogMessages.FailureDetails(_logger, exception, nameof(ReconnectAsync));
+                HostLogMessages.HostNodeActivityLost(_logger, _options.NodeId);
+                _terminationState.MarkFatal();
+                _applicationLifetime?.StopApplication();
+                return false;
+            }
+            catch (Exception exception)
+            {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(ReconnectAsync));
+                _runtimeState.MarkDatabaseUnavailable();
+            }
+        }
+
+        return false;
+    }
+
+    private async Task ReconnectAsync(CancellationToken cancellationToken)
+    {
+        var previousContext = Interlocked.Exchange(ref _dbContext, null);
+        if (previousContext is not null)
+        {
+            await previousContext.DisposeAsync();
+        }
+
+        var replacementContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        try
+        {
+            await replacementContext.Database.OpenConnectionAsync(cancellationToken);
+            await _activityLease.AcquireAsync(
+                replacementContext.Database.GetDbConnection(),
+                cancellationToken);
+            _dbContext = replacementContext;
+        }
+        catch
+        {
+            await replacementContext.DisposeAsync();
+            throw;
         }
     }
 
@@ -178,4 +261,16 @@ public sealed class HostNodeRegistrationService : BackgroundService
             await dbContext.DisposeAsync();
         }
     }
+}
+
+/// <summary>Stores a nonzero host exit request for propagation after graceful shutdown.</summary>
+public sealed class HostTerminationState
+{
+    private int _exitCode;
+
+    /// <summary>Gets the requested process exit code, or zero when no fatal stop was requested.</summary>
+    public int ExitCode => Volatile.Read(ref _exitCode);
+
+    internal void MarkFatal(int exitCode = 1) =>
+        Interlocked.CompareExchange(ref _exitCode, exitCode, 0);
 }

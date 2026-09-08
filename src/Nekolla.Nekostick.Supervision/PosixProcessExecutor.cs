@@ -172,6 +172,17 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
             return new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted, instanceId, processId, processStartedAt);
         }
+        catch (HostEnvironmentExpansionException exception)
+        {
+            if (process is not null)
+            {
+                await KillHelperAsync(process).ConfigureAwait(false);
+            }
+
+            return exception.MissingPlaceholder is { } placeholder
+                ? Rejected(placeholder)
+                : Rejected();
+        }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             if (process is not null)
@@ -190,6 +201,153 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
             return Rejected();
         }
+    }
+
+    /// <summary>Expands host placeholders without exposing expanded environment values.</summary>
+    /// <param name="value">The opaque configured environment value.</param>
+    /// <param name="maximumLength">The bounded expanded value length.</param>
+    /// <returns>The value with host placeholders expanded once.</returns>
+    private static string ExpandEnvironmentValue(string value, int maximumLength)
+    {
+        var offset = 0;
+        var copiedThrough = 0;
+        StringBuilder? expanded = null;
+        while (true)
+        {
+            var start = value.IndexOf("${", offset, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                break;
+            }
+
+            if (value.IndexOf("${HOST:", start, StringComparison.Ordinal) != start)
+            {
+                // Read-path compatibility keeps non-HOST ${...} text literal. Skip a
+                // complete literal so a nested token cannot be expanded accidentally.
+                var literalEnd = value.IndexOf('}', start + 2);
+                if (literalEnd < 0)
+                {
+                    break;
+                }
+
+                offset = literalEnd + 1;
+                continue;
+            }
+
+            var variableStart = start + 7;
+            var end = value.IndexOf('}', variableStart);
+            if ((start > 0 && value[start - 1] == '\\') ||
+                end < 0 ||
+                end - start + 1 > 256 ||
+                end <= variableStart ||
+                !IsValidHostVariableName(value, variableStart, end))
+            {
+                throw new HostEnvironmentExpansionException();
+            }
+
+            var variableName = value.Substring(variableStart, end - variableStart);
+            var hostValue = System.Environment.GetEnvironmentVariable(variableName);
+            if (hostValue is null)
+            {
+                throw new HostEnvironmentExpansionException(value.Substring(start, end - start + 1));
+            }
+
+            expanded ??= new StringBuilder(Math.Min(value.Length, maximumLength));
+            var literalLength = start - copiedThrough;
+            if (expanded.Length > maximumLength - literalLength ||
+                hostValue.Length > maximumLength - expanded.Length - literalLength)
+            {
+                throw new HostEnvironmentExpansionException();
+            }
+
+            expanded.Append(value, copiedThrough, literalLength);
+            expanded.Append(hostValue);
+            copiedThrough = end + 1;
+            offset = copiedThrough;
+        }
+
+        if (expanded is null)
+        {
+            if (value.Length > maximumLength)
+            {
+                throw new HostEnvironmentExpansionException();
+            }
+
+            return value;
+        }
+
+        var suffixLength = value.Length - copiedThrough;
+        if (expanded.Length > maximumLength - suffixLength)
+        {
+            throw new HostEnvironmentExpansionException();
+        }
+
+        return expanded.Append(value, copiedThrough, suffixLength).ToString();
+    }
+
+    private static bool IsValidHostVariableName(string value, int start, int end)
+    {
+        if (!(char.IsAsciiLetter(value[start]) || value[start] == '_'))
+        {
+            return false;
+        }
+
+        for (var index = start + 1; index < end; index++)
+        {
+            var character = value[index];
+            if (!(char.IsAsciiLetterOrDigit(character) || character == '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private sealed class HostEnvironmentExpansionException : InvalidOperationException
+    {
+        internal HostEnvironmentExpansionException(string? missingPlaceholder = null)
+            : base(missingPlaceholder is null
+                ? "The process environment contains an invalid host placeholder."
+                : $"The host environment variable placeholder {missingPlaceholder} is not defined.")
+        {
+            MissingPlaceholder = missingPlaceholder;
+        }
+
+        internal string? MissingPlaceholder { get; }
+    }
+
+    private Process CreateHelperProcess(ProcessLaunchSpecification specification)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = helperPath!.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : helperPath,
+            WorkingDirectory = specification.WorkingDirectory,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = new UTF8Encoding(false, false),
+            StandardErrorEncoding = new UTF8Encoding(false, false)
+        };
+        if (helperPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+        {
+            startInfo.ArgumentList.Add(helperPath);
+        }
+
+        startInfo.ArgumentList.Add("--grace-ms");
+        startInfo.ArgumentList.Add(((int)helperGracePeriod.TotalMilliseconds).ToString(CultureInfo.InvariantCulture));
+        foreach (var pair in specification.Environment.Values)
+        {
+            // The helper inherits this expanded environment and its direct child inherits
+            // it again; launch arguments were already given their independent $PORT pass.
+            startInfo.Environment[pair.Key] = ExpandEnvironmentValue(
+                pair.Value,
+                specification.Limits.MaximumEnvironmentValueLength);
+        }
+
+        return new Process { StartInfo = startInfo, EnableRaisingEvents = false };
     }
 
     /// <summary>Stops the current process generation for a service.</summary>
@@ -373,34 +531,6 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         lease.ServiceId == serviceId &&
         !lease.Exited.Task.IsCompleted;
 
-    private Process CreateHelperProcess(ProcessLaunchSpecification specification)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = helperPath!.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? "dotnet" : helperPath,
-            WorkingDirectory = specification.WorkingDirectory,
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            StandardOutputEncoding = new UTF8Encoding(false, false),
-            StandardErrorEncoding = new UTF8Encoding(false, false)
-        };
-        if (helperPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
-        {
-            startInfo.ArgumentList.Add(helperPath);
-        }
-
-        startInfo.ArgumentList.Add("--grace-ms");
-        startInfo.ArgumentList.Add(((int)helperGracePeriod.TotalMilliseconds).ToString(CultureInfo.InvariantCulture));
-        foreach (var pair in specification.Environment.Values)
-        {
-            startInfo.Environment[pair.Key] = pair.Value;
-        }
-
-        return new Process { StartInfo = startInfo, EnableRaisingEvents = false };
-    }
 
     private static async Task KillHelperAsync(Process process)
     {
@@ -422,8 +552,13 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         }
     }
 
-    private static ProcessOperationResult Rejected() =>
-        new(ProcessOperationStatus.Rejected, ServiceStateReasonCode.StartRejected);
+    private static ProcessOperationResult Rejected(string? failureMessage = null) =>
+        failureMessage is null
+            ? new(ProcessOperationStatus.Rejected, ServiceStateReasonCode.StartRejected)
+            : new(
+                ProcessOperationStatus.Rejected,
+                ServiceStateReasonCode.MissingHostEnvironment,
+                failureMessage: failureMessage);
 
     private static bool IsSupportedPlatform =>
         (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) &&

@@ -31,9 +31,8 @@ internal static class HostConfigurationServiceValidator
 
         foreach (var pair in value.Environment)
         {
-            if (!HostConfigurationValueValidator.IsSafeEnvironmentKey(pair.Key) || pair.Value is null ||
-                pair.Value.Length > HostConfigurationValueValidator.MaxEnvironmentValueLength ||
-                ContainsControlCharacter(pair.Value))
+            if (!HostConfigurationValueValidator.IsSafeEnvironmentKey(pair.Key) ||
+                !HostConfigurationValueValidator.IsSafeEnvironmentValue(pair.Value))
             {
                 HostConfigurationValueValidator.Throw();
             }

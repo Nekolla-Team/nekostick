@@ -1,3 +1,5 @@
+using Nekolla.Nekostick.Contracts;
+
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Describes the fail-closed capabilities of the host runtime.</summary>
@@ -65,6 +67,9 @@ public sealed class HostRuntimeState
     private int _databaseUnavailable;
     private int _configurationValid;
     private int _stagedConfigurationWritesAllowed;
+    private SnapshotObservation _lastSnapshotObservation = new(
+        ExtensionHostSnapshotState.Unknown,
+        null);
 
     /// <summary>Creates fail-closed runtime state.</summary>
     public HostRuntimeState(HostConfigurationSnapshotHolder snapshotHolder, HostNodeOptions nodeOptions)
@@ -77,6 +82,34 @@ public sealed class HostRuntimeState
 
     /// <summary>Gets the invocation-local host safety switches.</summary>
     internal HostNodeOptions NodeOptions => _nodeOptions;
+    /// <summary>Gets the most recent complete snapshot outcome.</summary>
+    public ExtensionHostSnapshotState LastSnapshotState =>
+        Volatile.Read(ref _lastSnapshotObservation).State;
+
+    /// <summary>Gets the UTC time of the most recent snapshot outcome, when known.</summary>
+    public DateTimeOffset? LastSnapshotAt =>
+        Volatile.Read(ref _lastSnapshotObservation).At;
+
+    internal HostConfigurationSnapshot? CurrentSnapshot => _snapshotHolder.Current;
+
+    internal (ExtensionHostSnapshotState State, DateTimeOffset? At) ReadLastSnapshotObservation()
+    {
+        var observation = Volatile.Read(ref _lastSnapshotObservation);
+        return (observation.State, observation.At);
+    }
+
+    internal bool TryGetServiceOwner(Guid serviceId, out string? ownerExtensionId)
+    {
+        var routingSnapshot = _snapshotHolder.RoutingSnapshot;
+        if (routingSnapshot is not null &&
+            routingSnapshot.ServiceOwners.TryGetValue(serviceId, out ownerExtensionId))
+        {
+            return true;
+        }
+
+        ownerExtensionId = null;
+        return false;
+    }
 
     /// <summary>Gets the current safe capability state.</summary>
     public HostRuntimeStatus Status => new(
@@ -91,7 +124,7 @@ public sealed class HostRuntimeState
     public bool IsReady => _snapshotHolder.Current is not null;
 
     /// <summary>Gets whether a candidate snapshot is staged without being published.</summary>
-    internal bool HasStagedSnapshot => _snapshotHolder.Current is null && _snapshotHolder.HasSnapshot;
+    internal bool HasStagedSnapshot => _snapshotHolder.HasStagedSnapshot;
 
     /// <summary>Gets whether extension-scoped configuration writes may be attempted.</summary>
     internal bool ExtensionConfigurationWritesAllowed =>
@@ -112,6 +145,7 @@ public sealed class HostRuntimeState
         Volatile.Write(ref _databaseUnavailable, 0);
         Volatile.Write(ref _databaseAvailable, 1);
         Volatile.Write(ref _configurationValid, 1);
+        RecordSnapshotState(ExtensionHostSnapshotState.Accepted);
     }
 
     internal void BeginStagedConfigurationWrites()
@@ -130,6 +164,7 @@ public sealed class HostRuntimeState
     {
         Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
         Volatile.Write(ref _configurationValid, 0);
+        RecordSnapshotState(ExtensionHostSnapshotState.Rejected);
     }
 
     internal void MarkDatabaseAvailable()
@@ -145,4 +180,12 @@ public sealed class HostRuntimeState
         Volatile.Write(ref _databaseAvailable, 0);
         Volatile.Write(ref _configurationValid, 0);
     }
+    private void RecordSnapshotState(ExtensionHostSnapshotState state) =>
+        Volatile.Write(
+            ref _lastSnapshotObservation,
+            new SnapshotObservation(state, DateTimeOffset.UtcNow));
+
+    private sealed record SnapshotObservation(
+        ExtensionHostSnapshotState State,
+        DateTimeOffset? At);
 }

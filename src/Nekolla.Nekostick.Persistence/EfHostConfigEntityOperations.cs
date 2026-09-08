@@ -2,6 +2,7 @@ using System.Text.Json;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence.Entities;
+using PersistenceExtensionNodeState = Nekolla.Nekostick.Persistence.Entities.ExtensionNodeState;
 using DomainExtensionLoadState = Nekolla.Nekostick.Domain.ExtensionLoadState;
 using DomainServiceRestartPolicy = Nekolla.Nekostick.Domain.ServiceRestartPolicy;
 
@@ -25,6 +26,7 @@ internal sealed class EfHostConfigEntityOperations
         List<Service> services,
         List<ExtensionRecord> extensionRecords,
         List<ExtensionSetting> extensionSettings,
+        List<PersistenceExtensionNodeState> extensionNodeStates,
         DateTimeOffset now,
         string? ownerExtensionId = null,
         IReadOnlySet<Guid>? ownedRouteIds = null,
@@ -43,8 +45,11 @@ internal sealed class EfHostConfigEntityOperations
         _dbContext.ExtensionSettings.RemoveRange(extensionSettings.Where(value =>
             !incomingSettingIds.Contains(
                 extensionRecords.Single(record => record.Id == value.ExtensionRecordId).ExtensionId)));
-        _dbContext.ExtensionRecords.RemoveRange(extensionRecords.Where(value =>
-            !incomingExtensionIds.Contains(value.ExtensionId)));
+        var removedExtensionRecords = extensionRecords.Where(value => !incomingExtensionIds.Contains(value.ExtensionId)).ToArray();
+        var removedExtensionRecordIds = removedExtensionRecords.Select(static value => value.Id).ToHashSet();
+        _dbContext.ExtensionNodeStates.RemoveRange(extensionNodeStates.Where(value =>
+            removedExtensionRecordIds.Contains(value.ExtensionRecordId)));
+        _dbContext.ExtensionRecords.RemoveRange(removedExtensionRecords);
         _dbContext.Services.RemoveRange(services.Where(value => !incomingServiceIds.Contains(value.Id)));
 
         UpdateGlobalSettings(globalSettings, changes.GlobalSettings, now);
@@ -347,6 +352,7 @@ internal sealed class EfHostConfigEntityOperations
             Id = EfHostConfigRevisionHelper.NewUuidV7(),
             ExtensionId = value.ExtensionId,
             InstalledVersion = value.Version,
+            ContentHash = value.ContentHash,
             LoadState = (DomainExtensionLoadState)value.LoadState,
             CreatedAt = now,
             UpdatedAt = now,
@@ -356,6 +362,7 @@ internal sealed class EfHostConfigEntityOperations
     private static void UpdateExtensionRecord(ExtensionRecord entity, ExtensionRecordConfiguration value, DateTimeOffset now)
     {
         entity.InstalledVersion = value.Version;
+        entity.ContentHash = value.ContentHash;
         entity.LoadState = (DomainExtensionLoadState)value.LoadState;
         entity.UpdatedAt = now;
         entity.Version = EfHostConfigRevisionHelper.IncrementVersion(entity.Version);

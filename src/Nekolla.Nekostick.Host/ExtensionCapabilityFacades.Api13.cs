@@ -9,13 +9,29 @@ namespace Nekolla.Nekostick.Host;
 
 internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
 {
+    private readonly string? _extensionId;
+    private readonly HostRuntimeState? _runtimeState;
+    private readonly IHostServiceLifecycleCoordinator? _lifecycle;
     private readonly IHostServiceRuntimeSnapshotAccessor? _runtime;
     private readonly IMicroserviceForwardingTelemetry? _forwarding;
 
     internal ExtensionSupervisorFacade(
         IHostServiceRuntimeSnapshotAccessor? runtime,
         IMicroserviceForwardingTelemetry? forwarding)
+        : this(null, null, null, runtime, forwarding)
     {
+    }
+
+    internal ExtensionSupervisorFacade(
+        string? extensionId,
+        HostRuntimeState? runtimeState,
+        IHostServiceLifecycleCoordinator? lifecycle,
+        IHostServiceRuntimeSnapshotAccessor? runtime,
+        IMicroserviceForwardingTelemetry? forwarding)
+    {
+        _extensionId = extensionId;
+        _runtimeState = runtimeState;
+        _lifecycle = lifecycle;
         _runtime = runtime;
         _forwarding = forwarding;
     }
@@ -127,6 +143,42 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         }
     }
 
+    public ValueTask<ConfigurationWriteResult> ResumeAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default) =>
+        ExecuteLifecycleAsync(
+            serviceId,
+            static (lifecycle, id, ct) => lifecycle.ResumeAsync(id, ct),
+            cancellationToken);
+
+    public ValueTask<ConfigurationWriteResult> RestartAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default) =>
+        ExecuteLifecycleAsync(
+            serviceId,
+            static (lifecycle, id, ct) => lifecycle.RestartAsync(id, ct),
+            cancellationToken);
+
+    private ValueTask<ConfigurationWriteResult> ExecuteLifecycleAsync(
+        Guid serviceId,
+        Func<IHostServiceLifecycleCoordinator, Guid, CancellationToken, ValueTask<ConfigurationWriteResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_lifecycle is null)
+        {
+            return ValueTask.FromResult(
+                ConfigurationWriteResult.Failure(
+                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+        }
+
+        // Management plane: no ownership filtering — extensions are trusted operators and
+        // Host-owned services have no other management entry point. Unknown service IDs are
+        // reported as NotFound by the coordinator.
+        return operation(_lifecycle, serviceId, cancellationToken);
+    }
+
+    
     private ExtensionServiceRuntimeSnapshot ToContract(HostServiceRuntimeSnapshot value)
     {
         var forwarding = _forwarding?.Read(value.ServiceId) ?? default;

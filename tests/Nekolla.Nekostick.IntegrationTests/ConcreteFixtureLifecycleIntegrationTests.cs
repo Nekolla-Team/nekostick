@@ -180,7 +180,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
     }
 
     [Fact]
-    public async Task HostCompositionPublishesEndpointOnlyAfterHttpHealthAndWithdrawsItOnRenewalFailure()
+    public async Task HostCompositionKeepsEndpointDuringDatabaseRenewalOutage()
     {
         await using var host = await HostLifecycleHarness.CreateAsync(
             ContractRestartPolicy.Never,
@@ -206,7 +206,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         host.LeaseStore.FailRenewals = true;
         await host.RenewLeasesAsync();
 
-        Assert.Empty(host.Publisher.Current);
+        Assert.True(host.Publisher.Current.ContainsKey(host.ServiceId));
         Assert.False(host.RuntimeState.Status.DatabaseAvailable);
     }
 

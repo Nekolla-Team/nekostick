@@ -30,13 +30,17 @@ public sealed record SupervisorOperationResult
     /// <param name="lease">The lease associated with the operation, when available.</param>
     /// <param name="restart">The restart plan, when one was produced.</param>
     /// <param name="health">The health retry decision, when one was produced.</param>
+    /// <param name="failureMessage">A safe launch token, when a host environment variable was missing.</param>
+    /// <param name="leaseOwnershipLost">Whether persistence confirmed that the lease is no longer owned.</param>
     public SupervisorOperationResult(
         SupervisorOperationStatus status,
         ServiceStateReasonCode reason,
         ServiceRuntimeSnapshot snapshot,
         PortLease? lease = null,
         RestartPlan? restart = null,
-        HealthRetryDecision? health = null)
+        HealthRetryDecision? health = null,
+        string? failureMessage = null,
+        bool leaseOwnershipLost = false)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         Status = status;
@@ -45,6 +49,10 @@ public sealed record SupervisorOperationResult
         Lease = lease;
         Restart = restart;
         Health = health;
+        FailureMessage = reason == ServiceStateReasonCode.MissingHostEnvironment
+            ? failureMessage
+            : null;
+        LeaseOwnershipLost = leaseOwnershipLost;
     }
 
     /// <summary>Gets the fixed operation status.</summary>
@@ -64,8 +72,15 @@ public sealed record SupervisorOperationResult
 
     /// <summary>Gets the health retry decision, when one was produced.</summary>
     public HealthRetryDecision? Health { get; }
-}
 
+    /// <summary>Gets the safe missing-environment token, when applicable.</summary>
+    public string? FailureMessage { get; }
+
+    /// <summary>Gets whether persistence confirmed loss of the local lease ownership.</summary>
+    public bool LeaseOwnershipLost { get; }
+
+
+}
 /// <summary>
 /// Coordinates one service's process, health, restart, and node-owned lease operations.
 /// The adapters perform I/O; this type publishes only immutable snapshots and fixed codes.
@@ -79,14 +94,23 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     private readonly ServiceHealthProbeRequest healthRequest;
     private readonly PortLeaseRequest leaseRequest;
     private readonly HealthRetryPolicy healthPolicy;
+    private static readonly RestartBackoffPolicy WaitingBackoffPolicy = new(
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(30),
+        TimeSpan.FromSeconds(1),
+        int.MaxValue,
+        TimeSpan.FromMinutes(5));
     private readonly RestartBackoffPolicy restartBackoff;
     private readonly IRestartJitter restartJitter;
+    private readonly IRestartJitter waitingJitter;
     private readonly ServiceRestartPolicy restartPolicy;
     private readonly TimeSpan stopGracePeriod;
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
+    private long lifecycleEpoch;
     private ServiceRuntimeSnapshot snapshot;
     private PortLease? lease;
     private bool initialLeasePending;
+    private int waitingAttempts;
     private ProcessInstanceHolder? processInstance;
 
     /// <summary>Creates a deterministic supervisor for one validated service definition.</summary>
@@ -148,7 +172,8 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
 
         healthPolicy = healthPolicy ?? HealthRetryPolicy.Default;
         restartBackoff = restartBackoff ?? RestartBackoffPolicy.Default;
-        restartJitter = restartJitter ?? new NoRestartJitter();
+        var suppliedRestartJitter = restartJitter;
+        restartJitter = suppliedRestartJitter ?? new NoRestartJitter();
         if (stopGracePeriod is not null)
         {
             ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(stopGracePeriod.Value, TimeSpan.Zero);
@@ -157,6 +182,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         this.healthPolicy = healthPolicy;
         this.restartBackoff = restartBackoff;
         this.restartJitter = restartJitter;
+        this.waitingJitter = suppliedRestartJitter ?? new RandomRestartJitter();
         this.restartPolicy = restartPolicy;
         this.stopGracePeriod = stopGracePeriod ?? TimeSpan.FromSeconds(15);
         snapshot = ServiceStateTransition.CreateInitial(
@@ -174,9 +200,11 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     /// <summary>Changes desired state without performing adapter I/O.</summary>
     /// <param name="desired">The new desired lifecycle state.</param>
     /// <param name="now">The transition timestamp.</param>
-    /// <returns>The resulting immutable lifecycle snapshot.</returns>
-    public ServiceRuntimeSnapshot SetDesiredState(DesiredServiceState desired, DateTimeOffset now) =>
-        Exchange(ServiceStateTransition.SetDesiredState(Snapshot, desired, now));
+    public ServiceRuntimeSnapshot SetDesiredState(DesiredServiceState desired, DateTimeOffset now)
+    {
+        Interlocked.Increment(ref lifecycleEpoch);
+        return Exchange(ServiceStateTransition.SetDesiredState(Snapshot, desired, now));
+    }
     /// <summary>Serializes process start with other lifecycle operations.</summary>
     /// <param name="now">The operation timestamp.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -218,6 +246,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref lifecycleEpoch);
         var current = Snapshot;
         if (current.Desired != DesiredServiceState.Running)
         {
@@ -234,6 +263,12 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
 
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Exchange(ServiceStateTransition.RecordStartCancelled(current, now)));
         }
+
+        if (!File.Exists(launchSpecification.FileName))
+        {
+            return await RecordMissingExecutableAsync(now).ConfigureAwait(false);
+        }
+
 
         var heldLease = Volatile.Read(ref lease);
         var initialLeaseForStart = initialLeasePending;
@@ -300,6 +335,11 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 PortLeaseOperationStatus.Rejected => SupervisorOperationStatus.Rejected,
                 _ => SupervisorOperationStatus.Unavailable
             };
+            if (leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable &&
+                Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
+            {
+                return Result(SupervisorOperationStatus.Unavailable, reason, Snapshot);
+            }
             return Result(
                 status,
                 reason,
@@ -327,6 +367,11 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
 
         var accepted = processResult.Status is ProcessOperationStatus.Accepted;
         RememberProcessInstance(processResult, accepted);
+        if (accepted)
+        {
+            waitingAttempts = 0;
+        }
+
         var next = Exchange(ServiceStateTransition.RecordStartResult(Snapshot, accepted, now));
         if (!accepted)
         {
@@ -337,7 +382,31 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             accepted ? SupervisorOperationStatus.Applied : SupervisorOperationStatus.Rejected,
             accepted ? ServiceStateReasonCode.StartAccepted : processResult.Reason,
             next,
-            accepted ? Lease : null);
+            accepted ? Lease : null,
+            failureMessage: processResult.FailureMessage);
+    }
+
+    private async ValueTask<SupervisorOperationResult> RecordMissingExecutableAsync(DateTimeOffset now)
+    {
+        initialLeasePending = false;
+        await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+
+        waitingAttempts = waitingAttempts == int.MaxValue
+            ? int.MaxValue
+            : checked(waitingAttempts + 1);
+        var baseDelay = WaitingBackoffPolicy.GetBaseDelay(waitingAttempts);
+        var jitter = waitingJitter.GetJitter(WaitingBackoffPolicy.MaximumJitter, waitingAttempts);
+        if (jitter < TimeSpan.Zero || jitter > WaitingBackoffPolicy.MaximumJitter)
+        {
+            jitter = TimeSpan.Zero;
+        }
+
+        var delayTicks = Math.Min(
+            WaitingBackoffPolicy.MaximumDelay.Ticks,
+            checked(baseDelay.Ticks + jitter.Ticks));
+        var retryAt = now.ToUniversalTime().Add(TimeSpan.FromTicks(delayTicks));
+        var waiting = Exchange(ServiceStateTransition.RecordExecutableMissing(Snapshot, retryAt, now));
+        return Result(SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.ExecutableMissing, waiting);
     }
 
     /// <summary>Serializes graceful process stop with other lifecycle operations.</summary>
@@ -381,6 +450,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref lifecycleEpoch);
         var requested = Exchange(ServiceStateTransition.RecordStopRequested(Snapshot, now));
         ProcessOperationResult result;
         try
@@ -426,7 +496,14 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         {
             throw new ArgumentException("The health retry state belongs to another service.", nameof(retryState));
         }
-        var publishedLease = Volatile.Read(ref lease);
+
+        var captured = await CaptureLifecycleStateAsync(cancellationToken).ConfigureAwait(false);
+        if (captured is not { } lifecycle)
+        {
+            return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
+        }
+
+        var publishedLease = lifecycle.Lease;
         HealthObservationResult observation;
         ServiceStateReasonCode? leaseFailure = null;
         var usableLease = publishedLease is not null &&
@@ -471,7 +548,16 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
 
         var decision = healthPolicy.Decide(retryState, observation, now, cancellationToken);
-        var next = Exchange(ServiceStateTransition.RecordHealthObservation(Snapshot, observation, healthPolicy.FailureThreshold, now));
+        var applied = await ApplyHealthObservationAsync(
+            lifecycle.Epoch,
+            observation,
+            healthPolicy.FailureThreshold,
+            now).ConfigureAwait(false);
+        if (!applied.Applied)
+        {
+            return Result(SupervisorOperationStatus.Rejected, ServiceStateReasonCode.Superseded, applied.Snapshot);
+        }
+
         var status = leaseFailure is not null
             ? SupervisorOperationStatus.Unavailable
             : decision.Action switch
@@ -480,7 +566,63 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 HealthRetryAction.Cancelled => SupervisorOperationStatus.Cancelled,
                 _ => SupervisorOperationStatus.Failed
             };
-        return Result(status, leaseFailure ?? decision.Reason, next, leaseFailure is null ? Lease : null, health: decision);
+        return Result(
+            status,
+            leaseFailure ?? decision.Reason,
+            applied.Snapshot,
+            leaseFailure is null ? applied.Lease : null,
+            health: decision);
+    }
+
+    private async ValueTask<(long Epoch, PortLease? Lease)?> CaptureLifecycleStateAsync(
+        CancellationToken cancellationToken)
+    {
+        var acquired = false;
+        try
+        {
+            await lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            acquired = true;
+            return (Volatile.Read(ref lifecycleEpoch), Volatile.Read(ref lease));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        finally
+        {
+            if (acquired)
+            {
+                lifecycleGate.Release();
+            }
+        }
+    }
+
+    private async ValueTask<(bool Applied, ServiceRuntimeSnapshot Snapshot, PortLease? Lease)> ApplyHealthObservationAsync(
+        long observationEpoch,
+        HealthObservationResult observation,
+        int failureThreshold,
+        DateTimeOffset now)
+    {
+        await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            var current = Snapshot;
+            if (Volatile.Read(ref lifecycleEpoch) != observationEpoch)
+            {
+                return (false, current, null);
+            }
+
+            var next = Exchange(ServiceStateTransition.RecordHealthObservation(
+                current,
+                observation,
+                failureThreshold,
+                now));
+            return (true, next, Volatile.Read(ref lease));
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
     }
 
 

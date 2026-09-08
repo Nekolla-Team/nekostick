@@ -8,7 +8,7 @@ public sealed partial class ServiceSupervisor
     /// <param name="now">The UTC operation instant.</param>
     /// <param name="policy">The lease timing policy, or the documented default.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>A fixed-code result with the renewed lease only when it is usable.</returns>
+    /// <returns>A fixed-code result with a renewed lease when applied, or the current lease and its known expiry when storage is unavailable.</returns>
     public async ValueTask<SupervisorOperationResult> RenewLeaseAsync(
         DateTimeOffset now,
         PortLeasePolicy? policy = null,
@@ -74,8 +74,7 @@ public sealed partial class ServiceSupervisor
         }
         catch
         {
-            Interlocked.CompareExchange(ref lease, null, current);
-            return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.DatabaseUnavailable, Snapshot);
+            return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.DatabaseUnavailable, Snapshot, current);
         }
 
         var renewed = operation.Lease;
@@ -87,7 +86,12 @@ public sealed partial class ServiceSupervisor
             !renewed.IsExpired(now);
         if (!usable)
         {
-            Interlocked.CompareExchange(ref lease, null, current);
+            var ownershipLost = operation.Status is PortLeaseOperationStatus.Conflict or PortLeaseOperationStatus.NotFound;
+            if (operation.Status != PortLeaseOperationStatus.DatabaseUnavailable)
+            {
+                Interlocked.CompareExchange(ref lease, null, current);
+            }
+
             var reason = operation.Status switch
             {
                 PortLeaseOperationStatus.Conflict => ServiceStateReasonCode.PortLeaseConflict,
@@ -103,7 +107,12 @@ public sealed partial class ServiceSupervisor
                 PortLeaseOperationStatus.Rejected => SupervisorOperationStatus.Rejected,
                 _ => SupervisorOperationStatus.Unavailable
             };
-            return Result(status, reason, Snapshot);
+            return Result(
+                status,
+                reason,
+                Snapshot,
+                operation.Status == PortLeaseOperationStatus.DatabaseUnavailable ? current : null,
+                leaseOwnershipLost: ownershipLost);
         }
 
         Volatile.Write(ref lease, renewed);

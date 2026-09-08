@@ -277,8 +277,20 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     /// <summary>Gets the current snapshot using the host configuration terminology.</summary>
     public HostConfigurationSnapshot? Snapshot => Current;
 
+    /// <summary>Gets whether a validated candidate snapshot is staged before publication.</summary>
+    internal bool HasStagedSnapshot
+    {
+        get
+        {
+            lock (_replacementGate)
+            {
+                return _staged is not null;
+            }
+        }
+    }
+
     /// <inheritdoc />
-    public bool HasSnapshot => Current is not null || Volatile.Read(ref _staged) is not null;
+    public bool HasSnapshot => Current is not null;
 
     /// <inheritdoc />
     public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null, null);

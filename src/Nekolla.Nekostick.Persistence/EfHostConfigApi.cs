@@ -182,6 +182,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             var routes = await _dbContext.Routes.ToListAsync(cancellationToken);
             var services = await _dbContext.Services.ToListAsync(cancellationToken);
             var extensionRecords = await _dbContext.ExtensionRecords.ToListAsync(cancellationToken);
+            var extensionNodeStates = await _dbContext.ExtensionNodeStates.ToListAsync(cancellationToken);
             var extensionSettings = await _dbContext.ExtensionSettings.ToListAsync(cancellationToken);
 
             if (!EfHostConfigEntityOperations.TryValidateReplacementVersions(
@@ -223,6 +224,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                     services,
                     extensionRecords,
                     extensionSettings,
+                    extensionNodeStates,
                     now,
                     ownerContext.ExtensionId,
                     ownerContext.RouteIds,
@@ -238,6 +240,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                     services,
                     extensionRecords,
                     extensionSettings,
+                    extensionNodeStates,
                     now);
             }
 
@@ -376,8 +379,9 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 }
 
                 // An existing row wins even when its record version or timestamps differ.
-                // A different installed version/state is a real cross-process conflict.
+                // A different installed version, content hash, or state is a real cross-process conflict.
                 if (!string.Equals(existingRecord.InstalledVersion, record.Version, StringComparison.Ordinal) ||
+                    !string.Equals(existingRecord.ContentHash, record.ContentHash, StringComparison.OrdinalIgnoreCase) ||
                     (Nekolla.Nekostick.Contracts.ExtensionLoadState)existingRecord.LoadState != initialState)
                 {
                     return EfHostConfigRevisionHelper.ConflictWriteFailure();
@@ -399,6 +403,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 Id = EfHostConfigRevisionHelper.NewUuidV7(),
                 ExtensionId = record.ExtensionId,
                 InstalledVersion = record.Version,
+                ContentHash = record.ContentHash,
                 LoadState = (Nekolla.Nekostick.Domain.ExtensionLoadState)initialState,
                 CreatedAt = now,
                 UpdatedAt = now,
@@ -610,6 +615,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
 
             var now = _timeProvider.GetUtcNow();
             record.InstalledVersion = newVersion;
+            record.ContentHash = null;
             record.UpdatedAt = now;
             record.Version = EfHostConfigRevisionHelper.IncrementVersion(record.Version);
 
@@ -719,6 +725,9 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             var serviceRuntimes = await _dbContext.ServiceRuntimes
                 .Where(value => serviceIds.Contains(value.ServiceId))
                 .ToListAsync(cancellationToken);
+            var extensionNodeStates = await _dbContext.ExtensionNodeStates
+                .Where(value => value.ExtensionRecordId == record.Id)
+                .ToListAsync(cancellationToken);
             var portLeases = await _dbContext.PortLeases
                 .Where(value => serviceIds.Contains(value.ServiceId))
                 .ToListAsync(cancellationToken);
@@ -738,6 +747,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             _dbContext.ServiceRuntimes.RemoveRange(serviceRuntimes);
             _dbContext.PortLeases.RemoveRange(portLeases);
             _dbContext.Services.RemoveRange(services);
+            _dbContext.ExtensionNodeStates.RemoveRange(extensionNodeStates);
             _dbContext.ExtensionRecords.Remove(record);
 
             var now = _timeProvider.GetUtcNow();

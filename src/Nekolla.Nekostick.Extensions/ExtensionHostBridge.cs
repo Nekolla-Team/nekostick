@@ -4,6 +4,8 @@ namespace Nekolla.Nekostick.Extensions;
 
 internal sealed class ExtensionHostBridge : IExtensionHostBridge13
 {
+    private readonly Func<ExtensionHostInfoSnapshot>? _hostInfo;
+
     internal ExtensionHostBridge(
         HostApiVersion apiVersion,
         ExtensionSettingsConfiguration? settings,
@@ -49,6 +51,10 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         Management = api13Supported
             ? capabilities.ExtensionManagement ?? UnsupportedExtensionCapabilities.CreateManagement(apiVersion)
             : UnsupportedExtensionCapabilities.CreateManagement(apiVersion);
+
+        _hostInfo = ExtensionAbi.IsApi133Supported(apiVersion)
+            ? capabilities.HostInfo
+            : null;
     }
 
     public HostApiVersion ApiVersion { get; }
@@ -77,6 +83,22 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
 
     public IExtensionLogWriter LogWriter { get; }
     public IExtensionManagementApi Management { get; }
+
+    public ExtensionHostInfoSnapshot HostInfo
+    {
+        get
+        {
+            try
+            {
+                return _hostInfo?.Invoke() ?? ExtensionHostInfoSnapshot.Unavailable;
+            }
+            catch
+            {
+                // The provider reads host runtime state that may be mid-disposal during shutdown.
+                return ExtensionHostInfoSnapshot.Unavailable;
+            }
+        }
+    }
 }
 
 internal sealed class ExtensionStartContext : IExtensionStartContext

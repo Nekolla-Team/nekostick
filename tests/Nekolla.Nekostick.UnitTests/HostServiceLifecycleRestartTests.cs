@@ -340,7 +340,7 @@ public sealed class HostServiceLifecycleRestartTests
         new(
             ServiceId,
             enabled: true,
-            fileName: "/bin/service",
+            fileName: "/bin/sh",
             argumentList: ImmutableArray<string>.Empty,
             workingDirectory: "/tmp",
             environment: ImmutableDictionary<string, string>.Empty,

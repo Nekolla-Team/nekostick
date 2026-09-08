@@ -80,6 +80,15 @@ public interface IExtensionHostBridge13 : IExtensionHostBridge
     /// <summary>Gets the extension installation record management and refresh operations.</summary>
     IExtensionManagementApi Management { get; }
 
+    /// <summary>Gets the latest immutable, non-sensitive host information snapshot.</summary>
+    /// <remarks>
+    /// This property is available from API 1.3.3. Extensions MUST verify that
+    /// <see cref="IExtensionHostBridge.ApiVersion" /> is at least 1.3.3 before using the fields; older negotiated
+    /// versions return <see cref="ExtensionHostInfoSnapshot.Unavailable" />. The snapshot never contains connection
+    /// strings, secrets, environment variable values, process handles, or other host implementation details.
+    /// </remarks>
+    ExtensionHostInfoSnapshot HostInfo => ExtensionHostInfoSnapshot.Unavailable;
+
     /// <summary>Gets the host-configured data directory for extension-owned persistent files.</summary>
     /// <remarks>
     /// The Host configures this path through its CLI or environment settings and defaults it to a data directory
@@ -92,3 +101,4 @@ public interface IExtensionHostBridge13 : IExtensionHostBridge
     /// </remarks>
     string DataDirectory => string.Empty;
 }
+

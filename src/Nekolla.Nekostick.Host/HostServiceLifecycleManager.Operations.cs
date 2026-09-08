@@ -440,10 +440,11 @@ public sealed partial class HostServiceLifecycleManager
         internal ServiceGeneration(
             ServiceConfiguration configuration,
             ServiceSupervisor supervisor,
-            PortLease lease,
+            PortLease? lease,
             long snapshotVersion,
             HealthRetryState healthRetryState,
-            string? ownerExtensionId)
+            string? ownerExtensionId,
+            bool ready = true)
         {
             Configuration = configuration;
             Supervisor = supervisor;
@@ -451,7 +452,7 @@ public sealed partial class HostServiceLifecycleManager
             SnapshotVersion = snapshotVersion;
             HealthRetryState = healthRetryState;
             OwnerExtensionId = ownerExtensionId;
-            _ready = true;
+            _ready = ready;
         }
 
         internal ServiceConfiguration Configuration { get; }

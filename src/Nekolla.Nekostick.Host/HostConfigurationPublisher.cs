@@ -17,6 +17,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     private readonly IDbContextFactory<NekostickDbContext>? _dbContextFactory;
     private readonly HostRuntimeState? _runtimeState;
     private readonly IHostConfigurationSnapshotReader? _snapshotReader;
+    private readonly HostRuntimeOptions? _runtimeOptions;
+    private readonly HostApiVersion _hostApiVersion;
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private ImmutableDictionary<Guid, string?> _routeOwners = ImmutableDictionary<Guid, string?>.Empty;
     private int _disposed;
@@ -29,6 +31,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     /// <param name="dbContextFactory">The optional persistence factory used to load service ownership metadata.</param>
     /// <param name="runtimeState">The optional runtime capability state updated during staged publication.</param>
     /// <param name="snapshotReader">The optional durable snapshot reader used to reload startup-owned writes before publication.</param>
+    /// <param name="runtimeOptions">The optional node identity used for node-local extension state reporting.</param>
+    /// <param name="hostApiVersion">The host API version used for manifest compatibility validation.</param>
     public HostConfigurationPublisher(
         HostConfigurationSnapshotHolder snapshotHolder,
         ExtensionRuntimeManager runtimeManager,
@@ -36,7 +40,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         ILogger<HostConfigurationPublisher> logger,
         IDbContextFactory<NekostickDbContext>? dbContextFactory = null,
         HostRuntimeState? runtimeState = null,
-        IHostConfigurationSnapshotReader? snapshotReader = null)
+        IHostConfigurationSnapshotReader? snapshotReader = null,
+        HostRuntimeOptions? runtimeOptions = null,
+        HostApiVersion? hostApiVersion = null)
     {
         _snapshotHolder = snapshotHolder ?? throw new ArgumentNullException(nameof(snapshotHolder));
         _runtimeManager = runtimeManager ?? throw new ArgumentNullException(nameof(runtimeManager));
@@ -45,6 +51,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         _dbContextFactory = dbContextFactory;
         _runtimeState = runtimeState;
         _snapshotReader = snapshotReader;
+        _runtimeOptions = runtimeOptions;
+        _hostApiVersion = hostApiVersion ?? runtimeManager.ApiVersion;
     }
 
     internal async ValueTask<bool> PublishAsync(
@@ -89,6 +97,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     forceReloadIds: requestedForceReloadIds)
                 .ConfigureAwait(false);
             if (desiredSet.HasUnavailableLoadedRecord &&
+                !desiredSet.HasQuarantinedLoadedRecord &&
                 previousGeneration is not null &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
             {
@@ -101,6 +110,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 // publication, so staging cleanup and rejection no longer apply.
                 staged = false;
                 DeliverPublicationEvents(snapshot, previousSnapshot!.Configuration);
+                await ReportNodeStatesAsync(desiredSet.NodeStates, cancellationToken).ConfigureAwait(false);
                 published = true;
                 // Reusing the prior generation cannot satisfy a forced reload;
                 // keep the live publication but report the reload as unsuccessful.
@@ -129,6 +139,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 var fallbackPublished = await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
+                        desiredSet.NodeStates,
                         cancellationToken)
                     .ConfigureAwait(false);
                 // Fallback publishes the snapshot without forcing the requested
@@ -145,6 +156,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 var fallbackPublished = await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
+                        desiredSet.NodeStates,
                         cancellationToken)
                     .ConfigureAwait(false);
                 published = fallbackPublished;
@@ -189,6 +201,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
             HostLogMessages.ConfigurationSnapshotApplied(_logger, publicationSnapshot.Version);
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot?.Configuration);
+            await ReportNodeStatesAsync(desiredSet.NodeStates, cancellationToken).ConfigureAwait(false);
             published = true;
             return true;
         }
@@ -309,6 +322,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     private async ValueTask<bool> PublishWithPreviousOrEmptyAsync(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? previousGeneration,
+        ImmutableArray<ExtensionNodeStateWrite> nodeStates,
         CancellationToken cancellationToken)
     {
         var publicationSnapshot = await ReadLatestSnapshotAsync(snapshot, cancellationToken)
@@ -338,6 +352,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             }
 
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
+            await ReportNodeStatesAsync(nodeStates, cancellationToken).ConfigureAwait(false);
             return true;
         }
 
@@ -374,6 +389,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             }
 
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
+            await ReportNodeStatesAsync(nodeStates, cancellationToken).ConfigureAwait(false);
             return true;
         }
         finally
@@ -382,6 +398,37 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             {
                 await emptyPreparation.AbortAsync().ConfigureAwait(false);
             }
+        }
+    }
+
+    private async ValueTask ReportNodeStatesAsync(
+        ImmutableArray<ExtensionNodeStateWrite> nodeStates,
+        CancellationToken cancellationToken)
+    {
+        if (_dbContextFactory is null ||
+            _runtimeOptions is null ||
+            string.IsNullOrWhiteSpace(_runtimeOptions.NodeId))
+        {
+            return;
+        }
+
+        try
+        {
+            await using var db = await _dbContextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var persistence = new EfExtensionNodeStatePersistence(db);
+            if (!await persistence
+                    .UpsertAsync(_runtimeOptions.NodeId, nodeStates, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                HostLogMessages.NodeStatePersistenceFailed(_logger, null);
+            }
+        }
+        catch (Exception exception)
+        {
+            // Node-state telemetry is best effort and must never reject an already live snapshot.
+            HostLogMessages.NodeStatePersistenceFailed(_logger, exception);
         }
     }
 
@@ -451,7 +498,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(ReadServiceOwnersAsync));
-            return ImmutableDictionary<Guid, string?>.Empty;
+            _runtimeState?.MarkDatabaseUnavailable();
+            throw;
         }
     }
     private async ValueTask<ImmutableDictionary<Guid, string?>> ReadRouteOwnersAsync(
@@ -462,7 +510,6 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             return ImmutableDictionary<Guid, string?>.Empty;
         }
-
         try
         {
             await using var db = await _dbContextFactory
@@ -486,7 +533,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(ReadRouteOwnersAsync));
-            return ImmutableDictionary<Guid, string?>.Empty;
+            _runtimeState?.MarkDatabaseUnavailable();
+            throw;
         }
     }
 

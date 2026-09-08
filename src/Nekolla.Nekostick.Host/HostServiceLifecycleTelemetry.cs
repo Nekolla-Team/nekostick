@@ -147,6 +147,7 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
             ServiceLifecycleState.Running => ExtensionServiceLifecycleState.Running,
             ServiceLifecycleState.Stopping => ExtensionServiceLifecycleState.Stopping,
             ServiceLifecycleState.Failed => ExtensionServiceLifecycleState.Failed,
+            ServiceLifecycleState.Waiting => ExtensionServiceLifecycleState.Waiting,
             _ => ExtensionServiceLifecycleState.Unknown
         };
         var hasProcess = supervisor.TryGetActiveProcessTelemetry(out var processInstanceId, out var processId, out var startedAt);

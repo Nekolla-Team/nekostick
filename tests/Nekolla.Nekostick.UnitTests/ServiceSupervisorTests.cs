@@ -168,7 +168,7 @@ public sealed class ServiceSupervisorTests
 
     private static ServiceSupervisor Create(IProcessExecutor executor, RecordingLeaseStore store, RecordingProbe? probe = null, HealthRetryPolicy? healthPolicy = null, ServiceRestartPolicy restartPolicy = ServiceRestartPolicy.OnFailure)
     {
-        var launch = new ProcessLaunchSpecification(ServiceId, "/bin/service", "/tmp", ImmutableArray<string>.Empty, new ProcessEnvironment(new Dictionary<string, string>()));
+        var launch = new ProcessLaunchSpecification(ServiceId, "/bin/sh", "/tmp", ImmutableArray<string>.Empty, new ProcessEnvironment(new Dictionary<string, string>()));
         var request = new ServiceHealthProbeRequest(ServiceId, new HealthCheckDefinition(ServiceHealthCheckKind.Process, TimeSpan.FromSeconds(1)));
         var leaseRequest = new PortLeaseRequest(new NodeIdentifier("node"), ServiceId, 23456, TimeSpan.FromMinutes(1));
         return new ServiceSupervisor(executor, probe ?? new RecordingProbe(HealthObservationStatus.Healthy), store, launch, request, leaseRequest, healthPolicy, restartPolicy: restartPolicy, now: Now);

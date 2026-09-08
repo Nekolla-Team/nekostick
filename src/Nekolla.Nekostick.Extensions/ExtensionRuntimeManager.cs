@@ -180,4 +180,6 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
             new SemVersion(hostApiVersion.Major, hostApiVersion.Minor, hostApiVersion.Patch),
             _contractCatalog);
     }
+    /// <summary>Gets the host API version injected for this runtime manager.</summary>
+    public HostApiVersion ApiVersion => _hostApiVersion;
 }

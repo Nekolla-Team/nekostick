@@ -180,7 +180,8 @@ internal static class HostConfigurationSnapshotMapper
             (Nekolla.Nekostick.Contracts.ExtensionLoadState)value.LoadState,
             value.CreatedAt,
             value.UpdatedAt,
-            value.Version);
+            value.Version,
+            value.ContentHash);
 
     private static ServiceConfiguration MapService(Service value) =>
         new(

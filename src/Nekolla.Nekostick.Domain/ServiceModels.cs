@@ -18,7 +18,10 @@ public enum ServiceLifecycleState
     Stopping,
 
     /// <summary>The service failed to start or remain healthy.</summary>
-    Failed
+    Failed,
+
+    /// <summary>The service is waiting for its executable to become available.</summary>
+    Waiting
 }
 
 /// <summary>Describes service health state.</summary>

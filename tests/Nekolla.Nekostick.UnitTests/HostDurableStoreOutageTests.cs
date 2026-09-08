@@ -213,7 +213,7 @@ public sealed class HostDurableStoreOutageTests
         var service = new ServiceConfiguration(
             ServiceId,
             enabled: true,
-            fileName: "/tmp/nekostick-outage-fixture",
+            fileName: "/bin/sh",
             argumentList: ImmutableArray<string>.Empty,
             workingDirectory: "/tmp",
             environment: ImmutableDictionary<string, string>.Empty,
