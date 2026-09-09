@@ -1,6 +1,6 @@
 # Build with the repository root as the context. The image is linux/amd64 because
 # release output is published for the linux-x64 RID:
-# docker buildx build --platform linux/amd64 -f deploy/Dockerfile .
+# docker buildx build --platform linux/amd64 -f Dockerfile .
 FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG BUILD_CONFIGURATION=Release
 
