@@ -34,6 +34,11 @@ EXPOSE 8080
 COPY --from=publish /app/publish .
 RUN mkdir -p /app/extensions /app/data
 
+# Kerberos/GSSAPI system libraries so Npgsql can authenticate to PostgreSQL.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+
 USER $APP_UID
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/app/Nekolla.Nekostick.Host", "run"]
