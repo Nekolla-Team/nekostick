@@ -2,29 +2,16 @@ name: Test
 
 on:
   push:
-    paths:
+    paths: &test-paths
       - ".github/workflows/test.yml"
       - "src/**"
       - "tests/**"
-      - "Dockerfile"
-      - "compose.example.yml"
-      - "nekostick.service"
       - "*.slnx"
       - "global.json"
       - "Directory.*"
       - "NuGet.config"
   pull_request:
-    paths:
-      - ".github/workflows/test.yml"
-      - "src/**"
-      - "tests/**"
-      - "Dockerfile"
-      - "compose.example.yml"
-      - "nekostick.service"
-      - "*.slnx"
-      - "global.json"
-      - "Directory.*"
-      - "NuGet.config"
+    paths: *test-paths
   workflow_dispatch:
     inputs:
       test_macos:
