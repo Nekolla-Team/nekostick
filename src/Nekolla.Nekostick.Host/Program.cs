@@ -171,8 +171,9 @@ internal static class Program
                 HostLogMessages.NowListening(startupLogger, listenUrl);
                 HostLogMessages.ApplicationStarted(startupLogger);
             });
+            var terminationState = app.Services.GetRequiredService<HostTerminationState>();
             await app.RunAsync(cancellationToken);
-            return app.Services.GetRequiredService<HostTerminationState>().ExitCode;
+            return terminationState.ExitCode;
         }
 
         if (inspection.Revision is null ||
