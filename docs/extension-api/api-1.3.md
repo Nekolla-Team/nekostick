@@ -310,7 +310,7 @@ ValueTask<ConfigurationReadResult<ExtensionRefreshSummary>> RequestRefreshAsync(
 1. 有 manifest 但没有记录的发现会加入记录，初始状态为 `Disabled`，并计入 `Added`。
 2. 已有记录的 manifest 版本改变时更新 `installed_version`，并计入 `VersionUpdated`。
 3. 记录仍在数据库但本次扫描没有 manifest 时计入 `Missing`；这只是报告，不删除记录。
-4. 扫描中无法读取的目录（manifest 缺失、重复、解析或 schema 校验失败、IO 异常等）不会静默忽略：会计入 `ExtensionRefreshSummary.Skipped`，每项包含目录的叶子名称（`DirectoryName`，不含完整路径）和稳定的失败类别名（`FailureCode`，如 `ManifestMissing`、`JsonInvalid`）。
+4. 扫描中无法读取的目录（manifest 缺失、重复、解析或 schema 校验失败、IO 异常等）不会静默忽略：会计入 `ExtensionRefreshSummary.Skipped`（1.3.4 起），每项包含目录的叶子名称（`DirectoryName`，不含完整路径）和稳定的失败类别名（`FailureCode`，如 `ManifestMissing`、`JsonInvalid`）。
 
 refresh 完成后触发 publish pipeline。已是 `Loaded` 的扩展在版本更新后的下一次 publish 中因 descriptor 身份变化而自动加载新 generation；版本不变但内容摘要漂移时，refresh 钉死新摘要并**强制本节点重载**该扩展以运行新代码（1.3.3 起）；两者之外的场景仍可用 `ReloadAsync` 显式重载。
 

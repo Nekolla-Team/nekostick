@@ -34,7 +34,7 @@ public sealed partial class ExtensionRuntimeTests
             TestContext.Current.CancellationToken);
         Assert.Equal(ExtensionInvocationState.Handled, currentResult.State);
         var currentBody = Body(currentResult);
-        Assert.Contains("api=1.3.3", currentBody, StringComparison.Ordinal);
+        Assert.Contains("api=1.3.4", currentBody, StringComparison.Ordinal);
         Assert.Contains(
             "api13=Supported;sibling=True;supervisor=NotFound;routeSubscribe=True;routeHook=True;logWriter=Called;dataDirectory=empty",
             currentBody,
