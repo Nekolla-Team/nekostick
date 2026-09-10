@@ -147,18 +147,27 @@ public sealed partial class HostConfigurationPublisher
             }
             catch (Exception exception)
             {
+                HostLogMessages.ExtensionDirectorySkipped(
+                    _logger,
+                    DirectoryName(directory),
+                    ExtensionFailureCode.LoadFailed.ToString());
                 HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.ManifestDiscovery");
                 continue;
             }
 
             if (!result.Succeeded || result.Manifest is null)
             {
+                HostLogMessages.ExtensionDirectorySkipped(
+                    _logger,
+                    DirectoryName(directory),
+                    result.FailureCode.ToString());
                 continue;
             }
 
             var manifest = result.Manifest;
             if (duplicateIds.Contains(manifest.Id))
             {
+                HostLogMessages.DuplicateExtensionManifestId(_logger, manifest.Id);
                 continue;
             }
 
@@ -167,6 +176,7 @@ public sealed partial class HostConfigurationPublisher
                 discoveredById.Remove(manifest.Id);
                 contentHashes.Remove(manifest.Id);
                 duplicateIds.Add(manifest.Id);
+                HostLogMessages.DuplicateExtensionManifestId(_logger, manifest.Id);
                 continue;
             }
 
@@ -395,6 +405,13 @@ public sealed partial class HostConfigurationPublisher
             observations.Values
                 .OrderBy(static state => state.ExtensionId, StringComparer.Ordinal)
                 .ToImmutableArray());
+    private static string DirectoryName(string directory)
+    {
+        var trimmed = directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var name = Path.GetFileName(trimmed);
+        return string.IsNullOrEmpty(name) ? trimmed : name;
+    }
+
     private static bool IsDurableRecordSafe(ExtensionRecordConfiguration record) =>
         !string.IsNullOrWhiteSpace(record.ExtensionId) &&
         record.ExtensionId.Length <= 128 &&

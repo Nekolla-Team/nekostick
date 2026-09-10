@@ -513,6 +513,49 @@ public sealed class PostgresExtensionManagementTests
         Assert.Equal("1.1.0", record.Version);
     }
 
+    [Fact]
+    public async Task FacadeRefreshReportsSkippedUnreadableDirectories()
+    {
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
+        using var fixture = InstalledFixtureDirectory.Create(
+            "management.facade.refresh-skipped." + Guid.NewGuid().ToString("N"),
+            "1.0.0");
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var brokenDirectory = Path.Combine(
+            AppContext.BaseDirectory,
+            "extensions",
+            "broken-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(brokenDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(brokenDirectory, "manifest.json"),
+            "{ not-json",
+            cancellationToken);
+        try
+        {
+            var snapshot = await ReadSnapshotAsync(test.Database, cancellationToken);
+            await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+            var (facade, provider) = CreateFacade(
+                test.Database,
+                snapshot.Value!,
+                manager,
+                "management.facade.refresh-skipped.caller");
+            await using (provider)
+            {
+                var refresh = await facade.RequestRefreshAsync(cancellationToken);
+                Assert.True(refresh.IsSuccess, refresh.Errors.FirstOrDefault()?.Message);
+                Assert.Contains(fixture.ExtensionId, refresh.Value!.Added);
+                var skip = Assert.Single(
+                    refresh.Value.Skipped,
+                    value => value.DirectoryName == Path.GetFileName(brokenDirectory));
+                Assert.Equal("JsonInvalid", skip.FailureCode);
+            }
+        }
+        finally
+        {
+            Directory.Delete(brokenDirectory, recursive: true);
+        }
+    }
+
     private static async Task<ConfigurationReadResult<HostConfigurationSnapshot>> ReadSnapshotAsync(
         PostgresTestDatabase database,
         CancellationToken cancellationToken)

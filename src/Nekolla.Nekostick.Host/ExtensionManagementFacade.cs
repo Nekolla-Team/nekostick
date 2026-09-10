@@ -659,7 +659,8 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             new ExtensionRefreshSummary(
                 added.ToImmutableArray(),
                 versionUpdated.OrderBy(static id => id, StringComparer.Ordinal).ToImmutableArray(),
-                missing));
+                missing,
+                scan.Skipped));
     }
 
     private static bool CanManage(string? extensionId) =>
@@ -789,11 +790,11 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         var manifests = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
         var contentHashes = new Dictionary<string, string?>(StringComparer.Ordinal);
         var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
-        var hasUnreadableDirectories = false;
+        var skipped = new List<ExtensionScanSkip>();
         var installRoot = _runtimeState.NodeOptions.ExtensionsRootPath;
         if (!Directory.Exists(installRoot))
         {
-            return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, hasUnreadableDirectories);
+            return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, skipped);
         }
 
         string[] directories;
@@ -819,13 +820,17 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             }
             catch
             {
-                hasUnreadableDirectories = true;
+                skipped.Add(new ExtensionScanSkip(
+                    DirectoryName(directory),
+                    ExtensionFailureCode.LoadFailed.ToString()));
                 continue;
             }
 
             if (!discovered.Succeeded || discovered.Manifest is not { } manifest)
             {
-                hasUnreadableDirectories = true;
+                skipped.Add(new ExtensionScanSkip(
+                    DirectoryName(directory),
+                    discovered.FailureCode.ToString()));
                 continue;
             }
 
@@ -844,8 +849,14 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
 
             contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest);
         }
-        return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, hasUnreadableDirectories);
+        return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, skipped);
+    }
 
+    private static string DirectoryName(string directory)
+    {
+        var trimmed = directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var name = Path.GetFileName(trimmed);
+        return string.IsNullOrEmpty(name) ? trimmed : name;
     }
 
     private static ConfigurationWriteResult ToWriteFailure(
@@ -870,20 +881,22 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         ImmutableDictionary<string, ExtensionManifest> Manifests,
         ImmutableDictionary<string, string?> ContentHashes,
         ImmutableHashSet<string> DuplicateIds,
-        bool HasUnreadableDirectories)
+        ImmutableArray<ExtensionScanSkip> Skipped)
     {
+        internal bool HasUnreadableDirectories => Skipped.Length != 0;
+
         internal static ExtensionScanResult Success(
             Dictionary<string, ExtensionManifest> manifests,
             Dictionary<string, string?> contentHashes,
             HashSet<string> duplicateIds,
-            bool hasUnreadableDirectories) =>
+            List<ExtensionScanSkip> skipped) =>
             new(
                 true,
                 ConfigurationErrorCode.Validation,
                 manifests.ToImmutableDictionary(StringComparer.Ordinal),
                 contentHashes.ToImmutableDictionary(StringComparer.Ordinal),
                 duplicateIds.ToImmutableHashSet(StringComparer.Ordinal),
-                hasUnreadableDirectories);
+                skipped.ToImmutableArray());
 
         internal static ExtensionScanResult Failure(ConfigurationErrorCode errorCode) =>
             new(
@@ -892,6 +905,6 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 ImmutableDictionary<string, ExtensionManifest>.Empty,
                 ImmutableDictionary<string, string?>.Empty,
                 ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal),
-                false);
+                ImmutableArray<ExtensionScanSkip>.Empty);
     }
 }

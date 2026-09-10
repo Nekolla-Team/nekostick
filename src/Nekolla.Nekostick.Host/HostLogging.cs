@@ -238,6 +238,18 @@ internal static partial class HostLogMessages
         Level = LogLevel.Warning,
         Message = "Host node activity lock still held on reconnect (attempt {Attempt}); tolerating a possible zombie session before declaring a takeover.")]
     internal static partial void HostNodeActivityContended(ILogger logger, int attempt);
+
+    [LoggerMessage(
+        EventId = 1021,
+        Level = LogLevel.Warning,
+        Message = "Extension directory skipped during scan. Directory: {Directory}. Code: {FailureCode}.")]
+    internal static partial void ExtensionDirectorySkipped(ILogger logger, string directory, string failureCode);
+
+    [LoggerMessage(
+        EventId = 1022,
+        Level = LogLevel.Warning,
+        Message = "Duplicate extension manifest id during scan. ExtensionId: {ExtensionId}. The conflicting directory was skipped.")]
+    internal static partial void DuplicateExtensionManifestId(ILogger logger, string extensionId);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

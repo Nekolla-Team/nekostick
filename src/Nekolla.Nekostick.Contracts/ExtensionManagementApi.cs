@@ -75,6 +75,29 @@ public sealed record ExtensionManagementEntry
     public string? ContentHash { get; }
 }
 
+/// <summary>Describes one extension directory skipped during a refresh scan.</summary>
+public sealed record ExtensionScanSkip
+{
+    /// <summary>Creates a scan skip descriptor.</summary>
+    /// <param name="directoryName">The leaf name of the skipped directory.</param>
+    /// <param name="failureCode">The stable failure category name (a member name of the extension failure code enum).</param>
+    public ExtensionScanSkip(string directoryName, string failureCode)
+    {
+        DirectoryName = string.IsNullOrWhiteSpace(directoryName)
+            ? throw new ArgumentException("A directory name is required.", nameof(directoryName))
+            : directoryName;
+        FailureCode = string.IsNullOrWhiteSpace(failureCode)
+            ? throw new ArgumentException("A failure code is required.", nameof(failureCode))
+            : failureCode;
+    }
+
+    /// <summary>Gets the leaf name of the skipped directory.</summary>
+    public string DirectoryName { get; }
+
+    /// <summary>Gets the stable failure category name (a member name of the extension failure code enum).</summary>
+    public string FailureCode { get; }
+}
+
 /// <summary>Summarizes extension records discovered during a refresh.</summary>
 public sealed record ExtensionRefreshSummary
 {
@@ -86,10 +109,25 @@ public sealed record ExtensionRefreshSummary
         ImmutableArray<string> added,
         ImmutableArray<string> versionUpdated,
         ImmutableArray<string> missing)
+        : this(added, versionUpdated, missing, default)
+    {
+    }
+
+    /// <summary>Creates an extension refresh summary.</summary>
+    /// <param name="added">The extension identifiers added to persistence.</param>
+    /// <param name="versionUpdated">The extension identifiers whose installed version changed.</param>
+    /// <param name="missing">The extension identifiers retained in persistence despite missing files.</param>
+    /// <param name="skipped">The directories skipped during the scan with their failure categories.</param>
+    public ExtensionRefreshSummary(
+        ImmutableArray<string> added,
+        ImmutableArray<string> versionUpdated,
+        ImmutableArray<string> missing,
+        ImmutableArray<ExtensionScanSkip> skipped)
     {
         Added = added.IsDefault ? ImmutableArray<string>.Empty : added;
         VersionUpdated = versionUpdated.IsDefault ? ImmutableArray<string>.Empty : versionUpdated;
         Missing = missing.IsDefault ? ImmutableArray<string>.Empty : missing;
+        Skipped = skipped.IsDefault ? ImmutableArray<ExtensionScanSkip>.Empty : skipped;
     }
 
     /// <summary>Gets extension identifiers added to persistence.</summary>
@@ -100,6 +138,9 @@ public sealed record ExtensionRefreshSummary
 
     /// <summary>Gets extension identifiers retained in persistence despite missing files.</summary>
     public ImmutableArray<string> Missing { get; }
+
+    /// <summary>Gets the directories skipped during the scan with their failure categories.</summary>
+    public ImmutableArray<ExtensionScanSkip> Skipped { get; }
 }
 
 /// <summary>Provides extension installation record management and refresh operations.</summary>
