@@ -183,12 +183,17 @@ internal sealed class ExtensionDispatchContext
     internal ExtensionDispatchContext(
         ExtensionInstance instance,
         ExtensionSettingsConfiguration? settings,
-        ExtensionRouteRegistrationSet? routeRegistrations = null)
+        ExtensionRouteRegistrationSet? routeRegistrations = null,
+        string? contentHash = null)
     {
         Instance = instance;
         Settings = settings;
         RouteRegistrations = routeRegistrations;
+        ContentHash = contentHash;
     }
+
+    /// <summary>Gets the content digest recorded when this binding was candidated.</summary>
+    internal string? ContentHash { get; }
 
     internal bool TryRetainGeneration()
     {

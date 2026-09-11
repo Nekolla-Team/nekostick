@@ -520,7 +520,6 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             .OrderBy(static id => id, StringComparer.Ordinal)
             .ToArray();
         var versionUpdated = new List<string>();
-        var forceReloadIds = new List<string>();
 
         if (added.Length != 0)
         {
@@ -637,19 +636,12 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             {
                 versionUpdated.Add(pair.Key);
             }
-            else if (record.ContentHash is not null)
-            {
-                // Hash-only drift means the files changed underneath the running instance:
-                // force a reload so this node actually executes the newly pinned content.
-                forceReloadIds.Add(pair.Key);
-            }
         }
 
-        // Refresh may bump the caller's own installed version, so it always counts as self-affecting.
-        var reloadSet = forceReloadIds.Count == 0
-            ? null
-            : forceReloadIds.ToImmutableHashSet(StringComparer.Ordinal);
-        await CompletePublishTriggerAsync(cancellationToken, reloadSet).ConfigureAwait(false);
+        // Reload is derived from descriptor identity at publish time: a pinned digest that
+        // differs from the running binding's digest re-candidates the extension on any publish,
+        // so refresh only needs to trigger the publish, not carry a reload set.
+        await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
 
         var missing = records.Keys
             .Where(id => !scan.Manifests.ContainsKey(id))
@@ -679,20 +671,18 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 dependentManifest.Dependencies.Any(dependency =>
                     string.Equals(dependency.Id, extensionId, StringComparison.Ordinal)));
 
-    private async ValueTask CompletePublishTriggerAsync(
-        CancellationToken cancellationToken,
-        ImmutableHashSet<string>? forceReloadIds = null)
+    private async ValueTask CompletePublishTriggerAsync(CancellationToken cancellationToken)
     {
         // From route/event/scheduler callbacks the awaited publish may need to drain the calling
         // extension itself (its manifest can be drifted even when the write targets another
         // extension), which would deadlock; trigger the publish after the callback returns.
         if (ExtensionCallbackGuard.IsSelfReplacementUnsafe)
         {
-            TriggerPublishDeferred(forceReloadIds);
+            TriggerPublishDeferred();
             return;
         }
 
-        await TriggerPublishAsync(cancellationToken, forceReloadIds).ConfigureAwait(false);
+        await TriggerPublishAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private void TriggerReloadDeferred(string extensionId)
@@ -733,7 +723,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         }
     }
 
-    private void TriggerPublishDeferred(ImmutableHashSet<string>? forceReloadIds = null)
+    private void TriggerPublishDeferred()
     {
         if (_publisher is null || _snapshotReader is null)
         {
@@ -751,7 +741,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 // Yield first so synchronously-completing readers cannot re-enter the publication
                 // pipeline before the calling callback unwinds.
                 await Task.Yield();
-                await TriggerPublishAsync(CancellationToken.None, forceReloadIds).ConfigureAwait(false);
+                await TriggerPublishAsync(CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
@@ -759,9 +749,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         }
     }
 
-    private async ValueTask TriggerPublishAsync(
-        CancellationToken cancellationToken,
-        ImmutableHashSet<string>? forceReloadIds = null)
+    private async ValueTask TriggerPublishAsync(CancellationToken cancellationToken)
     {
         if (_publisher is null || _snapshotReader is null)
         {
@@ -775,7 +763,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             return;
         }
 
-        if (await _publisher.PublishAsync(snapshot, forceReloadIds, cancellationToken).ConfigureAwait(false))
+        if (await _publisher.PublishAsync(snapshot, cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             _runtimeState.MarkSnapshotAccepted();
         }

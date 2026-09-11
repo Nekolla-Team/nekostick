@@ -99,6 +99,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             if (desiredSet.HasUnavailableLoadedRecord &&
                 !desiredSet.HasQuarantinedLoadedRecord &&
                 previousGeneration is not null &&
+                !HasRunningContentDrift(previousGeneration, desiredSet.Descriptors) &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
             {
                 if (!_snapshotHolder.TryReplace(snapshot, previousGeneration, serviceOwners))

@@ -312,7 +312,7 @@ ValueTask<ConfigurationReadResult<ExtensionRefreshSummary>> RequestRefreshAsync(
 3. 记录仍在数据库但本次扫描没有 manifest 时计入 `Missing`；这只是报告，不删除记录。
 4. 扫描中无法读取的目录（manifest 缺失、重复、解析或 schema 校验失败、IO 异常等）不会静默忽略：会计入 `ExtensionRefreshSummary.Skipped`（1.3.4 起），每项包含目录的叶子名称（`DirectoryName`，不含完整路径）和稳定的失败类别名（`FailureCode`，如 `ManifestMissing`、`JsonInvalid`）。
 
-refresh 完成后触发 publish pipeline。已是 `Loaded` 的扩展在版本更新后的下一次 publish 中因 descriptor 身份变化而自动加载新 generation；版本不变但内容摘要漂移时，refresh 钉死新摘要并**强制本节点重载**该扩展以运行新代码（1.3.3 起）；两者之外的场景仍可用 `ReloadAsync` 显式重载。
+refresh 完成后触发 publish pipeline。publish 的 descriptor 身份包含内容摘要：运行中 binding 的摘要与 desired 摘要不一致（含从 `null` 变为有值）即自动替换 generation，版本变化同理。因此 `Loaded` 扩展在版本更新或摘要漂移后的任何一次 publish（即时触发、revision `NOTIFY` 或轮询）都会收敛重载，refresh 自身不再携带额外的强制重载信号；两者之外的场景仍可用 `ReloadAsync` 显式重载。
 
 重复 manifest ID 返回 `Validation`；目录根或持久化不可用返回 `StorageUnavailable`；乐观并发竞争返回 `ConcurrencyConflict`；read-only / 版本不足 / 生命周期回调重入返回 `Unsupported`。refresh 的 durable writes 成功后返回 summary；即时 publish 触发是 best-effort，不会把发布失败映射为 `StorageUnavailable`，PG revision `NOTIFY` 的 refresh 会继续收敛。初次启动的“零记录例外”见下文；它是启动 bootstrap 规则，不改变 refresh 新增记录的默认 `Disabled` 状态。
 对于 `EnableAsync`、`DisableAsync`、`DeleteRecordAsync` 和 `RequestRefreshAsync`，数据库 durable write 与运行时 publish 是两个阶段：写入提交后会触发即时 publish，但即时失败由 revision `NOTIFY` refresh 重试并最终收敛，业务写结果不会伪报为发布失败。
@@ -323,7 +323,7 @@ refresh 完成后触发 publish pipeline。已是 `Loaded` 的扩展在版本更
 - **扫描新增默认 Disabled。** 在已有任意持久化记录后，扫描到的新扩展先以 `Disabled` 注册，不会因为文件刚出现就加载。
 - **首次启动例外。** 如果启动时数据库中完全没有扩展记录，bootstrap 扫描到的所有扩展仍按既有 out-of-box 行为加载；首次写入后的后续扫描都遵循新增即 `Disabled`。
 - **启用 / 禁用是持久状态。** `EnableAsync` / `DisableAsync` 写入记录状态，并通过 write → publish pipeline 应用，而不是只改变当前进程；下一次启动会按持久状态决定是否加载。
-- **版本变更与热替换不同。** refresh 更新 manifest 版本后，`Loaded` 记录会在下一次 publish 自动替换 generation；版本不变但内容摘要变化的，1.3.3 起 refresh 钉死新摘要后强制重载本节点；其余需要重载的场景（如依赖的外部状态变化）仍须显式 `ReloadAsync`。
+- **版本变更与热替换不同。** refresh 更新 manifest 版本或钉死新摘要后，`Loaded` 记录会在下一次 publish 自动替换 generation（descriptor 身份含摘要，任何 publish 都会收敛）；其余需要重载的场景（如依赖的外部状态变化）仍须显式 `ReloadAsync`，它无条件强制重载目标，不比较摘要。
 - **Disabled 的运行时效果。** Disabled 扩展不进入可加载 desired set；其 handler route 配置可保留但请求 fail closed，拥有的服务进程停止，配置行不因此删除。
 
 ## 路由观测订阅（RouteEvents.TrySubscribe）

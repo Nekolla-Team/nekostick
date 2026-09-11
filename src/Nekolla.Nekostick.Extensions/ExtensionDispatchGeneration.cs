@@ -12,12 +12,14 @@ public sealed class ExtensionRuntimeDescriptor
     /// <param name="handlerIds">Optional route handler IDs to expose. An empty value exposes every registered handler.</param>
     /// <param name="includeFallback">Whether to expose the extension's fallback in the generation.</param>
     /// <param name="routeIds">Optional route IDs owned by this extension in the desired Host snapshot.</param>
+    /// <param name="contentHash">Optional digest of the extension content this binding should run; any mismatch with the running binding's digest forces a fresh candidate.</param>
     public ExtensionRuntimeDescriptor(
         ExtensionManifest? manifest,
         ExtensionSettingsConfiguration? settings = null,
         IEnumerable<string>? handlerIds = null,
         bool includeFallback = true,
-        IEnumerable<Guid>? routeIds = null)
+        IEnumerable<Guid>? routeIds = null,
+        string? contentHash = null)
     {
         Manifest = manifest;
         Settings = settings;
@@ -28,6 +30,7 @@ public sealed class ExtensionRuntimeDescriptor
         RouteIds = routeIds is null
             ? ImmutableArray<Guid>.Empty
             : routeIds.Distinct().ToImmutableArray();
+        ContentHash = contentHash;
     }
 
     /// <summary>Gets the route IDs owned by this extension in the desired Host snapshot.</summary>
@@ -44,6 +47,9 @@ public sealed class ExtensionRuntimeDescriptor
 
     /// <summary>Gets whether the extension fallback is requested in the generation.</summary>
     public bool IncludeFallback { get; }
+
+    /// <summary>Gets the digest of the extension content this binding should run, or <see langword="null" /> when unknown.</summary>
+    public string? ContentHash { get; }
 }
 
 /// <summary>Reports one desired extension binding in a prepared dispatch generation.</summary>

@@ -551,6 +551,52 @@ public sealed class HostExtensionEvidenceTests
     }
 
     [Fact]
+    public async Task ContentDigestChangeForcesCandidateReplacementAcrossPublishes()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var settings = Settings(FixtureExtensionId, "same");
+        var oldHash = "sha256:" + new string('a', 64);
+        var newHash = "sha256:" + new string('b', 64);
+
+        // The running binding was candidated before any digest was pinned.
+        var unpinnedGeneration = await PrepareAndPublishGenerationAsync(
+            manager,
+            manifest,
+            settings,
+            previous: null,
+            contentHash: null);
+
+        // null -> value counts as a change: version, settings, and routes are identical.
+        var pinnedPreparation = await PrepareDescriptorAsync(manager, manifest, settings, unpinnedGeneration, contentHash: newHash);
+        var pinnedReady = await pinnedPreparation.ReadyToPublishAsync(TestContext.Current.CancellationToken);
+        Assert.True(pinnedReady.Succeeded, pinnedReady.FailureCode.ToString());
+        Assert.False(Assert.Single(
+            pinnedReady.Generation!.Bindings,
+            binding => binding.ExtensionId == FixtureExtensionId).Reused);
+        Assert.True(await pinnedPreparation.CompletePublicationAsync());
+
+        // An unchanged digest is retained without restarting.
+        var retainedPreparation = await PrepareDescriptorAsync(manager, manifest, settings, pinnedReady.Generation, contentHash: newHash);
+        var retainedReady = await retainedPreparation.ReadyToPublishAsync(TestContext.Current.CancellationToken);
+        Assert.True(retainedReady.Succeeded, retainedReady.FailureCode.ToString());
+        Assert.True(Assert.Single(
+            retainedReady.Generation!.Bindings,
+            binding => binding.ExtensionId == FixtureExtensionId).Reused);
+        await retainedPreparation.AbortAsync();
+
+        // A different digest replaces the candidate again.
+        var driftedPreparation = await PrepareDescriptorAsync(manager, manifest, settings, pinnedReady.Generation, contentHash: oldHash);
+        var driftedReady = await driftedPreparation.ReadyToPublishAsync(TestContext.Current.CancellationToken);
+        Assert.True(driftedReady.Succeeded, driftedReady.FailureCode.ToString());
+        Assert.False(Assert.Single(
+            driftedReady.Generation!.Bindings,
+            binding => binding.ExtensionId == FixtureExtensionId).Reused);
+        await driftedPreparation.AbortAsync();
+    }
+
+    [Fact]
     public async Task ChangedSettingsWithLocalDiscoveryFailureDoesNotReusePriorGeneration()
     {
         using var fixture = TestExtensionDirectory.CreateJson();
@@ -953,7 +999,32 @@ public sealed class HostExtensionEvidenceTests
         ExtensionSettingsConfiguration? settings,
         ExtensionDispatchGeneration? previous,
         bool includeFallback = false,
-        string? requestedHandlerId = null)
+        string? requestedHandlerId = null,
+        string? contentHash = null)
+    {
+        var preparation = await PrepareDescriptorAsync(
+            manager,
+            manifest,
+            settings,
+            previous,
+            includeFallback,
+            requestedHandlerId,
+            contentHash);
+        var ready = await preparation.ReadyToPublishAsync(TestContext.Current.CancellationToken);
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+        Assert.NotNull(ready.Generation);
+        Assert.True(await preparation.CompletePublicationAsync());
+        return ready.Generation!;
+    }
+
+    private static async Task<ExtensionGenerationPreparation> PrepareDescriptorAsync(
+        ExtensionRuntimeManager manager,
+        ExtensionManifest? manifest,
+        ExtensionSettingsConfiguration? settings,
+        ExtensionDispatchGeneration? previous,
+        bool includeFallback = false,
+        string? requestedHandlerId = null,
+        string? contentHash = null)
     {
         var desired = manifest is null
             ? ImmutableArray<ExtensionRuntimeDescriptor>.Empty
@@ -962,16 +1033,12 @@ public sealed class HostExtensionEvidenceTests
                     manifest,
                     settings,
                     [requestedHandlerId ?? FixtureExtensionId],
-                    includeFallback));
+                    includeFallback,
+                    contentHash: contentHash));
         var prepared = await manager.PrepareGenerationAsync(desired, previous, cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
         Assert.NotNull(prepared.Preparation);
-        var preparation = prepared.Preparation!;
-        var ready = await preparation.ReadyToPublishAsync(TestContext.Current.CancellationToken);
-        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
-        Assert.NotNull(ready.Generation);
-        Assert.True(await preparation.CompletePublicationAsync());
-        return ready.Generation!;
+        return prepared.Preparation!;
     }
 
     private static HostConfigurationSnapshotHolder CreatePublishedHolder(

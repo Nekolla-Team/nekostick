@@ -124,7 +124,7 @@ Host 启动时扫描 `extensions/`。首次启动（数据库中没有任何扩�
 - **摘要内容**：对 manifest 字节与入口程序集字节做 SHA-256（8 字节大端长度前缀拼接），格式为 `sha256:<64 位小写十六进制>`。
 - **漂移检测**：每次发布时，各节点用本地文件重算摘要并与持久化值比较。不一致的扩展在**该节点**被隔离（quarantine，不加载、不路由），节点状态上报 `ContentMismatch`；摘要暂时无法计算（文件被占用等）时仍 fail-closed 隔离，但上报 `ContentHashMissing` 以便区分。持久化摘要缺失（`null`）时宽容跳过比较并上报 `ContentHashMissing`。隔离只影响本节点，不修改全局记录。
 - **何时钉死**：扩展被启用（`EnableAsync`）、bootstrap 首次登记、以及 `RequestRefreshAsync` 观察到版本或内容变化时，Host 把摘要写入持久化记录（`ExtensionManagementEntry.ContentHash`）。例外：版本已变更但新摘要暂时无法计算时，Host 清除旧摘要（记为未知，胜过保留错误的旧值），下次可计算时重新钉死；摘要暂不可算不会导致 refresh 整体失败。
-- **内容变更生效**：仅内容（同版本号）变化被 refresh 钉死新摘要后，该节点会强制重载扩展以运行新代码。
+- **内容变更生效**：publish 的 descriptor 身份包含内容摘要；运行中 binding 的摘要与本次 desired 摘要不一致（含从 `null` 变为有值）即自动替换 generation，与版本是否变化无关。因此 refresh 钉死新摘要后，即时 publish 或后续 revision `NOTIFY` / 轮询触发的 publish 都会收敛重载，各节点行为一致。
 
 **多节点更新扩展的正确顺序：**
 

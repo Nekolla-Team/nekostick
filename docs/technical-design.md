@@ -390,7 +390,7 @@ handler、后台任务和事件订阅回调的异常必须在宿主边界捕获�
 - 不一致 → 该节点隔离（quarantine）此扩展，节点状态上报 `ContentMismatch`；隔离是节点本地判定，不改全局记录、不影响其他节点。
 - 本地摘要暂时无法计算 → 同样 fail-closed 隔离，但上报 `ContentHashMissing` 以区分真漂移。
 - 持久化摘要为 `null` → 宽容跳过比较并上报 `ContentHashMissing`。
-- 仅内容变化（版本号不变）被 refresh 钉死新摘要后，本节点强制重载扩展以运行新代码。
+- 运行中 binding 的摘要与 publish desired 摘要不一致（含从 `null` 变为有值）即自动替换 generation，与版本是否变化无关；refresh 钉死新摘要后由即时 publish 或后续 `NOTIFY` / 轮询 publish 收敛重载。
 
 各节点把每个扩展的本地观测（加载状态 + 失败码 + 观测到的摘要）写入 `extension_node_states` 表；CLI `status` / `doctor` 汇总各节点分歧，未要求加载的扩展（如已禁用）显示为 `not-required`。微服务二进制不在此机制覆盖范围内，由部署方扩展自管（把预期摘要存自己的设置、本地校验、结合 `Waiting` / `ResumeAsync` / `RestartAsync` 控制服务），见 [extension-api/README.md](extension-api/README.md#内容摘要与多节点部署)。
 

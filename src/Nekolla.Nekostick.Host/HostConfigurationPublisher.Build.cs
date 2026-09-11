@@ -378,7 +378,13 @@ public sealed partial class HostConfigurationPublisher
             settingsById.TryGetValue(manifest.Id, out var settings);
             routesByOwner.TryGetValue(manifest.Id, out var ownedRouteIds);
             ownedRouteIds = ownedRouteIds.IsDefault ? ImmutableArray<Guid>.Empty : ownedRouteIds;
-            desired.Add(new ExtensionRuntimeDescriptor(manifest, settings, requestedHandlerIds, true, ownedRouteIds));
+            desired.Add(new ExtensionRuntimeDescriptor(
+                manifest,
+                settings,
+                requestedHandlerIds,
+                true,
+                ownedRouteIds,
+                contentHashes.TryGetValue(manifest.Id, out var desiredHash) ? desiredHash : null));
         }
 
         return CreateDesiredSet(
@@ -720,6 +726,35 @@ public sealed partial class HostConfigurationPublisher
 
     private static bool HasUnsafeUnavailableBinding(ExtensionDispatchGeneration generation) =>
         generation.Bindings.Any(static binding => !binding.Available && binding.FailureCode is not ExtensionFailureCode.None and not ExtensionFailureCode.HandlerUnavailable and not ExtensionFailureCode.FallbackConflict);
+
+    private static bool HasRunningContentDrift(
+        ExtensionDispatchGeneration previousGeneration,
+        ImmutableArray<ExtensionRuntimeDescriptor> desired)
+    {
+        var runningHashes = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var context in previousGeneration.Contexts)
+        {
+            runningHashes[context.Instance.Manifest.Id] = context.ContentHash;
+        }
+
+        foreach (var descriptor in desired)
+        {
+            if (descriptor?.Manifest is not { } manifest)
+            {
+                continue;
+            }
+
+            // A digest mismatch against the running binding must go through candidate
+            // replacement, not generation reuse.
+            if (runningHashes.TryGetValue(manifest.Id, out var runningHash) &&
+                !string.Equals(runningHash, descriptor.ContentHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static bool CanReusePriorLoadedIdentities(HostRoutingSnapshot previousSnapshot, HostConfigurationSnapshot nextSnapshot)
     {

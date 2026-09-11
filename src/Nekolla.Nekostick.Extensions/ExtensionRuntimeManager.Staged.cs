@@ -391,10 +391,12 @@ public sealed partial class ExtensionRuntimeManager
         ExtensionDispatchContext context,
         ExtensionManifest manifest,
         ExtensionSettingsConfiguration? settings,
-        ImmutableArray<Guid> routeIds) =>
+        ImmutableArray<Guid> routeIds,
+        string? contentHash) =>
         string.Equals(context.Instance.Manifest.Id, manifest.Id, StringComparison.Ordinal) &&
         string.Equals(context.Instance.Manifest.Version.ToString(), manifest.Version.ToString(), StringComparison.Ordinal) &&
         SettingsEqual(context.Settings, settings) &&
+        string.Equals(context.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase) &&
         context.RouteRegistrations is not null &&
         context.RouteRegistrations.HasSameOwnedRoutes(routeIds);
 

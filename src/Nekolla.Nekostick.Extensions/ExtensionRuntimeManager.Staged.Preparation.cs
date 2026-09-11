@@ -172,7 +172,7 @@ public sealed partial class ExtensionRuntimeManager
                 var failureCode = ExtensionFailureCode.None;
                 if (previousById.TryGetValue(manifest.Id, out var previousContext) &&
                     !requestedForceReloadIds.Contains(manifest.Id) &&
-                    HasExactIdentity(previousContext, manifest, descriptor.Settings, descriptor.RouteIds))
+                    HasExactIdentity(previousContext, manifest, descriptor.Settings, descriptor.RouteIds, descriptor.ContentHash))
                 {
                     if (!baseGeneration.TryRetainContext(previousContext))
                     {
@@ -204,7 +204,8 @@ public sealed partial class ExtensionRuntimeManager
                         context = new ExtensionDispatchContext(
                             started,
                             descriptor.Settings,
-                            started.RouteRegistrations);
+                            started.RouteRegistrations,
+                            descriptor.ContentHash);
                         candidateContexts.Add(context);
                     }
                     else
