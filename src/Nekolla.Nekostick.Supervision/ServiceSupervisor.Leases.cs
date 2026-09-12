@@ -20,6 +20,7 @@ public sealed partial class ServiceSupervisor
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.OperationCancelled(_logger, "RenewLease", launchSpecification.ServiceId);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
         }
 
@@ -69,11 +70,13 @@ public sealed partial class ServiceSupervisor
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.OperationCancelled(_logger, "RenewLease", launchSpecification.ServiceId);
             Interlocked.CompareExchange(ref lease, null, current);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.OperationFailed(_logger, exception, "RenewLease", launchSpecification.ServiceId);
             return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.DatabaseUnavailable, Snapshot, current);
         }
 

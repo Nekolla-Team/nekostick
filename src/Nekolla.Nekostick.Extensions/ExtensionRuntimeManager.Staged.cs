@@ -94,13 +94,26 @@ public sealed partial class ExtensionRuntimeManager
             }
             catch (OperationCanceledException)
             {
+                if (_logger is { } cancelledLogger)
+                {
+                    ExtensionLogMessages.ExtensionGenerationCommitCancelled(cancelledLogger, nameof(ReadyToPublishAsync));
+                }
+
                 await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
                 return ExtensionGenerationCommitResult.Failure(
                     ExtensionFailureCode.Cancelled,
                     preparation.Previous);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                if (_logger is { } failedLogger)
+                {
+                    ExtensionLogMessages.ExtensionGenerationCommitFailed(
+                        failedLogger,
+                        exception,
+                        nameof(ReadyToPublishAsync));
+                }
+
                 await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
                 return ExtensionGenerationCommitResult.Failure(
                     ExtensionFailureCode.RuntimeUnavailable,
@@ -187,16 +200,32 @@ public sealed partial class ExtensionRuntimeManager
             {
                 await detached.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
             }
-            catch
+            catch (Exception exception)
             {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        logger,
+                        exception,
+                        detached.Manifest.Id,
+                        nameof(ExtensionInstance.StopForReplacementAsync));
+                }
             }
 
             try
             {
                 await detached.ReleaseAsync().ConfigureAwait(false);
             }
-            catch
+            catch (Exception exception)
             {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        logger,
+                        exception,
+                        detached.Manifest.Id,
+                        nameof(ExtensionInstance.ReleaseAsync));
+                }
             }
 
             detached.MarkStopped();
@@ -289,6 +318,14 @@ public sealed partial class ExtensionRuntimeManager
 
         try
         {
+            if (_logger is { } abortLogger)
+            {
+                ExtensionLogMessages.ExtensionGenerationPreparationAborted(
+                    abortLogger,
+                    preparation.Generation.GenerationId,
+                    preparation.Candidates.Length);
+            }
+
             var candidateSet = preparation.Candidates.ToHashSet();
             foreach (var candidate in preparation.Candidates)
             {
@@ -296,8 +333,16 @@ public sealed partial class ExtensionRuntimeManager
                 {
                     await AbortCandidateAsync(candidate).ConfigureAwait(false);
                 }
-                catch
+                catch (Exception exception)
                 {
+                    if (_logger is { } logger)
+                    {
+                        ExtensionLogMessages.ExtensionGenerationCandidateAbortFailed(
+                            logger,
+                            exception,
+                            candidate.Manifest.Id,
+                            nameof(AbortPreparationCoreAsync));
+                    }
                 }
             }
 
@@ -307,10 +352,18 @@ public sealed partial class ExtensionRuntimeManager
                 {
                     try
                     {
-                        await context.ReleaseGenerationAsync().ConfigureAwait(false);
+                        await context.ReleaseGenerationAsync(preparation.Generation.GenerationId).ConfigureAwait(false);
                     }
-                    catch
+                    catch (Exception exception)
                     {
+                        if (_logger is { } logger)
+                        {
+                            ExtensionLogMessages.ExtensionGenerationContextReleaseFailed(
+                                logger,
+                                exception,
+                                context.Instance.Manifest.Id,
+                                nameof(AbortPreparationCoreAsync));
+                        }
                     }
                 }
             }

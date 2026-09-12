@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Routing;
@@ -8,11 +10,26 @@ namespace Nekolla.Nekostick.Host;
 /// <summary>Runs route observations and synchronous action hooks at the Host route boundary.</summary>
 internal static partial class HostRouteEvents
 {
+    private static readonly HostLogThrottle ObservationThrottle = new();
+
+    private static void LogObservationFailure(
+        ILogger? logger,
+        Exception exception,
+        string operation,
+        string key)
+    {
+        if (logger is { } target && ObservationThrottle.TryAcquire(key, out var occurrences))
+        {
+            HostLogMessages.RouteEventObservationFailed(target, exception, operation, occurrences);
+        }
+    }
+
     internal static async ValueTask<HostRouteEventSession?> BeginAsync(
         HttpContext context,
         HostRoutingSnapshot snapshot,
         RouteMatch match,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         var generation = snapshot.DispatchGeneration;
         if (generation is null || !generation.HasRouteObservers(match.RouteId))
@@ -26,10 +43,11 @@ internal static partial class HostRouteEvents
         ExtensionRouteRequestSnapshot request;
         try
         {
-            request = await CreateRequestSnapshotAsync(context, includeBody, cancellationToken).ConfigureAwait(false);
+            request = await CreateRequestSnapshotAsync(context, includeBody, cancellationToken, logger).ConfigureAwait(false);
         }
-        catch
+        catch (Exception exception)
         {
+            LogObservationFailure(logger, exception, nameof(BeginAsync), "request-snapshot");
             return hasHooks
                 ? new HostRouteEventSession(generation, match.RouteId, Guid.CreateVersion7(), null!, true)
                 {
@@ -68,7 +86,7 @@ internal static partial class HostRouteEvents
             return session;
         }
 
-        if (!TryApplyRequest(context, trigger.Request))
+        if (!TryApplyRequest(context, trigger.Request, logger))
         {
             session.Cancelled = true;
             return session;
@@ -79,7 +97,7 @@ internal static partial class HostRouteEvents
             match.RouteId,
             session.CorrelationId,
             ExtensionRouteEventStage.Trigger,
-            trigger.Request));
+            trigger.Request), logger);
         session.OriginalResponseBody = context.Response.Body;
         session.ResponseBuffer = new MemoryStream();
         context.Response.Body = session.ResponseBuffer;
@@ -90,7 +108,8 @@ internal static partial class HostRouteEvents
         HttpContext context,
         HostRouteEventSession? session,
         RouteTargetExecutionResult outcome,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         if (session is null)
         {
@@ -110,7 +129,7 @@ internal static partial class HostRouteEvents
                 session.CorrelationId,
                 ExtensionRouteEventStage.Return,
                 session.Request,
-                TryCreateResponseSnapshot(context, null)));
+                TryCreateResponseSnapshot(context, null, logger)), logger);
             return outcome;
         }
 
@@ -120,7 +139,7 @@ internal static partial class HostRouteEvents
             return RouteTargetExecutionResult.Cancelled;
         }
 
-        var response = TryCreateResponseSnapshot(context, session.ResponseBuffer);
+        var response = TryCreateResponseSnapshot(context, session.ResponseBuffer, logger);
         if (response is null)
         {
             RestoreResponseBody(context, session);
@@ -153,14 +172,14 @@ internal static partial class HostRouteEvents
             session.CorrelationId,
             ExtensionRouteEventStage.Return,
             result.Request,
-            result.Response));
+            result.Response), logger);
         RestoreResponseBody(context, session);
         if (outcome != RouteTargetExecutionResult.Handled)
         {
             return outcome;
         }
 
-        if (!await CommitResponseAsync(context, result.Response, cancellationToken).ConfigureAwait(false))
+        if (!await CommitResponseAsync(context, result.Response, cancellationToken, logger).ConfigureAwait(false))
         {
             context.Response.Clear();
             context.Response.StatusCode = 499;
@@ -173,21 +192,24 @@ internal static partial class HostRouteEvents
 
     private static void PublishBestEffort(
         ExtensionDispatchGeneration generation,
-        ExtensionRouteEvent observation)
+        ExtensionRouteEvent observation,
+        ILogger? logger = null)
     {
         try
         {
             generation.PublishRouteEvent(observation);
         }
-        catch
+        catch (Exception exception)
         {
+            LogObservationFailure(logger, exception, nameof(PublishBestEffort), "publish");
         }
     }
 
     private static async ValueTask<ExtensionRouteRequestSnapshot> CreateRequestSnapshotAsync(
         HttpContext context,
         bool includeBody,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         var body = Array.Empty<byte>();
         if (includeBody)
@@ -239,7 +261,10 @@ internal static partial class HostRouteEvents
             context.Request.IsHttps);
     }
 
-    private static bool TryApplyRequest(HttpContext context, ExtensionRouteRequestSnapshot request)
+    private static bool TryApplyRequest(
+        HttpContext context,
+        ExtensionRouteRequestSnapshot request,
+        ILogger? logger = null)
     {
         if (request.Path.Length == 0 || !request.Path.StartsWith('/') ||
             request.Path.Any(char.IsControl) || request.QueryString?.Contains('?') == true)
@@ -296,8 +321,9 @@ internal static partial class HostRouteEvents
             context.Request.Body = new MemoryStream(request.Body.ToArray(), writable: false);
             return true;
         }
-        catch
+        catch (Exception exception)
         {
+            LogObservationFailure(logger, exception, nameof(TryApplyRequest), "apply-request");
             context.Request.Method = originalMethod;
             context.Request.PathBase = originalPathBase;
             context.Request.Path = originalPath;
@@ -323,7 +349,8 @@ internal static partial class HostRouteEvents
 
     private static ExtensionRouteResponseSnapshot? TryCreateResponseSnapshot(
         HttpContext context,
-        MemoryStream? body)
+        MemoryStream? body,
+        ILogger? logger = null)
     {
         try
         {
@@ -337,8 +364,9 @@ internal static partial class HostRouteEvents
                 new KeyValuePair<string, IEnumerable<string>>(pair.Key, pair.Value.ToArray()!));
             return new ExtensionRouteResponseSnapshot(context.Response.StatusCode, headers, bytes);
         }
-        catch
+        catch (Exception exception)
         {
+            LogObservationFailure(logger, exception, nameof(TryCreateResponseSnapshot), "response-snapshot");
             return null;
         }
     }
@@ -358,7 +386,8 @@ internal static partial class HostRouteEvents
     private static async ValueTask<bool> CommitResponseAsync(
         HttpContext context,
         ExtensionRouteResponseSnapshot response,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
     {
         if (context.Response.HasStarted || !IsValidResponseReplacement(response))
         {
@@ -381,8 +410,9 @@ internal static partial class HostRouteEvents
 
             return true;
         }
-        catch
+        catch (Exception exception)
         {
+            LogObservationFailure(logger, exception, nameof(CommitResponseAsync), "commit-response");
             return false;
         }
     }

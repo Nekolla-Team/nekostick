@@ -143,7 +143,7 @@ public sealed partial class HostConfigurationPublisher
             ManifestDiscoveryResult result;
             try
             {
-                result = ExtensionManifestDiscovery.Discover(directory);
+                result = ExtensionManifestDiscovery.Discover(directory, _logger);
             }
             catch (Exception exception)
             {
@@ -180,7 +180,7 @@ public sealed partial class HostConfigurationPublisher
                 continue;
             }
 
-            contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest);
+            contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest, _logger);
         }
 
         var quarantinedIds = new HashSet<string>(StringComparer.Ordinal);
@@ -215,6 +215,7 @@ public sealed partial class HostConfigurationPublisher
             {
                 observations[pair.Key] = Observation(pair.Key, null, ExtensionLoadState.Failed, "ManifestMissing");
                 unavailableLoadedIds.Add(pair.Key);
+                HostLogMessages.ExtensionBindingQuarantined(_logger, pair.Key, "ManifestMissing");
                 continue;
             }
 
@@ -223,6 +224,7 @@ public sealed partial class HostConfigurationPublisher
             {
                 observations[pair.Key] = Observation(pair.Key, observedHash, ExtensionLoadState.Failed, "VersionMismatch");
                 unavailableLoadedIds.Add(pair.Key);
+                HostLogMessages.ExtensionBindingQuarantined(_logger, pair.Key, "VersionMismatch");
                 continue;
             }
 
@@ -238,6 +240,7 @@ public sealed partial class HostConfigurationPublisher
                         ExtensionLoadState.Failed,
                         "ContentHashMissing");
                     quarantinedIds.Add(pair.Key);
+                    HostLogMessages.ExtensionBindingQuarantined(_logger, pair.Key, "ContentHashMissing");
                     continue;
                 }
 
@@ -249,6 +252,7 @@ public sealed partial class HostConfigurationPublisher
                         ExtensionLoadState.Failed,
                         "ContentMismatch");
                     quarantinedIds.Add(pair.Key);
+                    HostLogMessages.ExtensionBindingQuarantined(_logger, pair.Key, "ContentMismatch");
                     continue;
                 }
             }
@@ -665,7 +669,7 @@ public sealed partial class HostConfigurationPublisher
             await using var db = await _dbContextFactory
                 .CreateDbContextAsync(cancellationToken)
                 .ConfigureAwait(false);
-            await using var api = new EfHostConfigApi(db);
+            await using var api = new EfHostConfigApi(db, logger: _logger);
             return await api
                 .PersistDiscoveredExtensionRecordsAsync(
                     initialState,
@@ -706,7 +710,7 @@ public sealed partial class HostConfigurationPublisher
             await using var db = await _dbContextFactory
                 .CreateDbContextAsync(cancellationToken)
                 .ConfigureAwait(false);
-            await using var api = new EfHostConfigApi(db);
+            await using var api = new EfHostConfigApi(db, logger: _logger);
             var result = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
             return result.IsSuccess && result.Value is { Version: > 0 } durable &&
                 durable.Version > snapshot.Version

@@ -48,8 +48,15 @@ internal sealed class HostProcessOutputLogSink : IProcessOutputSink
                     break;
             }
         }
-        catch
+        catch (Exception exception)
         {
+            try
+            {
+                HostLogMessages.ProcessOutputSinkFailure(logger, exception, nameof(OnLine));
+            }
+            catch
+            {
+            }
             // Logging must not interrupt child-process capture or lifecycle cleanup.
         }
     }
@@ -83,8 +90,15 @@ internal sealed class HostProcessOutputLogSink : IProcessOutputSink
                 true,
                 count);
         }
-        catch
+        catch (Exception exception)
         {
+            try
+            {
+                HostLogMessages.ProcessOutputSinkCleanupFailure(logger, exception, nameof(OnDropped));
+            }
+            catch
+            {
+            }
             // Logging must not interrupt child-process capture or lifecycle cleanup.
         }
     }

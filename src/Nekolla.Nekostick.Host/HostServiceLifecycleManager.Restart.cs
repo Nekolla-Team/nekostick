@@ -229,7 +229,10 @@ public sealed partial class HostServiceLifecycleManager
         if (result.Restart is { ShouldRestart: true, NotBefore: { } notBefore } && !IsStopping)
         {
             HostLogMessages.ServiceRestartScheduled(_logger, generation.Configuration.Id);
-            _ = RestartTerminalAfterAsync(slot, generation, notBefore, CancellationToken.None);
+            ObserveBackgroundTask(
+                RestartTerminalAfterAsync(slot, generation, notBefore, CancellationToken.None),
+                nameof(RestartTerminalAfterAsync),
+                generation.Configuration.Id);
             PublishServiceState(
                 generation.Configuration.Id,
                 generation.SnapshotVersion,
@@ -237,7 +240,10 @@ public sealed partial class HostServiceLifecycleManager
             return;
         }
 
-        _ = StopRetiringGenerationAsync(slot, generation);
+        ObserveBackgroundTask(
+            StopRetiringGenerationAsync(slot, generation),
+            nameof(StopRetiringGenerationAsync),
+            generation.Configuration.Id);
     }
 
     private async Task RestartAfterAsync(
@@ -252,6 +258,10 @@ public sealed partial class HostServiceLifecycleManager
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            HostLogMessages.LifecycleBackgroundCancelled(
+                _logger,
+                nameof(RestartAfterAsync),
+                generation.Configuration.Id);
         }
         catch (Exception exception)
         {
@@ -469,10 +479,18 @@ public sealed partial class HostServiceLifecycleManager
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             RemoveRetiringGeneration(generation);
+            HostLogMessages.LifecycleBackgroundCancelled(
+                _logger,
+                nameof(RestartTerminalAfterAsync),
+                generation.Configuration.Id);
         }
         catch (Exception exception)
         {
-            HostLogMessages.FailureDetails(_logger, exception, nameof(RestartTerminalAfterAsync));
+            HostLogMessages.LifecycleBackgroundFailed(
+                _logger,
+                exception,
+                nameof(RestartTerminalAfterAsync),
+                generation.Configuration.Id);
             await StopRetiringGenerationAsync(slot, generation).ConfigureAwait(false);
         }
     }
@@ -608,11 +626,19 @@ public sealed partial class HostServiceLifecycleManager
         catch (OperationCanceledException)
         {
             RemoveRetiringGeneration(generation);
+            HostLogMessages.LifecycleBackgroundCancelled(
+                _logger,
+                nameof(StopRetiringGenerationAsync),
+                generation.Configuration.Id);
         }
         catch (Exception exception)
         {
             RemoveRetiringGeneration(generation);
-            HostLogMessages.FailureDetails(_logger, exception, nameof(StopRetiringGenerationAsync));
+            HostLogMessages.LifecycleBackgroundFailed(
+                _logger,
+                exception,
+                nameof(StopRetiringGenerationAsync),
+                generation.Configuration.Id);
         }
     }
 

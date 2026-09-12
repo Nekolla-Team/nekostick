@@ -1,5 +1,7 @@
 using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence.Entities;
 using DomainExtensionLoadState = Nekolla.Nekostick.Domain.ExtensionLoadState;
@@ -20,12 +22,20 @@ public sealed class EfExtensionNodeStatePersistence
     private const int MaxAttempts = 3;
     private readonly NekostickDbContext _db;
     private readonly TimeProvider _time;
+    private readonly ILogger _logger;
 
     /// <summary>Creates a node-state persistence adapter.</summary>
-    public EfExtensionNodeStatePersistence(NekostickDbContext db, TimeProvider? timeProvider = null)
+    /// <param name="db">The persistence context.</param>
+    /// <param name="timeProvider">The clock used for persisted timestamps.</param>
+    /// <param name="logger">The optional persistence logger.</param>
+    public EfExtensionNodeStatePersistence(
+        NekostickDbContext db,
+        TimeProvider? timeProvider = null,
+        ILogger? logger = null)
     {
         _db = db ?? throw new ArgumentNullException(nameof(db));
         _time = timeProvider ?? TimeProvider.System;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>
@@ -42,6 +52,7 @@ public sealed class EfExtensionNodeStatePersistence
     {
         if (!IsSafeNodeId(nodeId) || states is null || !ValidateStates(states))
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "UpsertNodeState", nodeId ?? "unknown");
             return false;
         }
 
@@ -53,18 +64,38 @@ public sealed class EfExtensionNodeStatePersistence
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                PersistenceLogMessages.OperationCancelled(_logger, "UpsertNodeState", nodeId);
                 throw;
             }
             catch (Exception exception) when (
                 attempt + 1 < MaxAttempts &&
                 EfHostConfigRevisionHelper.IsTransactionConflict(exception))
             {
+                PersistenceLogMessages.NodeStatePersistenceRetrying(
+                    _logger,
+                    exception,
+                    "UpsertNodeStateRetry",
+                    nodeId,
+                    attempt + 1);
                 _db.ChangeTracker.Clear();
-                await Task.Delay(TimeSpan.FromMilliseconds(20 * (attempt + 1)), cancellationToken)
-                    .ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(20 * (attempt + 1)), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    PersistenceLogMessages.OperationCancelled(_logger, "UpsertNodeStateRetryDelay", nodeId);
+                    throw;
+                }
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                PersistenceLogMessages.NodeStatePersistenceFailed(
+                    _logger,
+                    exception,
+                    "UpsertNodeState",
+                    nodeId);
                 return false;
             }
         }
@@ -190,14 +221,22 @@ public sealed class EfExtensionRecordContentPersistence
 {
     private readonly NekostickDbContext _db;
     private readonly TimeProvider _time;
+    private readonly ILogger _logger;
     private readonly EfHostConfigRevisionHelper _revisionHelper;
 
     /// <summary>Creates an extension content persistence adapter.</summary>
-    public EfExtensionRecordContentPersistence(NekostickDbContext db, TimeProvider? timeProvider = null)
+    /// <param name="db">The persistence context.</param>
+    /// <param name="timeProvider">The clock used for persisted timestamps.</param>
+    /// <param name="logger">The optional persistence logger.</param>
+    public EfExtensionRecordContentPersistence(
+        NekostickDbContext db,
+        TimeProvider? timeProvider = null,
+        ILogger? logger = null)
     {
         _db = db ?? throw new ArgumentNullException(nameof(db));
         _time = timeProvider ?? TimeProvider.System;
-        _revisionHelper = new EfHostConfigRevisionHelper(_db);
+        _logger = logger ?? NullLogger.Instance;
+        _revisionHelper = new EfHostConfigRevisionHelper(_db, _logger);
     }
 
     /// <summary>Changes an extension to the requested state and records its local content digest.</summary>
@@ -346,34 +385,42 @@ public sealed class EfExtensionRecordContentPersistence
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "WriteExtensionContent", extensionId);
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "WriteExtensionContent", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
     }

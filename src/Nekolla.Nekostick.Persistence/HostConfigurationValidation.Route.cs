@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Persistence;
@@ -21,7 +23,8 @@ internal static class HostConfigurationRouteValidator
     internal static void Validate(
         RouteConfiguration? value,
         GlobalSettingsConfiguration globalSettings,
-        HashSet<Guid> serviceIds)
+        HashSet<Guid> serviceIds,
+        ILogger? logger = null)
     {
         if (value is null || value.Matcher is null || value.Target is null || value.Forwarding is null ||
             !HostConfigurationValueValidator.IsUuidV7(value.Id) || value.Version < 0 ||
@@ -64,10 +67,20 @@ internal static class HostConfigurationRouteValidator
                 }
                 catch (ArgumentException)
                 {
+                    var invalidRegexRouteId = value?.Id.ToString() ?? "unknown";
+                    PersistenceLogMessages.SemanticValidationFailed(
+                        logger ?? NullLogger.Instance,
+                        "ValidateRouteRegex",
+                        invalidRegexRouteId);
                     HostConfigurationValueValidator.Throw();
                 }
                 catch (NotSupportedException)
                 {
+                    var unsupportedRegexRouteId = value?.Id.ToString() ?? "unknown";
+                    PersistenceLogMessages.SemanticValidationFailed(
+                        logger ?? NullLogger.Instance,
+                        "ValidateRouteRegex",
+                        unsupportedRegexRouteId);
                     HostConfigurationValueValidator.Throw();
                 }
 
@@ -77,7 +90,7 @@ internal static class HostConfigurationRouteValidator
                 break;
         }
 
-        ValidateForwarding(value.Forwarding, matcher);
+        ValidateForwarding(value.Forwarding, matcher, value.Id, logger);
         HostConfigurationRatePolicyValidator.Validate(value.ClientIpRatePolicy);
         ValidateResourceOverrides(value, globalSettings);
         ValidateHeaderRewrites(value.RequestHeaderRewrites, requestSide: true);
@@ -199,7 +212,9 @@ internal static class HostConfigurationRouteValidator
 
     private static void ValidateForwarding(
         ForwardingConfiguration value,
-        RouteMatcherConfiguration matcher)
+        RouteMatcherConfiguration matcher,
+        Guid routeId,
+        ILogger? logger)
     {
         if (value is null || !Enum.IsDefined(value.Mode))
         {
@@ -223,7 +238,7 @@ internal static class HostConfigurationRouteValidator
                 value.ReplaceTemplate.Contains('#') ||
                 value.ReplaceTemplate.Contains('\\') ||
                 !HasAbsoluteTemplatePrefix(value.ReplaceTemplate) ||
-                !HasValidTemplateTokens(value.ReplaceTemplate, matcher))
+                !HasValidTemplateTokens(value.ReplaceTemplate, matcher, routeId, logger))
             {
                 HostConfigurationValueValidator.Throw();
             }
@@ -285,7 +300,11 @@ internal static class HostConfigurationRouteValidator
               || name.StartsWith("X-Forwarded-", StringComparison.OrdinalIgnoreCase)
               || name.Equals("X-Real-IP", StringComparison.OrdinalIgnoreCase);
 
-    private static bool HasValidTemplateTokens(string value, RouteMatcherConfiguration matcher)
+    private static bool HasValidTemplateTokens(
+        string value,
+        RouteMatcherConfiguration matcher,
+        Guid routeId,
+        ILogger? logger)
     {
         var braceMatches = Regex.Matches(value, "\\{[^{}]*\\}", RegexOptions.CultureInvariant);
         var consumedEnd = 0;
@@ -326,10 +345,20 @@ internal static class HostConfigurationRouteValidator
             }
             catch (ArgumentException)
             {
+                var invalidTemplateRouteId = routeId.ToString();
+                PersistenceLogMessages.SemanticValidationFailed(
+                    logger ?? NullLogger.Instance,
+                    "ValidateRouteTemplate",
+                    invalidTemplateRouteId);
                 return false;
             }
             catch (NotSupportedException)
             {
+                var unsupportedTemplateRouteId = routeId.ToString();
+                PersistenceLogMessages.SemanticValidationFailed(
+                    logger ?? NullLogger.Instance,
+                    "ValidateRouteTemplate",
+                    unsupportedTemplateRouteId);
                 return false;
             }
         }

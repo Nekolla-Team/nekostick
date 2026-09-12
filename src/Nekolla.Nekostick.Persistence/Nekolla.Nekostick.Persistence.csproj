@@ -13,5 +13,6 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" PrivateAssets="all" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 </Project>

@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Persistence;
@@ -162,11 +164,16 @@ public interface IConfigurationRevisionReader
 public sealed class EfConfigurationRevisionReader : IConfigurationRevisionReader
 {
     private readonly NekostickDbContext _dbContext;
+    private readonly ILogger _logger;
 
     /// <summary>Creates a revision reader.</summary>
     /// <param name="dbContext">The context to query.</param>
-    public EfConfigurationRevisionReader(NekostickDbContext dbContext) =>
+    /// <param name="logger">The optional persistence logger.</param>
+    public EfConfigurationRevisionReader(NekostickDbContext dbContext, ILogger? logger = null)
+    {
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
+        _logger = logger ?? NullLogger.Instance;
+    }
 
     /// <inheritdoc />
     public async Task<ConfigurationReadResult<ConfigurationRevisionStatus>> ReadCurrentAsync(
@@ -187,10 +194,16 @@ public sealed class EfConfigurationRevisionReader : IConfigurationRevisionReader
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "ReadCurrentConfigurationRevision", "global");
             throw;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.ConfigurationRevisionReadFailed(
+                _logger,
+                exception,
+                "ReadCurrentConfigurationRevision",
+                "global");
             return ConfigurationReadResult<ConfigurationRevisionStatus>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
         }

@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Supervision;
 
@@ -217,7 +219,7 @@ internal static class ProcessOutputCapture
 
 internal static partial class PosixProcessSignals
 {
-    internal static bool TrySignalProcess(int processId, int signal)
+    internal static bool TrySignalProcess(int processId, int signal, ILogger? logger = null)
     {
         if (processId <= 1)
         {
@@ -234,13 +236,19 @@ internal static partial class PosixProcessSignals
 
             return Kill(processId, signal) == 0;
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.ProcessSignalFailed(
+                logger ?? NullLogger.Instance,
+                exception,
+                "SignalProcess",
+                processId,
+                signal);
             return false;
         }
     }
 
-    internal static bool TrySignalGroup(int processGroupId, int signal)
+    internal static bool TrySignalGroup(int processGroupId, int signal, ILogger? logger = null)
     {
         if (processGroupId <= 1)
         {
@@ -257,8 +265,14 @@ internal static partial class PosixProcessSignals
 
             return Kill(-processGroupId, signal) == 0;
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.ProcessSignalFailed(
+                logger ?? NullLogger.Instance,
+                exception,
+                "SignalGroup",
+                processGroupId,
+                signal);
             return false;
         }
     }

@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -31,6 +33,13 @@ public interface IMicroserviceDrainTracker
 public sealed class MicroserviceDrainTracker : IMicroserviceDrainTracker
 {
     private readonly ConcurrentDictionary<(Guid ServiceId, int Port), Slot> _slots = new();
+    private readonly ILogger _logger;
+
+    /// <summary>Creates a drain tracker with an optional structured logger.</summary>
+    public MicroserviceDrainTracker(ILogger? logger = null)
+    {
+        _logger = logger ?? NullLogger.Instance;
+    }
 
     // Kept internal for focused unit tests; the production contract exposes no collection state.
     internal int TrackedSlotCount => _slots.Count;
@@ -110,8 +119,9 @@ public sealed class MicroserviceDrainTracker : IMicroserviceDrainTracker
             {
                 await signal.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
             }
-            catch (TimeoutException)
+            catch (TimeoutException exception)
             {
+                ProxyLogMessages.DrainWaitTimedOut(_logger, exception, serviceId, port);
                 // A bounded drain is best effort; the caller proceeds to stop the process.
             }
         }

@@ -4,6 +4,8 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Supervision;
 
@@ -17,6 +19,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     private readonly string? helperPath;
     private readonly TimeSpan helperGracePeriod;
     private readonly IProcessOutputSink outputSink;
+    private readonly ILogger _logger;
     private readonly ConcurrentDictionary<ProcessInstanceId, ProcessLease> leases = new();
     private readonly ConcurrentDictionary<long, Action<ProcessExitObservation>> observers = new();
     private long nextObserverId;
@@ -25,10 +28,12 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     /// <param name="helperPath">The absolute helper executable or DLL path, or null to reject starts.</param>
     /// <param name="defaultStopGracePeriod">The helper's bounded graceful-stop period.</param>
     /// <param name="outputSink">The optional bounded child-output sink.</param>
+    /// <param name="logger">The optional supervision logger.</param>
     public PosixProcessExecutor(
         string? helperPath = null,
         TimeSpan? defaultStopGracePeriod = null,
-        IProcessOutputSink? outputSink = null)
+        IProcessOutputSink? outputSink = null,
+        ILogger? logger = null)
     {
         this.helperPath = helperPath is not null && Path.IsPathRooted(helperPath) && File.Exists(helperPath)
             ? helperPath
@@ -38,6 +43,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         ArgumentOutOfRangeException.ThrowIfGreaterThan(helperGracePeriod, TimeSpan.FromMinutes(5));
 
         this.outputSink = outputSink ?? NullProcessOutputSink.Instance;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -80,7 +86,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         {
             if (Interlocked.Exchange(ref lease.StopRequested, 1) == 0)
             {
-                PosixProcessSignals.TrySignalProcess(lease.ProcessId, SigTerm);
+                PosixProcessSignals.TrySignalProcess(lease.ProcessId, SigTerm, _logger);
             }
 
             try
@@ -89,19 +95,24 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             }
             catch (TimeoutException)
             {
-                PosixProcessSignals.TrySignalGroup(lease.ProcessId, SigKill);
+                var gracefulInstanceId = instanceId.ToString();
+                SupervisionLogMessages.ProcessCleanupTimedOut(_logger, "GracefulStop", gracefulInstanceId);
+                PosixProcessSignals.TrySignalGroup(lease.ProcessId, SigKill, _logger);
                 try
                 {
                     await lease.Exited.Task.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (TimeoutException)
                 {
+                    var forceReapInstanceId = instanceId.ToString();
+                    SupervisionLogMessages.ProcessCleanupTimedOut(_logger, "ForceReap", forceReapInstanceId);
                     // The bounded force-reap wait elapsed; monitor ownership remains contained.
                 }
             }
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.ProcessCleanupFailed(_logger, exception, "Cleanup", instanceId.ToString());
             // Owned-process cleanup is best effort and never exposes process details.
         }
     }
@@ -114,11 +125,13 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         ArgumentNullException.ThrowIfNull(specification);
         if (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.ProcessStartCancelled(_logger, specification.ServiceId);
             return new(ProcessOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled);
         }
 
         if (!IsSupportedPlatform || helperPath is null)
         {
+            SupervisionLogMessages.ProcessStartValidationRejected(_logger, "PlatformOrHelper", specification.ServiceId);
             return Rejected();
         }
 
@@ -128,6 +141,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             process = CreateHelperProcess(specification);
             if (!process.Start())
             {
+                SupervisionLogMessages.ProcessStartValidationRejected(_logger, "HelperStart", specification.ServiceId);
                 return Rejected();
             }
             var processStartedAt = DateTimeOffset.UtcNow;
@@ -145,7 +159,8 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             var marker = await process.StandardError.ReadLineAsync(startupTimeout.Token).ConfigureAwait(false);
             if (!string.Equals(marker, "NK_READY", StringComparison.Ordinal))
             {
-                await KillHelperAsync(process).ConfigureAwait(false);
+                SupervisionLogMessages.ProcessStartValidationRejected(_logger, "HelperReadyMarker", specification.ServiceId);
+                await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
                 return Rejected();
             }
 
@@ -159,24 +174,26 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 new ProcessOutputBudget(MaximumOutputLinesPerSecond, MaximumOutputBytesPerSecond));
             if (!leases.TryAdd(instanceId, lease))
             {
-                await KillHelperAsync(process).ConfigureAwait(false);
+                SupervisionLogMessages.ProcessStartValidationRejected(_logger, "LeaseRegistration", specification.ServiceId);
+                await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
                 return Rejected();
             }
 
             lease.Monitor = MonitorAsync(lease, process.StandardOutput, process.StandardError);
             if (cancellationToken.IsCancellationRequested)
             {
+                SupervisionLogMessages.ProcessStartCancelled(_logger, specification.ServiceId);
                 await StopAsync(instanceId, TimeSpan.FromSeconds(1), CancellationToken.None).ConfigureAwait(false);
                 return new(ProcessOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled);
             }
-
             return new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted, instanceId, processId, processStartedAt);
         }
         catch (HostEnvironmentExpansionException exception)
         {
+            SupervisionLogMessages.ProcessStartValidationRejected(_logger, "EnvironmentExpansion", specification.ServiceId);
             if (process is not null)
             {
-                await KillHelperAsync(process).ConfigureAwait(false);
+                await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
             }
 
             return exception.MissingPlaceholder is { } placeholder
@@ -185,18 +202,20 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.ProcessStartCancelled(_logger, specification.ServiceId);
             if (process is not null)
             {
-                await KillHelperAsync(process).ConfigureAwait(false);
+                await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
             }
 
             return new(ProcessOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled);
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.ProcessStartFailed(_logger, exception, specification.ServiceId);
             if (process is not null)
             {
-                await KillHelperAsync(process).ConfigureAwait(false);
+                await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
             }
 
             return Rejected();
@@ -363,6 +382,8 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         var matches = leases.Values.Where(lease => lease.ServiceId == serviceId).ToArray();
         if (matches.Length > 1)
         {
+            var multipleInstancesId = serviceId.ToString();
+            SupervisionLogMessages.OperationValidationRejected(_logger, "StopMultipleInstances", multipleInstancesId);
             return ValueTask.FromResult(new ProcessOperationResult(ProcessOperationStatus.Rejected, ServiceStateReasonCode.StopRequested));
         }
 
@@ -378,6 +399,8 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     {
         if (gracePeriod <= TimeSpan.Zero || gracePeriod > TimeSpan.FromMinutes(5))
         {
+            var rejectedInstanceId = instanceId.ToString();
+            SupervisionLogMessages.OperationValidationRejected(_logger, "StopGracePeriod", rejectedInstanceId);
             return new(ProcessOperationStatus.Rejected, ServiceStateReasonCode.StopRequested);
         }
 
@@ -388,22 +411,42 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
         if (Interlocked.Exchange(ref lease.StopRequested, 1) == 0)
         {
-            PosixProcessSignals.TrySignalProcess(lease.ProcessId, SigTerm);
+            PosixProcessSignals.TrySignalProcess(lease.ProcessId, SigTerm, _logger);
         }
 
+        var stoppedInstanceId = instanceId.ToString();
         try
         {
             await lease.Exited.Task.WaitAsync(gracePeriod, cancellationToken).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            PosixProcessSignals.TrySignalGroup(lease.ProcessId, SigKill);
-            await lease.Exited.Task.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+            SupervisionLogMessages.ProcessStopTimedOut(_logger, lease.ServiceId, stoppedInstanceId);
+            PosixProcessSignals.TrySignalGroup(lease.ProcessId, SigKill, _logger);
+            try
+            {
+                await lease.Exited.Task.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                SupervisionLogMessages.ProcessStopTimedOut(_logger, lease.ServiceId, stoppedInstanceId);
+                throw;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            PosixProcessSignals.TrySignalGroup(lease.ProcessId, SigKill);
-            await lease.Exited.Task.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+            SupervisionLogMessages.ProcessStopCancelled(_logger, lease.ServiceId, stoppedInstanceId);
+            PosixProcessSignals.TrySignalGroup(lease.ProcessId, SigKill, _logger);
+            try
+            {
+                await lease.Exited.Task.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                SupervisionLogMessages.ProcessStopTimedOut(_logger, lease.ServiceId, stoppedInstanceId);
+                throw;
+            }
+
             return new(ProcessOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled);
         }
 
@@ -436,18 +479,28 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 await lease.Process.WaitForExitAsync().ConfigureAwait(false);
                 exited = true;
             }
-            catch
+            catch (Exception exception)
             {
-                // Process details and exception text never cross the executor boundary.
+                SupervisionLogMessages.ProcessMonitorFailed(
+                    _logger,
+                    exception,
+                    "WaitForExit",
+                    lease.ServiceId,
+                    lease.InstanceId.ToString());
             }
 
             try
             {
                 await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
             }
-            catch
+            catch (Exception exception)
             {
-                // Output capture failures are contained after both readers finish.
+                SupervisionLogMessages.ProcessOutputCaptureFailed(
+                    _logger,
+                    exception,
+                    "stdout/stderr",
+                    lease.ServiceId,
+                    lease.InstanceId.ToString());
             }
 
             if (exited)
@@ -456,13 +509,28 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 {
                     successfulExit = lease.Process.ExitCode == 0;
                 }
-                catch
+                catch (Exception exception)
                 {
+                    var exitCodeInstanceId = lease.InstanceId.ToString();
+                    SupervisionLogMessages.ProcessExitCodeReadFailed(
+                        _logger,
+                        exception,
+                        lease.ServiceId,
+                        exitCodeInstanceId);
                     successfulExit = false;
                 }
             }
         }
-        finally
+        catch (Exception exception)
+        {
+            SupervisionLogMessages.ProcessMonitorFailed(
+                _logger,
+                exception,
+                "Monitor",
+                lease.ServiceId,
+                lease.InstanceId.ToString());
+         }
+         finally
         {
             leases.TryRemove(lease.InstanceId, out _);
             lease.Process.Dispose();
@@ -491,9 +559,13 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 {
                     callback(observation);
                 }
-                catch
+                catch (Exception exception)
                 {
-                    // Observer failures are isolated from executor lifecycle cleanup.
+                    SupervisionLogMessages.ProcessExitObserverFailed(
+                        _logger,
+                        exception,
+                        observation.ServiceId,
+                        observation.InstanceId.ToString());
                 }
             }
         });
@@ -532,18 +604,23 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         !lease.Exited.Task.IsCompleted;
 
 
-    private static async Task KillHelperAsync(Process process)
+    private static async Task KillHelperAsync(Process process, ILogger logger, string entityId)
     {
         try
         {
             if (!process.HasExited)
             {
-                PosixProcessSignals.TrySignalProcess(process.Id, SigKill);
+                PosixProcessSignals.TrySignalProcess(process.Id, SigKill, logger);
                 await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
             }
         }
-        catch
+        catch (TimeoutException)
         {
+            SupervisionLogMessages.ProcessCleanupTimedOut(logger, "KillHelper", entityId);
+        }
+        catch (Exception exception)
+        {
+            SupervisionLogMessages.ProcessCleanupFailed(logger, exception, "KillHelper", entityId);
             // Startup cleanup is best effort and never exposes process details.
         }
         finally

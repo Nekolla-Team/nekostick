@@ -1,4 +1,5 @@
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -13,6 +14,7 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
     private readonly CancellationTokenSource _stop = new();
     private readonly Func<Exception, ValueTask> _onFailure;
     private readonly Func<long, ValueTask>? _onDrop;
+    private readonly ILogger? _logger;
     private readonly int _capacity;
     private readonly Task _consumer;
     private long _dropped;
@@ -21,10 +23,12 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
     internal ExtensionEventQueue(
         Func<Exception, ValueTask> onFailure,
         int capacity = DefaultCapacity,
-        Func<long, ValueTask>? onDrop = null)
+        Func<long, ValueTask>? onDrop = null,
+        ILogger? logger = null)
     {
         _onFailure = onFailure;
         _onDrop = onDrop;
+        _logger = logger;
         _capacity = capacity is < 1 or > 1024 ? DefaultCapacity : capacity;
         _consumer = ConsumeAsync();
     }
@@ -66,14 +70,21 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
         return true;
     }
 
-    private static async Task ObserveDropAsync(Task notification)
+    private async Task ObserveDropAsync(Task notification)
     {
         try
         {
             await notification.ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionEventQueueNotificationFailed(
+                    logger,
+                    exception,
+                    nameof(TryPublish));
+            }
         }
     }
 
@@ -115,6 +126,10 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionEventSubscriberCancelled(logger, nameof(DisposeAsync));
+            }
         }
         finally
         {
@@ -158,15 +173,36 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
                     }
                     catch (OperationCanceledException) when (_stop.IsCancellationRequested)
                     {
+                        if (_logger is { } cancelledLogger)
+                        {
+                            ExtensionLogMessages.ExtensionEventSubscriberCancelled(
+                                cancelledLogger,
+                                nameof(ConsumeAsync));
+                        }
                     }
                     catch (Exception exception)
                     {
+                        if (_logger is { } logger)
+                        {
+                            ExtensionLogMessages.ExtensionEventQueueNotificationFailed(
+                                logger,
+                                exception,
+                                nameof(ConsumeAsync));
+                        }
+
                         try
                         {
                             await _onFailure(exception).ConfigureAwait(false);
                         }
-                        catch (Exception)
+                        catch (Exception failureException)
                         {
+                            if (_logger is { } failureLogger)
+                            {
+                                ExtensionLogMessages.ExtensionFailureCallbackFailed(
+                                    failureLogger,
+                                    failureException,
+                                    nameof(ConsumeAsync));
+                            }
                         }
                     }
                 }

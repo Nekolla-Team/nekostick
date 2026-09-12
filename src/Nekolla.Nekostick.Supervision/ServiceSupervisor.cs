@@ -1,4 +1,6 @@
 using System.Threading;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Domain;
 
 namespace Nekolla.Nekostick.Supervision;
@@ -93,6 +95,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     private readonly ProcessLaunchSpecification launchSpecification;
     private readonly ServiceHealthProbeRequest healthRequest;
     private readonly PortLeaseRequest leaseRequest;
+    private readonly ILogger _logger;
     private readonly HealthRetryPolicy healthPolicy;
     private static readonly RestartBackoffPolicy WaitingBackoffPolicy = new(
         TimeSpan.FromSeconds(1),
@@ -127,6 +130,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     /// <param name="stopGracePeriod">The maximum graceful stop duration, or 15 seconds when omitted.</param>
     /// <param name="now">The construction time used to validate the optional initial lease.</param>
     /// <param name="initialLease">The optional validated lease acquired by the Host before construction.</param>
+    /// <param name="logger">The optional supervisor logger.</param>
     public ServiceSupervisor(
         IProcessExecutor processExecutor,
         IServiceHealthProbe healthProbe,
@@ -140,7 +144,8 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         ServiceRestartPolicy restartPolicy = ServiceRestartPolicy.OnFailure,
         TimeSpan? stopGracePeriod = null,
         DateTimeOffset? now = null,
-        PortLease? initialLease = null)
+        PortLease? initialLease = null,
+        ILogger? logger = null)
     {
         this.processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
         this.healthProbe = healthProbe ?? throw new ArgumentNullException(nameof(healthProbe));
@@ -148,6 +153,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         this.launchSpecification = launchSpecification ?? throw new ArgumentNullException(nameof(launchSpecification));
         this.healthRequest = healthRequest ?? throw new ArgumentNullException(nameof(healthRequest));
         this.leaseRequest = leaseRequest ?? throw new ArgumentNullException(nameof(leaseRequest));
+        _logger = logger ?? NullLogger.Instance;
         if (launchSpecification.ServiceId != healthRequest.ServiceId || launchSpecification.ServiceId != leaseRequest.ServiceId)
         {
             throw new ArgumentException("Supervisor inputs must identify one service.");
@@ -219,6 +225,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.OperationCancelled(_logger, "Start", launchSpecification.ServiceId);
             if (initialLeasePending)
             {
                 initialLeasePending = false;
@@ -304,10 +311,12 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                SupervisionLogMessages.OperationCancelled(_logger, "AcquireLease", launchSpecification.ServiceId);
                 return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now)));
             }
-            catch
+            catch (Exception exception)
             {
+                SupervisionLogMessages.OperationFailed(_logger, exception, "AcquireLease", launchSpecification.ServiceId);
                 return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.DatabaseUnavailable, Snapshot);
             }
         }
@@ -356,11 +365,13 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.OperationCancelled(_logger, "StartProcess", launchSpecification.ServiceId);
             await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now)));
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.OperationFailed(_logger, exception, "StartProcess", launchSpecification.ServiceId);
             await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.StartRejected, Exchange(ServiceStateTransition.RecordStartResult(Snapshot, false, now)));
         }
@@ -423,10 +434,12 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.StopCancelled(_logger, launchSpecification.ServiceId);
             if (initialLeasePending)
             {
                 initialLeasePending = false;
                 await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+                SupervisionLogMessages.InitialLeaseReleased(_logger, launchSpecification.ServiceId, leaseRequest.Port);
             }
 
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
@@ -459,15 +472,18 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.StopCancelled(_logger, launchSpecification.ServiceId);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, requested);
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.OperationFailed(_logger, exception, "StopProcess", launchSpecification.ServiceId);
             return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.StopRequested, requested);
         }
 
         if (result.Status is ProcessOperationStatus.Cancelled)
         {
+            SupervisionLogMessages.StopCancelled(_logger, launchSpecification.ServiceId);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, requested);
         }
 
@@ -478,6 +494,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
 
         await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+        SupervisionLogMessages.StopCompleted(_logger, launchSpecification.ServiceId);
         var next = Exchange(ServiceStateTransition.RecordStopped(Snapshot, now));
         return Result(SupervisorOperationStatus.Applied, ServiceStateReasonCode.StopCompleted, next);
     }
@@ -539,10 +556,12 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                SupervisionLogMessages.OperationCancelled(_logger, "ObserveHealth", launchSpecification.ServiceId);
                 observation = new HealthObservationResult(launchSpecification.ServiceId, HealthObservationStatus.Cancelled, now, TimeSpan.Zero, retryState.Attempt);
             }
-            catch
+            catch (Exception exception)
             {
+                SupervisionLogMessages.HealthProbeFailed(_logger, exception, launchSpecification.ServiceId);
                 observation = new HealthObservationResult(launchSpecification.ServiceId, HealthObservationStatus.Unavailable, now, TimeSpan.Zero, retryState.Attempt);
             }
         }
@@ -586,6 +605,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.OperationCancelled(_logger, "CaptureLifecycle", launchSpecification.ServiceId);
             return null;
         }
         finally

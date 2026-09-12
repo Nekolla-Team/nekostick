@@ -73,8 +73,8 @@ public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapsh
                     services,
                     extensionRecords,
                     extensionSettings);
-                return HostConfigurationSnapshotValidator.IsComplete(snapshot) &&
-                    HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot)
+                return HostConfigurationSnapshotValidator.IsComplete(snapshot, _logger) &&
+                    HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger)
                     ? ConfigurationReadResult<HostConfigurationSnapshot>.Success(snapshot)
                     : ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                         new ConfigurationError(ConfigurationErrorCode.Validation));

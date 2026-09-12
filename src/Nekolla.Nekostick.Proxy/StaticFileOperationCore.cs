@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -19,8 +21,10 @@ internal static class StaticFileOperationCore
         StaticFileOpenAtFunction openAt,
         StaticFileFStatFunction fstat,
         StaticFileFStatAtFunction fstatat,
-        StaticFileCloseFunction close)
+        StaticFileCloseFunction close,
+        ILogger? logger = null)
     {
+        var effectiveLogger = logger ?? NullLogger.Instance;
         if (!abi.IsUsable
             || atFdcwd != abi.AtFdcwd
             || atSymlinkNoFollow != abi.AtSymlinkNoFollow)
@@ -51,8 +55,14 @@ internal static class StaticFileOperationCore
             if (!TryInvokePath(
                     "/",
                     path => openPath(path, rootFlags, 0),
-                    out var rootResult)
-                || !TryOpenHandle(rootResult, close, out parentHandle, out rootStatus))
+                    out var rootResult,
+                    effectiveLogger)
+                || !TryOpenHandle(
+                    rootResult,
+                    close,
+                    out parentHandle,
+                    out rootStatus,
+                    effectiveLogger))
             {
                 return StaticFileOperationResult.FromStatus(
                     rootStatus == StaticFileOperationStatus.Opened
@@ -69,7 +79,8 @@ internal static class StaticFileOperationCore
                         openAt,
                         close,
                         out var nextDirectoryHandle,
-                        out var status))
+                        out var status,
+                        effectiveLogger))
                 {
                     return StaticFileOperationResult.FromStatus(status);
                 }
@@ -88,7 +99,8 @@ internal static class StaticFileOperationCore
                         openAt,
                         close,
                         out var nextDirectoryHandle,
-                        out var status))
+                        out var status,
+                        effectiveLogger))
                 {
                     return StaticFileOperationResult.FromStatus(status);
                 }
@@ -105,7 +117,8 @@ internal static class StaticFileOperationCore
                     openAt,
                     close,
                     out openedHandle,
-                    out var finalStatus))
+                    out var finalStatus,
+                    effectiveLogger))
             {
                 return StaticFileOperationResult.FromStatus(finalStatus);
             }
@@ -125,7 +138,8 @@ internal static class StaticFileOperationCore
                         path,
                         directoryEntryStatBuffer,
                         atSymlinkNoFollow),
-                    out var directoryEntryStatResult))
+                    out var directoryEntryStatResult,
+                    effectiveLogger))
             {
                 return StaticFileOperationResult.FromStatus(StaticFileOperationStatus.NativeFailure);
             }
@@ -139,11 +153,13 @@ internal static class StaticFileOperationCore
             if (!StaticFileIdentityReader.TryRead(
                     openedStatBuffer,
                     abi,
-                    out var openedMetadata)
+                    out var openedMetadata,
+                    effectiveLogger)
                 || !StaticFileIdentityReader.TryRead(
                     directoryEntryStatBuffer,
                     abi,
-                    out var directoryEntryMetadata))
+                    out var directoryEntryMetadata,
+                    effectiveLogger))
             {
                 return StaticFileOperationResult.FromStatus(StaticFileOperationStatus.NativeFailure);
             }
@@ -179,8 +195,17 @@ internal static class StaticFileOperationCore
             openedHandle = null;
             return StaticFileOperationResult.Opened(openedFile);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticFileOperationCore.OpenVerified", out var occurrences))
+            {
+                ProxyLogMessages.NativeOperationFailed(
+                    effectiveLogger,
+                    exception,
+                    "StaticFileOperationCore.OpenVerified",
+                    occurrences);
+            }
+
             return StaticFileOperationResult.FromStatus(StaticFileOperationStatus.NativeFailure);
         }
         finally
@@ -189,6 +214,7 @@ internal static class StaticFileOperationCore
             parentHandle?.Dispose();
             if (openedStatBuffer != IntPtr.Zero)
             {
+
                 Marshal.FreeHGlobal(openedStatBuffer);
             }
 
@@ -206,21 +232,22 @@ internal static class StaticFileOperationCore
         StaticFileOpenAtFunction openAt,
         StaticFileCloseFunction close,
         out SafeFileHandle? childHandle,
-        out StaticFileOperationStatus status)
+        out StaticFileOperationStatus status,
+        ILogger logger)
     {
         childHandle = null;
         status = StaticFileOperationStatus.NativeFailure;
         if (!TryInvokePath(
                 segment,
                 path => openAt(GetFileDescriptor(parentHandle), path, flags, 0),
-                out var nativeResult))
+                out var nativeResult,
+                logger))
         {
             return false;
         }
 
-        return TryOpenHandle(nativeResult, close, out childHandle, out status);
+        return TryOpenHandle(nativeResult, close, out childHandle, out status, logger);
     }
-
     private static bool TryOpenChild(
         string segment,
         SafeFileHandle? parentHandle,
@@ -228,19 +255,21 @@ internal static class StaticFileOperationCore
         StaticFileOpenAtFunction openAt,
         StaticFileCloseFunction close,
         out SafeFileHandle? childHandle,
-        out StaticFileOperationStatus status)
+        out StaticFileOperationStatus status,
+        ILogger logger)
     {
         childHandle = null;
         status = StaticFileOperationStatus.NativeFailure;
         if (!TryInvokePath(
                 segment,
                 path => openAt(GetFileDescriptor(parentHandle), path, flags, 0),
-                out var nativeResult))
+                out var nativeResult,
+                logger))
         {
             return false;
         }
 
-        return TryOpenHandle(nativeResult, close, out childHandle, out status);
+        return TryOpenHandle(nativeResult, close, out childHandle, out status, logger);
     }
 
     private static bool TryBuildSafeSegments(
@@ -305,7 +334,8 @@ internal static class StaticFileOperationCore
     private static bool TryInvokePath(
         string path,
         Func<nint, StaticNativeCallResult> invoke,
-        out StaticNativeCallResult result)
+        out StaticNativeCallResult result,
+        ILogger logger)
     {
         result = StaticNativeCallResult.Failed(StaticNativeCallStatus.Failed);
         nint buffer = IntPtr.Zero;
@@ -318,8 +348,17 @@ internal static class StaticFileOperationCore
             result = invoke(buffer);
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticFileOperationCore.TryInvokePath", out var occurrences))
+            {
+                ProxyLogMessages.NativePathInvocationFailed(
+                    logger,
+                    exception,
+                    "StaticFileOperationCore.TryInvokePath",
+                    occurrences);
+            }
+
             result = StaticNativeCallResult.Failed(StaticNativeCallStatus.Failed);
             return false;
         }
@@ -336,7 +375,8 @@ internal static class StaticFileOperationCore
         StaticNativeCallResult nativeResult,
         StaticFileCloseFunction close,
         out SafeFileHandle? handle,
-        out StaticFileOperationStatus status)
+        out StaticFileOperationStatus status,
+        ILogger logger)
     {
         handle = null;
         status = nativeResult.IsSucceeded
@@ -363,16 +403,29 @@ internal static class StaticFileOperationCore
             status = StaticFileOperationStatus.Opened;
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticFileOperationCore.TryOpenHandle", out var occurrences))
+            {
+                ProxyLogMessages.NativeHandleCreationFailed(
+                    logger,
+                    exception,
+                    "StaticFileOperationCore.TryOpenHandle",
+                    occurrences);
+            }
+
             if (candidate is null)
             {
                 try
                 {
                     _ = close(nativeResult.Value);
                 }
-                catch (Exception)
+                catch (Exception closeException)
                 {
+                    ProxyLogMessages.NativeHandleCloseFailed(
+                        logger,
+                        closeException,
+                        "StaticFileOperationCore.TryOpenHandle.Close");
                 }
             }
 

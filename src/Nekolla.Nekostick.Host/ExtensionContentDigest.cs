@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Nekolla.Nekostick.Extensions;
@@ -13,8 +14,9 @@ internal static class ExtensionContentDigest
     /// Computes SHA-256 over a length-prefixed manifest followed by a length-prefixed entry assembly.
     /// </summary>
     /// <param name="manifest">The validated manifest whose files are hashed.</param>
+    /// <param name="logger">The optional host logger for digest diagnostics.</param>
     /// <returns>The canonical digest, or <see langword="null" /> when either file cannot be read.</returns>
-    internal static string? TryCompute(ExtensionManifest? manifest)
+    internal static string? TryCompute(ExtensionManifest? manifest, ILogger? logger = null)
     {
         if (manifest is null)
         {
@@ -37,8 +39,12 @@ internal static class ExtensionContentDigest
             var bytes = digest.GetHashAndReset();
             return $"sha256:{Convert.ToHexString(bytes).ToLowerInvariant()}";
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionContentDigestFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                manifest.Id);
             // A local install can be removed or replaced while it is being scanned. The durable
             // content hash is intentionally nullable so management and publication remain usable.
             return null;

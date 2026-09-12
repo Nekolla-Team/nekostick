@@ -63,7 +63,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 _scopeFactory,
                 _runtimeState,
                 runtimeManager,
-                _serviceProvider)
+                _serviceProvider,
+                logger: logger)
             : null;
 
         return new ExtensionCapabilitySet(
@@ -73,7 +74,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 configuration,
                 _scopeFactory,
                 _runtimeState,
-                lifecycle),
+                lifecycle,
+                logger: logger),
             new ExtensionEndpointFacade(
                 extensionId,
                 _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
@@ -83,7 +85,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 _runtimeState,
                 lifecycle,
                 _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>(),
-                _serviceProvider.GetService<IMicroserviceForwardingTelemetry>()),
+                _serviceProvider.GetService<IMicroserviceForwardingTelemetry>(),
+                logger),
             routeEvents,
             new ExtensionLogWriter(extensionId, logger),
             management,
@@ -344,17 +347,19 @@ internal sealed class ExtensionServiceFacade : IExtensionServiceApi
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly HostRuntimeState _runtimeState;
     private readonly IHostServiceLifecycleCoordinator? _lifecycle;
-
+    private readonly ILogger _logger;
     internal ExtensionServiceFacade(
         ExtensionConfigurationFacade configuration,
         IServiceScopeFactory scopeFactory,
         HostRuntimeState runtimeState,
-        IHostServiceLifecycleCoordinator? lifecycle)
+        IHostServiceLifecycleCoordinator? lifecycle,
+        ILogger? logger = null)
     {
         _configuration = configuration;
         _scopeFactory = scopeFactory;
         _runtimeState = runtimeState;
         _lifecycle = lifecycle;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public async ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceConfiguration>>> ReadOwnedAsync(
@@ -443,8 +448,9 @@ internal sealed class ExtensionServiceFacade : IExtensionServiceApi
         {
             return new(false, ExtensionServiceOperationCode.Cancelled, serviceId);
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionServiceLifecycleFailed(_logger, exception, serviceId);
             return new(false, ExtensionServiceOperationCode.Failed, serviceId);
         }
 

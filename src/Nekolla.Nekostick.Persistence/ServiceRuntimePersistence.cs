@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence.Entities;
 
@@ -23,12 +25,20 @@ public sealed partial class EfServiceRuntimePersistence : IPersistencePortLeaseR
 {
     private readonly NekostickDbContext _db;
     private readonly TimeProvider _time;
+    private readonly ILogger _logger;
 
     /// <summary>Creates the adapter.</summary>
-    public EfServiceRuntimePersistence(NekostickDbContext db, TimeProvider? timeProvider = null)
+    /// <param name="db">The persistence context.</param>
+    /// <param name="timeProvider">The clock used for persisted timestamps.</param>
+    /// <param name="logger">The optional persistence logger.</param>
+    public EfServiceRuntimePersistence(
+        NekostickDbContext db,
+        TimeProvider? timeProvider = null,
+        ILogger? logger = null)
     {
         _db = db ?? throw new ArgumentNullException(nameof(db));
         _time = timeProvider ?? TimeProvider.System;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -47,8 +57,16 @@ public sealed partial class EfServiceRuntimePersistence : IPersistencePortLeaseR
                 cancellationToken).ConfigureAwait(false);
             return lease is null ? null : new ServiceLeaseEndpoint(serviceId, nodeId, new LoopbackEndpoint(LoopbackAddressKind.IPv4, lease.Port), lease.LeaseExpiresAt, lease.Version);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception) { return null; }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            PersistenceLogMessages.RuntimePersistenceCancelled(_logger, "ResolveEndpoint", nodeId, serviceId);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            PersistenceLogMessages.RuntimePersistenceFailed(_logger, exception, "ResolveEndpoint", nodeId, serviceId);
+            return null;
+        }
     }
     /// <inheritdoc />
     public async ValueTask<IReadOnlyList<ServiceLeaseEndpoint>> ReadActiveEndpointsAsync(
@@ -76,7 +94,15 @@ public sealed partial class EfServiceRuntimePersistence : IPersistencePortLeaseR
                     value.Version))
                 .ToArray();
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception) { return Array.Empty<ServiceLeaseEndpoint>(); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            PersistenceLogMessages.RuntimePersistenceCancelled(_logger, "ReadActiveEndpoints", nodeId, Guid.Empty);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            PersistenceLogMessages.RuntimePersistenceFailed(_logger, exception, "ReadActiveEndpoints", nodeId, Guid.Empty);
+            return Array.Empty<ServiceLeaseEndpoint>();
+        }
     }
 }

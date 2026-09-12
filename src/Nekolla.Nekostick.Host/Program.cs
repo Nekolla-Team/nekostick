@@ -95,6 +95,8 @@ internal static class Program
             ? IPAddress.Parse(options.ListenAddress)
             : null;
         await using var app = BuildApplication(command, listenAddress);
+        var logger = app.Services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(HostLoggerCategory.Startup);
 
         var inspection = await InspectDatabaseAsync(
             app,
@@ -107,20 +109,19 @@ internal static class Program
             {
                 Console.Error.WriteLine(detail);
             }
+
             if (command.Kind == CliCommandKind.Status)
             {
                 var report = CreateStatusFailureReport(error.Code);
-                return DiagnosticJson.Write(report);
+                return DiagnosticJson.Write(report, logger);
             }
 
             if (command.Kind == CliCommandKind.Doctor)
             {
                 var report = CreateDoctorFailureReport(error.Code);
-                return DiagnosticJson.Write(report);
+                return DiagnosticJson.Write(report, logger);
             }
 
-            var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
-            var logger = loggerFactory.CreateLogger(HostLoggerCategory.Startup);
             HostLogMessages.DatabaseStartupFailed(logger, error.Code, error.Message);
             return 1;
         }
@@ -131,8 +132,6 @@ internal static class Program
             var snapshotResult = await snapshotReader.ReadCompleteAsync(cancellationToken);
             if (!snapshotResult.IsSuccess || snapshotResult.Value is null)
             {
-                var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
-                var logger = loggerFactory.CreateLogger(HostLoggerCategory.Startup);
                 if (snapshotResult.Errors.Any(error => error.Code == ConfigurationErrorCode.StorageUnavailable))
                 {
                     HostLogMessages.ConfigurationRefreshUnavailable(logger);
@@ -155,8 +154,6 @@ internal static class Program
             var publisher = app.Services.GetRequiredService<HostConfigurationPublisher>();
             if (!await publisher.PublishAsync(snapshotResult.Value, cancellationToken: cancellationToken).ConfigureAwait(false))
             {
-                var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
-                var logger = loggerFactory.CreateLogger(HostLoggerCategory.Startup);
                 HostLogMessages.ConfigurationSnapshotRejected(logger);
                 return 1;
             }
@@ -183,11 +180,11 @@ internal static class Program
             if (command.Kind == CliCommandKind.Status)
             {
                 var report = CreateStatusFailureReport(null);
-                return DiagnosticJson.Write(report);
+                return DiagnosticJson.Write(report, logger);
             }
 
             var doctorReport = CreateDoctorFailureReport(null);
-            return DiagnosticJson.Write(doctorReport);
+            return DiagnosticJson.Write(doctorReport, logger);
         }
 
         var configurationVersion = inspection.Revision.Value.Version;
@@ -201,7 +198,7 @@ internal static class Program
                 "valid",
                 statusExitCode,
                 extensionSummary);
-            return DiagnosticJson.Write(report);
+            return DiagnosticJson.Write(report, logger);
         }
 
         var doctorInspection = await InspectLocalExtensionsAsync(app, cancellationToken);
@@ -215,7 +212,7 @@ internal static class Program
             doctorInspection.ExtensionState,
             doctorInspection.LocalDirectoryState,
             doctorInspection.Checks);
-        return DiagnosticJson.Write(doctorSuccessReport);
+        return DiagnosticJson.Write(doctorSuccessReport, logger);
     }
 
     private static WebApplication BuildApplication(CliCommand command, IPAddress? listenAddress)
@@ -260,7 +257,9 @@ internal static class Program
             bootstrap.ConnectionString,
             bootstrap.NodeId,
             command.RunOptions.ReadOnly));
-        builder.Services.AddSingleton<HostConfigurationSnapshotHolder>();
+        builder.Services.AddSingleton<HostConfigurationSnapshotHolder>(serviceProvider =>
+            new HostConfigurationSnapshotHolder(
+                serviceProvider.GetRequiredService<ILogger<HostConfigurationSnapshotHolder>>()));
         builder.Services.AddSingleton<IHostConfigurationSnapshotAccessor>(serviceProvider =>
             serviceProvider.GetRequiredService<HostConfigurationSnapshotHolder>());
         builder.Services.AddSingleton<IHostRoutingSnapshotAccessor>(serviceProvider =>
@@ -311,14 +310,24 @@ internal static class Program
         builder.Services.AddSingleton<HostTerminationState>();
         builder.Services.AddDbContextFactory<NekostickDbContext>(dbContextOptions =>
             dbContextOptions.UseNekostickPostgres(bootstrap.ConnectionString));
-        builder.Services.AddSingleton<IMigrationSchemaValidator, PostgresMigrationSchemaValidator>();
+        builder.Services.AddSingleton<IMigrationSchemaValidator>(serviceProvider =>
+            new PostgresMigrationSchemaValidator(
+                PersistenceDatabaseDefaults.Schema,
+                serviceProvider.GetRequiredService<ILogger<PostgresMigrationSchemaValidator>>()));
         builder.Services.AddSingleton<IStartupDatabaseProbe>(serviceProvider =>
             new PostgresMigrationCoordinator(
                 bootstrap.ConnectionString,
-                serviceProvider.GetRequiredService<IMigrationSchemaValidator>()));
-        builder.Services.AddScoped<IConfigurationRevisionReader, EfConfigurationRevisionReader>();
+                serviceProvider.GetRequiredService<IMigrationSchemaValidator>(),
+                logger: serviceProvider.GetRequiredService<ILogger<PostgresMigrationCoordinator>>()));
+        builder.Services.AddScoped<IConfigurationRevisionReader>(serviceProvider =>
+            new EfConfigurationRevisionReader(
+                serviceProvider.GetRequiredService<NekostickDbContext>(),
+                serviceProvider.GetRequiredService<ILogger<EfConfigurationRevisionReader>>()));
         builder.Services.AddSingleton<IHostConfigurationSnapshotReader, EfHostConfigurationSnapshotReader>();
-        builder.Services.AddScoped<EfHostConfigApi>();
+        builder.Services.AddScoped<EfHostConfigApi>(serviceProvider =>
+            new EfHostConfigApi(
+                serviceProvider.GetRequiredService<NekostickDbContext>(),
+                logger: serviceProvider.GetRequiredService<ILogger<EfHostConfigApi>>()));
         builder.Services.AddScoped<IHostConfigApi>(serviceProvider =>
             new HostConfigApiReadOnlyDecorator(
                 serviceProvider.GetRequiredService<EfHostConfigApi>(),
@@ -335,13 +344,15 @@ internal static class Program
             builder.Services.AddSingleton<IConfigurationChangeSignal, PostgresConfigurationChangeSignal>();
             builder.Services.AddSingleton<IHostNodeActivityLease>(serviceProvider =>
                 new PostgresHostNodeActivityLease(
-                    serviceProvider.GetRequiredService<HostRuntimeOptions>()));
+                    serviceProvider.GetRequiredService<HostRuntimeOptions>(),
+                    logger: serviceProvider.GetRequiredService<ILogger<PostgresHostNodeActivityLease>>()));
             builder.Services.AddHostedService<HostConfigurationRefreshService>();
             if (!command.RunOptions.DisableSupervisor)
             {
                 builder.Services.AddSingleton<HostServiceEndpointSnapshotPublisher>(serviceProvider =>
                     new HostServiceEndpointSnapshotPublisher(
-                        serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
+                        serviceProvider.GetRequiredService<ExtensionRuntimeManager>(),
+                        serviceProvider.GetRequiredService<ILogger<HostServiceEndpointSnapshotPublisher>>()));
                 builder.Services.AddSingleton<IHostServiceEndpointSnapshotAccessor>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceEndpointSnapshotPublisher>());
                 builder.Services.AddSingleton<IMicroserviceEndpointResolver, HostServiceEndpointResolver>();
@@ -354,10 +365,12 @@ internal static class Program
                 builder.Services.AddSingleton<IProcessExecutor>(serviceProvider =>
                     new PosixProcessExecutor(
                         helperPath,
-                        outputSink: serviceProvider.GetRequiredService<IProcessOutputSink>()));
+                        outputSink: serviceProvider.GetRequiredService<IProcessOutputSink>(),
+                        logger: serviceProvider.GetRequiredService<ILogger<PosixProcessExecutor>>()));
                 builder.Services.AddSingleton<IServiceHealthProbe>(serviceProvider =>
                     new ServiceHealthProbe(
-                        serviceProvider.GetRequiredService<IProcessExecutor>()));
+                        serviceProvider.GetRequiredService<IProcessExecutor>(),
+                        logger: serviceProvider.GetRequiredService<ILogger<ServiceHealthProbe>>()));
                 builder.Services.AddSingleton<HostPortLeaseStoreAdapter>(serviceProvider =>
                     new HostPortLeaseStoreAdapter(
                         serviceProvider.GetRequiredService<IDbContextFactory<NekostickDbContext>>(),
@@ -503,6 +516,8 @@ internal static class Program
         CancellationToken cancellationToken)
     {
         var nodeOptions = app.Services.GetRequiredService<HostNodeOptions>();
+        var logger = app.Services.GetRequiredService<ILoggerFactory>()
+            .CreateLogger(HostLoggerCategory.Startup);
         var localHashes = new Dictionary<string, string?>(StringComparer.Ordinal);
         var duplicateIds = new HashSet<string>(StringComparer.Ordinal);
         var hasUnreadableDirectories = false;
@@ -513,14 +528,14 @@ internal static class Program
             {
                 foreach (var directory in Directory.EnumerateDirectories(nodeOptions.ExtensionsRootPath))
                 {
-                    var discovery = ExtensionManifestDiscovery.Discover(directory);
+                    var discovery = ExtensionManifestDiscovery.Discover(directory, logger);
                     if (!discovery.Succeeded || discovery.Manifest is not { } manifest)
                     {
                         hasUnreadableDirectories = true;
                         continue;
                     }
 
-                    if (!localHashes.TryAdd(manifest.Id, ExtensionContentDigest.TryCompute(manifest)))
+                    if (!localHashes.TryAdd(manifest.Id, ExtensionContentDigest.TryCompute(manifest, logger)))
                     {
                         duplicateIds.Add(manifest.Id);
                         hasUnreadableDirectories = true;
@@ -530,8 +545,9 @@ internal static class Program
                 localDirectoryState = hasUnreadableDirectories ? "failed" : "passed";
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionScanFailed(logger, exception, "InspectLocalExtensions");
             localDirectoryState = "failed";
         }
 

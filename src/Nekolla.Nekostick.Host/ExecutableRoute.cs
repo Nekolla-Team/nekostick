@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Collections.Immutable;
 using ContractHeaderRewrite = Nekolla.Nekostick.Contracts.HeaderRewriteConfiguration;
 using ContractHeaderRewriteOperation = Nekolla.Nekostick.Contracts.HeaderRewriteOperation;
@@ -62,7 +63,8 @@ internal static class ExecutableRouteBuilder
 {
     internal static bool TryBuild(
         HostConfigurationSnapshot snapshot,
-        out ImmutableDictionary<Guid, ExecutableRoute> routes)
+        out ImmutableDictionary<Guid, ExecutableRoute> routes,
+        ILogger? logger = null)
     {
         routes = ImmutableDictionary<Guid, ExecutableRoute>.Empty;
         try
@@ -84,8 +86,12 @@ internal static class ExecutableRouteBuilder
             routes = builder.ToImmutable();
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.ExecutableRouteBuildFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                snapshot?.Routes.Length ?? 0);
             routes = ImmutableDictionary<Guid, ExecutableRoute>.Empty;
             return false;
         }

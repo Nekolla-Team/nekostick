@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Persistence;
@@ -17,6 +19,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     private readonly HostConfigurationPublisher? _publisher;
     private readonly IHostConfigurationSnapshotReader? _snapshotReader;
     private readonly HostServiceLifecycleManager? _lifecycle;
+    private readonly ILogger _logger;
 
     /// <summary>Creates an extension management facade for one extension caller.</summary>
     /// <param name="extensionId">The identity of the extension receiving this facade.</param>
@@ -24,12 +27,14 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     /// <param name="runtimeState">The host capability state used to gate writes.</param>
     /// <param name="runtimeManager">The runtime manager used for running-state snapshots.</param>
     /// <param name="serviceProvider">The root provider containing host publication services.</param>
+    /// <param name="logger">The optional host logger for management diagnostics.</param>
     internal ExtensionManagementFacade(
         string extensionId,
         IServiceScopeFactory scopeFactory,
         HostRuntimeState runtimeState,
         ExtensionRuntimeManager runtimeManager,
-        IServiceProvider serviceProvider)
+        IServiceProvider serviceProvider,
+        ILogger? logger = null)
     {
         _callerExtensionId = string.IsNullOrWhiteSpace(extensionId)
             ? throw new ArgumentException("An extension identifier is required.", nameof(extensionId))
@@ -42,6 +47,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         _publisher = serviceProvider.GetService<HostConfigurationPublisher>();
         _snapshotReader = serviceProvider.GetService<IHostConfigurationSnapshotReader>();
         _lifecycle = serviceProvider.GetService<HostServiceLifecycleManager>();
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -103,24 +109,24 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
             // Management writes must not run inside lifecycle callbacks: the publish trigger would deadlock on the publication gate.
-            return UnsupportedWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         if (!CanManage(extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -133,12 +139,12 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return NotFoundWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.NotFound);
         }
 
         if (record.LoadState is not (ExtensionLoadState.Disabled or ExtensionLoadState.Stopped or ExtensionLoadState.Failed))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         var scan = ScanExtensions(cancellationToken);
@@ -150,7 +156,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (!scan.Manifests.TryGetValue(extensionId, out var manifest) ||
             !string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         foreach (var dependency in manifest.Dependencies)
@@ -167,7 +173,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     StringComparison.Ordinal) ||
                 !dependency.VersionRange.IsSatisfiedBy(dependencyManifest.Version))
             {
-                return ValidationWriteFailure();
+                return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
             }
         }
 
@@ -191,7 +197,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 await using var db = await _dbContextFactory
                     .CreateDbContextAsync(cancellationToken)
                     .ConfigureAwait(false);
-                var contentPersistence = new EfExtensionRecordContentPersistence(db);
+                var contentPersistence = new EfExtensionRecordContentPersistence(db, logger: _logger);
                 result = await contentPersistence.SetLoadStateAndContentHashAsync(
                         extensionId,
                         record.RecordVersion,
@@ -204,14 +210,25 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.ExtensionManagementException(
+                    _logger,
+                    exception,
+                    "Enable",
+                    _callerExtensionId,
+                    extensionId);
                 result = FailureWrite(ConfigurationErrorCode.StorageUnavailable);
             }
         }
         if (result.IsSuccess)
         {
             await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
+            HostLogMessages.ExtensionEnabled(
+                _logger,
+                _callerExtensionId,
+                extensionId,
+                result.NewVersion);
         }
 
         return result;
@@ -224,24 +241,24 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         if (!CanManage(extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -254,11 +271,15 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return NotFoundWriteFailure();
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.NotFound);
         }
 
         if (record.LoadState == ExtensionLoadState.Disabled)
         {
+            HostLogMessages.ExtensionDisableNoOp(
+                _logger,
+                _callerExtensionId,
+                extensionId);
             return ConfigurationWriteResult.Success(snapshot.Version);
         }
 
@@ -271,7 +292,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         // Disabling is rejected while a loaded extension declares a dependency on the target.
         if (HasLoadedDependent(snapshot, scan, extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         var result = await api.SetExtensionLoadStateAsync(
@@ -283,6 +304,11 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (result.IsSuccess)
         {
             await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
+            HostLogMessages.ExtensionDisabled(
+                _logger,
+                _callerExtensionId,
+                extensionId,
+                result.NewVersion);
         }
 
         return result;
@@ -295,24 +321,24 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         if (!CanManage(extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
         if (hostConfig is null)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         var snapshotResult = await hostConfig.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -325,12 +351,12 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return NotFoundWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.NotFound);
         }
 
         if (record.LoadState != ExtensionLoadState.Loaded)
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         var scan = ScanExtensions(cancellationToken);
@@ -342,7 +368,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (!scan.Manifests.TryGetValue(extensionId, out var scannedManifest) ||
             !string.Equals(record.Version, scannedManifest.Version.ToString(), StringComparison.Ordinal))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (ExtensionCallbackGuard.IsSelfReplacementUnsafe)
@@ -350,17 +376,39 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             // Reload awaits generation replacement synchronously; from a route/event/scheduler
             // callback the publish may need to drain the calling extension itself (its manifest can
             // be drifted even when the target is another extension), which would deadlock.
-            return UnsupportedWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         if (_publisher is null)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         var publication = await _publisher
             .RequestExtensionReloadAsync(snapshot, extensionId, cancellationToken)
             .ConfigureAwait(false);
+        if (publication.Status == HostConfigurationPublisher.ExtensionReloadPublicationStatus.Published)
+        {
+            HostLogMessages.ExtensionReloadPublished(
+                _logger,
+                _callerExtensionId,
+                extensionId,
+                publication.CommittedVersion);
+        }
+        else if (publication.Status == HostConfigurationPublisher.ExtensionReloadPublicationStatus.TargetUnavailable)
+        {
+            HostLogMessages.ExtensionReloadTargetUnavailable(
+                _logger,
+                _callerExtensionId,
+                extensionId);
+        }
+        else
+        {
+            HostLogMessages.ExtensionReloadFailed(
+                _logger,
+                _callerExtensionId,
+                extensionId);
+        }
         return publication.Status switch
         {
             HostConfigurationPublisher.ExtensionReloadPublicationStatus.Published =>
@@ -386,6 +434,10 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         }
 
         TriggerReloadDeferred(extensionId);
+        HostLogMessages.ExtensionReloadQueued(
+            _logger,
+            _callerExtensionId,
+            extensionId);
         return true;
     }
 
@@ -396,24 +448,24 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         if (!CanManage(extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return UnsupportedWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported);
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -426,7 +478,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return NotFoundWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.NotFound);
         }
 
         var scan = ScanExtensions(cancellationToken);
@@ -437,7 +489,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
 
         if (scan.Manifests.ContainsKey(extensionId) || scan.DuplicateIds.Contains(extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (scan.HasUnreadableDirectories)
@@ -449,7 +501,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         // Deleting is rejected while a loaded extension declares a dependency on the target.
         if (HasLoadedDependent(snapshot, scan, extensionId))
         {
-            return ValidationWriteFailure();
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
         if (_lifecycle is not null)
@@ -464,6 +516,14 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             .ConfigureAwait(false);
         // Publish either way: on failure the owned services stopped above must be reconciled back.
         await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
+        if (result.IsSuccess)
+        {
+            HostLogMessages.ExtensionRecordDeleted(
+                _logger,
+                _callerExtensionId,
+                extensionId,
+                result.NewVersion);
+        }
 
         return result;
     }
@@ -474,22 +534,19 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+            return RefreshRejected(nameof(RequestRefreshAsync), ConfigurationErrorCode.Unsupported);
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+            return RefreshRejected(nameof(RequestRefreshAsync), ConfigurationErrorCode.Unsupported);
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+            return RefreshRejected(nameof(RequestRefreshAsync), ConfigurationErrorCode.Unsupported);
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -600,7 +657,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     await using var db = await _dbContextFactory
                         .CreateDbContextAsync(cancellationToken)
                         .ConfigureAwait(false);
-                    var contentPersistence = new EfExtensionRecordContentPersistence(db);
+                    var contentPersistence = new EfExtensionRecordContentPersistence(db, logger: _logger);
                     updated = versionChanged
                         ? await contentPersistence.UpdateInstalledVersionAndContentHashAsync(
                                 pair.Key,
@@ -620,8 +677,14 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 {
                     throw;
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
+                    HostLogMessages.ExtensionManagementException(
+                        _logger,
+                        exception,
+                        "RequestRefresh",
+                        _callerExtensionId,
+                        null);
                     updated = FailureWrite(ConfigurationErrorCode.StorageUnavailable);
                 }
             }
@@ -647,6 +710,13 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             .Where(id => !scan.Manifests.ContainsKey(id))
             .OrderBy(static id => id, StringComparer.Ordinal)
             .ToImmutableArray();
+        HostLogMessages.ExtensionRefreshCompleted(
+            _logger,
+            _callerExtensionId,
+            added.Length,
+            versionUpdated.Count,
+            missing.Length,
+            scan.Skipped.Length);
         return ConfigurationReadResult<ExtensionRefreshSummary>.Success(
             new ExtensionRefreshSummary(
                 added.ToImmutableArray(),
@@ -717,8 +787,13 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     _runtimeState.MarkSnapshotRejected();
                 }
             }
-            catch
+            catch (Exception exception)
             {
+                HostLogMessages.ExtensionManagementBackgroundFailed(
+                    _logger,
+                    exception,
+                    "DeferredReload",
+                    _callerExtensionId);
             }
         }
     }
@@ -743,8 +818,13 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 await Task.Yield();
                 await TriggerPublishAsync(CancellationToken.None).ConfigureAwait(false);
             }
-            catch
+            catch (Exception exception)
             {
+                HostLogMessages.ExtensionManagementBackgroundFailed(
+                    _logger,
+                    exception,
+                    "DeferredPublish",
+                    _callerExtensionId);
             }
         }
     }
@@ -792,8 +872,9 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 .OrderBy(static path => path, StringComparer.Ordinal)
                 .ToArray();
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionScanFailed(_logger, exception, "EnumerateDirectories");
             return ExtensionScanResult.Failure(ConfigurationErrorCode.StorageUnavailable);
         }
 
@@ -804,10 +885,11 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             ManifestDiscoveryResult discovered;
             try
             {
-                discovered = ExtensionManifestDiscovery.Discover(directory);
+                discovered = ExtensionManifestDiscovery.Discover(directory, _logger);
             }
-            catch
+            catch (Exception exception)
             {
+                HostLogMessages.ExtensionScanFailed(_logger, exception, "DiscoverManifest");
                 skipped.Add(new ExtensionScanSkip(
                     DirectoryName(directory),
                     ExtensionFailureCode.LoadFailed.ToString()));
@@ -835,7 +917,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 continue;
             }
 
-            contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest);
+            contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest, _logger);
         }
         return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, skipped);
     }
@@ -862,6 +944,43 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
 
     private static ConfigurationWriteResult UnsupportedWriteFailure() =>
         FailureWrite(ConfigurationErrorCode.Unsupported);
+
+    /// <summary>Reports one rejected refresh and returns its safe failure.</summary>
+    private ConfigurationReadResult<ExtensionRefreshSummary> RefreshRejected(
+        string operation,
+        ConfigurationErrorCode errorCode)
+    {
+        if (_logger is { } logger)
+        {
+            HostLogMessages.ExtensionManagementRejected(
+                logger,
+                operation,
+                _callerExtensionId,
+                targetExtensionId: null,
+                errorCode);
+        }
+
+        return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(new ConfigurationError(errorCode));
+    }
+
+    /// <summary>Reports one rejected management operation and returns its safe failure.</summary>
+    private ConfigurationWriteResult Reject(
+        string operation,
+        string? targetExtensionId,
+        ConfigurationErrorCode errorCode)
+    {
+        if (_logger is { } logger)
+        {
+            HostLogMessages.ExtensionManagementRejected(
+                logger,
+                operation,
+                _callerExtensionId,
+                targetExtensionId,
+                errorCode);
+        }
+
+        return FailureWrite(errorCode);
+    }
 
     private sealed record ExtensionScanResult(
         bool Succeeded,

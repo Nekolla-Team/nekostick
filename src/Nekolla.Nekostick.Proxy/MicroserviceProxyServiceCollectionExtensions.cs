@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Yarp.ReverseProxy.Forwarder;
 
@@ -23,7 +24,9 @@ public static class MicroserviceProxyServiceCollectionExtensions
             UnavailableMicroserviceEndpointResolver.Instance);
         services.TryAddSingleton<MicroserviceHttpInvokerPool>();
         services.TryAddSingleton<IMicroserviceForwardingTelemetry, MicroserviceForwardingTelemetry>();
-        services.TryAddSingleton<IMicroserviceDrainTracker, MicroserviceDrainTracker>();
+        services.TryAddSingleton<IMicroserviceDrainTracker>(serviceProvider =>
+            new MicroserviceDrainTracker(
+                serviceProvider.GetRequiredService<ILogger<MicroserviceDrainTracker>>()));
         services.TryAddSingleton<MicroserviceHttpExecutor>();
         return services;
     }

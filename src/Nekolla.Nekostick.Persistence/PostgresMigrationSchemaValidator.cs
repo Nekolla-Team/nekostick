@@ -1,5 +1,7 @@
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Persistence;
 
@@ -7,6 +9,7 @@ namespace Nekolla.Nekostick.Persistence;
 public sealed class PostgresMigrationSchemaValidator : IMigrationSchemaValidator
 {
     private readonly string _schema;
+    private readonly ILogger _logger;
 
     /// <summary>Creates a validator for the canonical production schema.</summary>
     public PostgresMigrationSchemaValidator()
@@ -16,7 +19,8 @@ public sealed class PostgresMigrationSchemaValidator : IMigrationSchemaValidator
 
     /// <summary>Creates a validator for a controlled PostgreSQL schema.</summary>
     /// <param name="schema">The non-empty lowercase ASCII PostgreSQL schema identifier to validate.</param>
-    public PostgresMigrationSchemaValidator(string schema)
+    /// <param name="logger">The optional persistence logger.</param>
+    public PostgresMigrationSchemaValidator(string schema, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
 
@@ -28,6 +32,7 @@ public sealed class PostgresMigrationSchemaValidator : IMigrationSchemaValidator
         }
 
         _schema = schema;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -100,14 +105,17 @@ public sealed class PostgresMigrationSchemaValidator : IMigrationSchemaValidator
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "ValidateSchema", _schema);
             throw;
         }
-        catch (DbException)
+        catch (DbException exception)
         {
+            PersistenceLogMessages.StartupFailed(_logger, exception, "ValidateSchema", _schema);
             return SchemaValidationResult.Invalid(["database"]);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.StartupFailed(_logger, exception, "ValidateSchema", _schema);
             return SchemaValidationResult.Invalid(["database"]);
         }
         finally

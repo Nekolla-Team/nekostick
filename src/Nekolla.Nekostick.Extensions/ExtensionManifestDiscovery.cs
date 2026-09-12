@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace Nekolla.Nekostick.Extensions;
 
 /// <summary>Discovers exactly one manifest at an explicitly supplied extension directory.</summary>
@@ -5,18 +7,19 @@ public static class ExtensionManifestDiscovery
 {
     /// <summary>Reads and validates one explicit extension directory.</summary>
     /// <param name="extensionDirectory">The exact directory supplied by the caller.</param>
+    /// <param name="logger">The optional host logger for path rejection diagnostics.</param>
     /// <returns>A safe result without filesystem paths in failure data.</returns>
-    public static ManifestDiscoveryResult Discover(string? extensionDirectory)
+    public static ManifestDiscoveryResult Discover(string? extensionDirectory, ILogger? logger = null)
     {
-        if (!CanonicalPath.TryCanonicalDirectory(extensionDirectory, out var root))
+        if (!CanonicalPath.TryCanonicalDirectory(extensionDirectory, out var root, logger))
         {
             return ManifestDiscoveryResult.Failure(ExtensionFailureCode.InvalidArgument);
         }
 
         var manifestFiles = new List<(string Name, ManifestSourceFormat Format)>();
-        AddExistingManifest(root, "manifest.json", ManifestSourceFormat.Json, manifestFiles);
-        AddExistingManifest(root, "manifest.yaml", ManifestSourceFormat.Yaml, manifestFiles);
-        AddExistingManifest(root, "manifest.yml", ManifestSourceFormat.Yaml, manifestFiles);
+        AddExistingManifest(root, "manifest.json", ManifestSourceFormat.Json, manifestFiles, logger);
+        AddExistingManifest(root, "manifest.yaml", ManifestSourceFormat.Yaml, manifestFiles, logger);
+        AddExistingManifest(root, "manifest.yml", ManifestSourceFormat.Yaml, manifestFiles, logger);
 
         if (manifestFiles.Count == 0)
         {
@@ -30,7 +33,7 @@ public static class ExtensionManifestDiscovery
 
         var selected = manifestFiles[0];
         var manifestPath = Path.Combine(root, selected.Name);
-        if (!CanonicalPath.TryCanonicalFileInRoot(root, manifestPath, out var canonicalManifestPath))
+        if (!CanonicalPath.TryCanonicalFileInRoot(root, manifestPath, out var canonicalManifestPath, logger))
         {
             return ManifestDiscoveryResult.Failure(ExtensionFailureCode.UnsafePath, selected.Format);
         }
@@ -38,14 +41,14 @@ public static class ExtensionManifestDiscovery
         return selected.Format == ManifestSourceFormat.Json
             ? JsonManifestParser.Parse(root, canonicalManifestPath)
             : YamlManifestParser.Parse(root, canonicalManifestPath);
-
     }
 
     private static void AddExistingManifest(
         string root,
         string name,
         ManifestSourceFormat format,
-        List<(string Name, ManifestSourceFormat Format)> manifestFiles)
+        List<(string Name, ManifestSourceFormat Format)> manifestFiles,
+        ILogger? logger = null)
     {
         var path = Path.Combine(root, name);
         if (File.Exists(path))
@@ -57,7 +60,7 @@ public static class ExtensionManifestDiscovery
 
 internal static class CanonicalPath
 {
-    internal static bool TryCanonicalDirectory(string? input, out string directory)
+    internal static bool TryCanonicalDirectory(string? input, out string directory, ILogger? logger = null)
     {
         directory = string.Empty;
         if (string.IsNullOrWhiteSpace(input) || input.Contains('\0'))
@@ -102,14 +105,15 @@ internal static class CanonicalPath
             directory = current;
             return Directory.Exists(directory);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            CanonicalPathRejected(logger, exception, nameof(TryCanonicalDirectory));
             directory = string.Empty;
             return false;
         }
     }
 
-    internal static bool TryCanonicalExistingFile(string input, out string file)
+    internal static bool TryCanonicalExistingFile(string input, out string file, ILogger? logger = null)
     {
         file = string.Empty;
         if (string.IsNullOrWhiteSpace(input) || input.Contains('\0'))
@@ -123,7 +127,7 @@ internal static class CanonicalPath
             var parentPath = Path.GetDirectoryName(fullPath);
             var fileName = Path.GetFileName(fullPath);
             if (parentPath is null || string.IsNullOrEmpty(fileName) ||
-                !TryCanonicalDirectory(parentPath, out var canonicalParent))
+                !TryCanonicalDirectory(parentPath, out var canonicalParent, logger))
             {
                 return false;
             }
@@ -139,7 +143,7 @@ internal static class CanonicalPath
             var targetParent = Path.GetDirectoryName(targetPath);
             var targetName = Path.GetFileName(targetPath);
             if (targetParent is null || string.IsNullOrEmpty(targetName) ||
-                !TryCanonicalDirectory(targetParent, out var canonicalTargetParent))
+                !TryCanonicalDirectory(targetParent, out var canonicalTargetParent, logger))
             {
                 return false;
             }
@@ -153,14 +157,15 @@ internal static class CanonicalPath
             file = canonicalPath;
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            CanonicalPathRejected(logger, exception, nameof(TryCanonicalExistingFile));
             file = string.Empty;
             return false;
         }
     }
 
-    internal static bool TryCanonicalFileInRoot(string root, string candidate, out string file)
+    internal static bool TryCanonicalFileInRoot(string root, string candidate, out string file, ILogger? logger = null)
     {
         file = string.Empty;
         try
@@ -199,10 +204,19 @@ internal static class CanonicalPath
             file = current;
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            CanonicalPathRejected(logger, exception, nameof(TryCanonicalFileInRoot));
             file = string.Empty;
             return false;
+        }
+    }
+
+    private static void CanonicalPathRejected(ILogger? logger, Exception exception, string operation)
+    {
+        if (logger is { } target)
+        {
+            ExtensionLogMessages.ExtensionPathRejected(target, exception, operation);
         }
     }
 

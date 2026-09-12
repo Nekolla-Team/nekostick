@@ -14,6 +14,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
     private readonly MicroserviceHttpExecutor _microserviceExecutor;
     private readonly IHostServiceLifecycleCoordinator? _lifecycleCoordinator;
     private readonly ILogger _logger;
+    private readonly HostLogThrottle _httpThrottle = new();
 
     internal HostRouteTargetExecutor(
         MicroserviceHttpExecutor microserviceExecutor,
@@ -52,7 +53,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(match);
 
-        if (!TryGetExecutableRoute(snapshot, match, out var executable))
+        if (!TryGetExecutableRoute(snapshot, match, _logger, out var executable))
         {
             return RouteTargetExecutionResult.SafeFailure;
         }
@@ -65,7 +66,8 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                     context,
                     snapshot,
                     match,
-                    cancellationToken)
+                    cancellationToken,
+                    _logger)
                 .ConfigureAwait(false);
             if (routeSession?.Cancelled == true)
             {
@@ -97,7 +99,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                         cancellationToken),
                 _ => RouteTargetExecutionResult.SafeFailure
             };
-            return await HostRouteEvents.CompleteAsync(context, routeSession, outcome, cancellationToken)
+            return await HostRouteEvents.CompleteAsync(context, routeSession, outcome, cancellationToken, _logger)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -156,13 +158,17 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                     maxBodyBytes,
                     readTimeout,
                     dispatchLease,
+                    _httpThrottle,
+                    _logger,
                     cancellationToken).ConfigureAwait(false);
             }
 
             var request = await ExtensionHttpAdapter.CreateRequestAsync(
                     context,
                     maxBodyBytes,
-                    cancellationToken)
+                    cancellationToken,
+                    _httpThrottle,
+                    _logger)
                 .ConfigureAwait(false);
             if (request is null)
             {
@@ -178,7 +184,9 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                     await ExtensionHttpAdapter.WriteResponseAsync(
                         context,
                         result.Response,
-                        cancellationToken).ConfigureAwait(false)
+                        cancellationToken,
+                        _httpThrottle,
+                        _logger).ConfigureAwait(false)
                         ? RouteTargetExecutionResult.Handled
                         : RouteTargetExecutionResult.InternalServerError,
                 ExtensionInvocationState.Failed => RouteTargetExecutionResult.InternalServerError,
@@ -211,13 +219,17 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
         long maxBodyBytes,
         TimeSpan readTimeout,
         ExtensionDispatchLease dispatchLease,
+        HostLogThrottle httpThrottle,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         var request = await ExtensionHttpAdapter.CreateStreamingRequestAsync(
                 context,
                 maxBodyBytes,
                 readTimeout,
-                cancellationToken)
+                cancellationToken,
+                httpThrottle,
+                logger)
             .ConfigureAwait(false);
         if (request is null)
         {
@@ -235,7 +247,9 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                     await ExtensionHttpAdapter.WriteStreamingResponseAsync(
                         context,
                         result.Response,
-                        cancellationToken).ConfigureAwait(false)
+                        cancellationToken,
+                        httpThrottle,
+                        logger).ConfigureAwait(false)
                         ? RouteTargetExecutionResult.Handled
                         : RouteTargetExecutionResult.InternalServerError,
                 ExtensionInvocationState.Failed => RouteTargetExecutionResult.InternalServerError,
@@ -252,6 +266,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
     private static bool TryGetExecutableRoute(
         HostRoutingSnapshot snapshot,
         RouteMatch match,
+        ILogger logger,
         out ExecutableRoute executable)
     {
         executable = null!;
@@ -282,7 +297,8 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                 && IsStaticTargetAligned(
                     executable.StaticTarget,
                     configured.RootPath,
-                    target.RootPath),
+                    target.RootPath,
+                    logger),
             (MicroserviceRouteTargetConfiguration configured, { Type: RouteTargetType.Microservice }) =>
                 target.ServiceId == configured.ServiceId,
             (ExtensionHandlerRouteTargetConfiguration configured, { Type: RouteTargetType.ExtensionHandler }) =>

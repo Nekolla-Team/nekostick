@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Persistence;
@@ -9,7 +10,8 @@ internal static class HostConfigurationValidation
         IEnumerable<RouteConfiguration> routes,
         IEnumerable<ServiceConfiguration> services,
         IEnumerable<ExtensionRecordConfiguration> extensionRecords,
-        IEnumerable<ExtensionSettingsConfiguration> extensionSettings)
+        IEnumerable<ExtensionSettingsConfiguration> extensionSettings,
+        ILogger? logger = null)
     {
         if (globalSettings is null)
         {
@@ -47,7 +49,7 @@ internal static class HostConfigurationValidation
             .ToHashSet(StringComparer.Ordinal);
         foreach (var route in routeArray)
         {
-            HostConfigurationRouteValidator.Validate(route, globalSettings, serviceIds);
+            HostConfigurationRouteValidator.Validate(route, globalSettings, serviceIds, logger);
         }
 
         foreach (var setting in settingsArray)

@@ -1,9 +1,12 @@
 using System.Collections.Immutable;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Routing;
+
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Provides lock-free access to the current immutable host configuration snapshot.</summary>
@@ -31,13 +34,17 @@ internal interface IHostRoutingSnapshotLeaseAccessor
 /// <summary>Pairs one immutable configuration snapshot with all compiled route indexes.</summary>
 internal sealed class HostRoutingSnapshot
 {
-    internal HostRoutingSnapshot(HostConfigurationSnapshot configuration, RouteMatchSnapshot matcher)
+    internal HostRoutingSnapshot(
+        HostConfigurationSnapshot configuration,
+        RouteMatchSnapshot matcher,
+        ILogger? logger = null)
         : this(
             configuration,
             matcher,
-            BuildExecutableRoutesOrEmpty(configuration),
+            BuildExecutableRoutesOrEmpty(configuration, logger),
             null,
-            ImmutableDictionary<Guid, string?>.Empty)
+            ImmutableDictionary<Guid, string?>.Empty,
+            logger)
     {
     }
 
@@ -46,14 +53,15 @@ internal sealed class HostRoutingSnapshot
         RouteMatchSnapshot matcher,
         ImmutableDictionary<Guid, ExecutableRoute> executableRoutes,
         ExtensionDispatchGeneration? dispatchGeneration,
-        ImmutableDictionary<Guid, string?> serviceOwners)
+        ImmutableDictionary<Guid, string?> serviceOwners,
+        ILogger? logger = null)
     {
         Configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         Matcher = matcher ?? throw new ArgumentNullException(nameof(matcher));
         ExecutableRoutes = executableRoutes ?? throw new ArgumentNullException(nameof(executableRoutes));
         ServiceOwners = serviceOwners ?? throw new ArgumentNullException(nameof(serviceOwners));
         DispatchGeneration = dispatchGeneration;
-        Publication = new HostSnapshotPublicationState(dispatchGeneration);
+        Publication = new HostSnapshotPublicationState(dispatchGeneration, logger);
     }
 
     /// <summary>Gets the configuration that produced <see cref="Matcher"/>.</summary>
@@ -73,11 +81,11 @@ internal sealed class HostRoutingSnapshot
 
     internal HostSnapshotPublicationState Publication { get; }
 
-
     private static ImmutableDictionary<Guid, ExecutableRoute> BuildExecutableRoutesOrEmpty(
-        HostConfigurationSnapshot configuration)
+        HostConfigurationSnapshot configuration,
+        ILogger? logger)
     {
-        if (ExecutableRouteBuilder.TryBuild(configuration, out var routes))
+        if (ExecutableRouteBuilder.TryBuild(configuration, out var routes, logger))
         {
             return routes;
         }
@@ -91,6 +99,7 @@ internal sealed class HostSnapshotPublicationState
 {
     private readonly object _gate = new();
     private readonly ExtensionDispatchGeneration? _generation;
+    private readonly ILogger _logger;
     private Task? _retirementTask;
     private TaskCompletionSource<bool>? _retirementCompletion;
     private bool _accepting = true;
@@ -98,7 +107,13 @@ internal sealed class HostSnapshotPublicationState
     private bool _retireGeneration;
     private int _activeLeases;
 
-    internal HostSnapshotPublicationState(ExtensionDispatchGeneration? generation) => _generation = generation;
+    internal HostSnapshotPublicationState(
+        ExtensionDispatchGeneration? generation,
+        ILogger? logger = null)
+    {
+        _generation = generation;
+        _logger = logger ?? HostLoggerDefaults.Logger;
+    }
 
     internal HostRoutingSnapshotLease? TryAcquire(HostRoutingSnapshot snapshot)
     {
@@ -182,9 +197,12 @@ internal sealed class HostSnapshotPublicationState
                 {
                     await _generation.RetireAsync().ConfigureAwait(false);
                 }
-                catch
+                catch (Exception exception)
                 {
-                    // Runtime retirement is bounded and remains responsible for eventual release.
+                    HostLogMessages.SnapshotRetirementCleanupFailed(
+                        _logger,
+                        exception,
+                        "ExtensionGenerationRetirement");
                 }
             }
         }
@@ -193,6 +211,7 @@ internal sealed class HostSnapshotPublicationState
             _retirementCompletion?.TrySetResult(true);
         }
     }
+
     internal Task RetirementTask
     {
         get
@@ -266,6 +285,15 @@ internal sealed class HostRoutingSnapshotAccessor : IHostRoutingSnapshotAccessor
 public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshotAccessor, IHostRoutingSnapshotLeaseAccessor, IAsyncDisposable
 {
     private readonly object _replacementGate = new();
+    private readonly ILogger _logger;
+
+    /// <summary>Creates the holder with an optional diagnostic logger.</summary>
+    /// <param name="logger">The optional host logger for snapshot validation and retirement diagnostics.</param>
+    public HostConfigurationSnapshotHolder(ILogger? logger = null)
+    {
+        _logger = logger ?? NullLogger.Instance;
+    }
+
     private HostRoutingSnapshot? _published;
     private HostConfigurationSnapshot? _staged;
     private bool _disposed;
@@ -273,6 +301,9 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     public HostConfigurationSnapshot? Current => Volatile.Read(ref _published)?.Configuration;
 
     internal HostRoutingSnapshot? RoutingSnapshot => Volatile.Read(ref _published);
+
+    /// <inheritdoc />
+    public bool HasSnapshot => Current is not null;
 
     /// <summary>Gets the current snapshot using the host configuration terminology.</summary>
     public HostConfigurationSnapshot? Snapshot => Current;
@@ -290,20 +321,16 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     }
 
     /// <inheritdoc />
-    public bool HasSnapshot => Current is not null;
-
-    /// <inheritdoc />
     public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null, null);
     /// <summary>Stages a validated snapshot for capability admission before runtime publication.</summary>
     internal bool TryStage(HostConfigurationSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        if (!HostConfigurationSnapshotValidator.IsComplete(snapshot) ||
-            !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot))
+        if (!HostConfigurationSnapshotValidator.IsComplete(snapshot, _logger) ||
+            !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger))
         {
             return false;
         }
-
         lock (_replacementGate)
         {
             if (_disposed)
@@ -340,7 +367,6 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             }
         }
     }
-
     internal bool TryReplace(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? dispatchGeneration) =>
@@ -352,8 +378,8 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         ImmutableDictionary<Guid, string?>? serviceOwners)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        if (!HostConfigurationSnapshotValidator.IsComplete(snapshot) ||
-            !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot))
+        if (!HostConfigurationSnapshotValidator.IsComplete(snapshot, _logger) ||
+            !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger))
         {
             return false;
         }
@@ -367,13 +393,14 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         {
             routeBuild = RouteMatchSnapshotBuilder.Build(snapshot.Routes);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.SnapshotValidationFailed(_logger, exception, "RouteSnapshotBuild");
             return false;
         }
 
         if (!routeBuild.IsSuccess || routeBuild.Snapshot is null ||
-            !ExecutableRouteBuilder.TryBuild(snapshot, out var executableRoutes))
+            !ExecutableRouteBuilder.TryBuild(snapshot, out var executableRoutes, _logger))
         {
             return false;
         }
@@ -383,7 +410,8 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             routeBuild.Snapshot,
             executableRoutes,
             dispatchGeneration,
-            serviceOwners);
+            serviceOwners,
+            _logger);
         HostRoutingSnapshot? previous;
         lock (_replacementGate)
         {
@@ -416,6 +444,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         return true;
     }
 
+
     internal HostRoutingSnapshotLease? TryAcquireRoutingLease() =>
         HostRoutingSnapshotLease.Capture(Volatile.Read(ref _published));
     HostRoutingSnapshotLease? IHostRoutingSnapshotLeaseAccessor.TryAcquireLease() => TryAcquireRoutingLease();
@@ -445,7 +474,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
 /// <summary>Validates the complete DTO graph before it is published to the runtime.</summary>
 internal static class HostConfigurationSnapshotValidator
 {
-    internal static bool IsComplete(HostConfigurationSnapshot snapshot)
+    internal static bool IsComplete(HostConfigurationSnapshot snapshot, ILogger? logger = null)
     {
         try
         {
@@ -483,7 +512,7 @@ internal static class HostConfigurationSnapshotValidator
             foreach (var route in snapshot.Routes)
             {
                 if (route is null ||
-                    !IsValidJsonObject(route.MetadataJson) ||
+                    !IsValidJsonObject(route.MetadataJson, logger) ||
                     !AreValidRewrites(route.RequestHeaderRewrites) ||
                     !AreValidRewrites(route.ResponseHeaderRewrites))
                 {
@@ -514,8 +543,8 @@ internal static class HostConfigurationSnapshotValidator
             foreach (var service in snapshot.Services)
             {
                 if (service is null ||
-                    !IsValidJsonArray(service.ArgumentList) ||
-                    !IsValidJsonObject(service.Environment) ||
+                    !IsValidJsonArray(service.ArgumentList, logger) ||
+                    !IsValidJsonObject(service.Environment, logger) ||
                     service.ArgumentList.Any(value => value is null || value.Any(char.IsControl)) ||
                     service.Environment.Any(value =>
                         string.IsNullOrWhiteSpace(value.Key) ||
@@ -531,7 +560,7 @@ internal static class HostConfigurationSnapshotValidator
             {
                 if (settings is null ||
                     !extensionIds.Contains(settings.ExtensionId) ||
-                    !IsValidJson(settings.SettingsJson))
+                    !IsValidJson(settings.SettingsJson, logger))
                 {
                     return false;
                 }
@@ -539,8 +568,12 @@ internal static class HostConfigurationSnapshotValidator
 
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.SnapshotValidationFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                nameof(IsComplete));
             return false;
         }
     }
@@ -578,33 +611,41 @@ internal static class HostConfigurationSnapshotValidator
         return true;
     }
 
-    private static bool IsValidJson<T>(T value)
+    private static bool IsValidJson<T>(T value, ILogger? logger = null)
     {
         try
         {
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(value));
             return document.RootElement.ValueKind is not JsonValueKind.Undefined and not JsonValueKind.Null;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.SnapshotValidationFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                "SnapshotJsonSerialization");
             return false;
         }
     }
 
-    private static bool IsValidJson(string value)
+    private static bool IsValidJson(string value, ILogger? logger = null)
     {
         try
         {
             using var document = JsonDocument.Parse(value);
             return document.RootElement.ValueKind is not JsonValueKind.Undefined and not JsonValueKind.Null;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.SnapshotValidationFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                "SnapshotJsonValidation");
             return false;
         }
     }
 
-    private static bool IsValidJsonArray<T>(IEnumerable<T> values) => IsValidJson(values);
+    private static bool IsValidJsonArray<T>(IEnumerable<T> values, ILogger? logger = null) => IsValidJson(values, logger);
 
     private static bool AreValidRewrites(IEnumerable<HeaderRewriteConfiguration> rewrites)
     {
@@ -629,18 +670,24 @@ internal static class HostConfigurationSnapshotValidator
         return true;
     }
 
-    private static bool IsValidJsonObject<TKey, TValue>(IReadOnlyDictionary<TKey, TValue> values)
-        where TKey : notnull => IsValidJson(values);
+    private static bool IsValidJsonObject<TKey, TValue>(
+        IReadOnlyDictionary<TKey, TValue> values,
+        ILogger? logger = null)
+        where TKey : notnull => IsValidJson(values, logger);
 
-    private static bool IsValidJsonObject(string value)
+    private static bool IsValidJsonObject(string value, ILogger? logger = null)
     {
         try
         {
             using var document = JsonDocument.Parse(value);
             return document.RootElement.ValueKind == JsonValueKind.Object;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.SnapshotValidationFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                "SnapshotJsonObjectValidation");
             return false;
         }
     }

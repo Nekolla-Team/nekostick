@@ -250,6 +250,7 @@ public sealed class HostNodeRegistrationService : BackgroundService
         {
             HostLogMessages.NodeRegistered(_logger, _options.NodeId);
         }
+        HostLogMessages.NodeHeartbeatUpdated(_logger, _options.NodeId, snapshot.Version);
     }
 
     private async ValueTask DisposeResourcesAsync()

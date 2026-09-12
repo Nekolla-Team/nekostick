@@ -1,4 +1,5 @@
 using System.IO;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -10,15 +11,22 @@ public sealed partial class StaticTargetDefinition
     /// directories without a fixed index, and canonical paths outside the root are never openable.
     /// </summary>
     /// <param name="normalizedRequestPath">The absolute path produced by the routing layer.</param>
+    /// <param name="logger">The optional structured logger for filesystem probe failures.</param>
     /// <returns>A typed, non-sensitive resolution result.</returns>
-    public StaticFileResolution Resolve(string normalizedRequestPath)
+    public StaticFileResolution Resolve(
+        string normalizedRequestPath,
+        ILogger? logger = null)
     {
         if (!TryValidateRequestPath(normalizedRequestPath))
         {
             return CreateInvalidResolution(StaticFileFailureReason.InvalidRequestPath);
         }
 
-        var rootResult = CanonicalizeExistingPath(_rootPath, boundaryRoot: null, recursionDepth: 0);
+        var rootResult = CanonicalizeExistingPath(
+            _rootPath,
+            boundaryRoot: null,
+            recursionDepth: 0,
+            logger: logger);
         if (rootResult.Status != CanonicalPathStatus.Success)
         {
             return rootResult.Status == CanonicalPathStatus.Missing
@@ -37,7 +45,11 @@ public sealed partial class StaticTargetDefinition
             return CreateInvalidResolution(StaticFileFailureReason.InvalidRequestPath);
         }
 
-        var targetResult = CanonicalizeExistingPath(targetPath, canonicalRoot, recursionDepth: 0);
+        var targetResult = CanonicalizeExistingPath(
+            targetPath,
+            canonicalRoot,
+            recursionDepth: 0,
+            logger: logger);
         if (targetResult.Status == CanonicalPathStatus.Missing)
         {
             return CreateNotFoundResolution(StaticFileFailureReason.TargetNotFound);
@@ -59,7 +71,7 @@ public sealed partial class StaticTargetDefinition
 
         if (Directory.Exists(canonicalTarget))
         {
-            return ResolveDirectoryIndex(canonicalRoot, canonicalTarget);
+            return ResolveDirectoryIndex(canonicalRoot, canonicalTarget, logger);
         }
 
         if (!File.Exists(canonicalTarget))
@@ -78,7 +90,11 @@ public sealed partial class StaticTargetDefinition
     /// <summary>Resolves a path after applying the pure static-file method policy.</summary>
     /// <param name="method">The method token; only <c>GET</c> and <c>HEAD</c> are accepted.</param>
     /// <param name="normalizedRequestPath">The absolute path produced by the routing layer.</param>
+    /// <param name="logger">The optional structured logger for filesystem probe failures.</param>
     /// <returns>A typed, non-sensitive resolution result.</returns>
-    public StaticFileResolution ResolveRequest(string method, string normalizedRequestPath) =>
-        StaticFileRequestMapper.Map(this, method, normalizedRequestPath);
+    public StaticFileResolution ResolveRequest(
+        string method,
+        string normalizedRequestPath,
+        ILogger? logger = null) =>
+        StaticFileRequestMapper.Map(this, method, normalizedRequestPath, logger);
 }

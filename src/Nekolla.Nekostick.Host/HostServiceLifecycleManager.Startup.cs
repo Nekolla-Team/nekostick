@@ -27,18 +27,41 @@ public sealed partial class HostServiceLifecycleManager
 
     /// <summary>Records a process-exit observation for the identified process generation.</summary>
     public void NotifyProcessExit(Guid serviceId, ProcessInstanceId instanceId, bool successfulExit) =>
-        _ = NotifyProcessExitAsync(serviceId, instanceId, successfulExit);
+        ObserveBackgroundTask(
+            NotifyProcessExitAsync(serviceId, instanceId, successfulExit),
+            nameof(NotifyProcessExitAsync),
+            serviceId);
 
     /// <summary>Completes the identity-aware process-exit handoff.</summary>
     internal Task NotifyProcessExitAsync(Guid serviceId, ProcessInstanceId instanceId, bool successfulExit) =>
         HandleProcessExitAsync(serviceId, instanceId, successfulExit, DateTimeOffset.UtcNow);
 
     private void HandleProcessExitObservation(ProcessExitObservation observation) =>
-        _ = HandleProcessExitAsync(
-            observation.ServiceId,
-            observation.InstanceId,
-            observation.SuccessfulExit,
-            observation.ExitedAt);
+        ObserveBackgroundTask(
+            HandleProcessExitAsync(
+                observation.ServiceId,
+                observation.InstanceId,
+                observation.SuccessfulExit,
+                observation.ExitedAt),
+            nameof(HandleProcessExitAsync),
+            observation.ServiceId);
+
+    private async void ObserveBackgroundTask(Task task, string operation, Guid serviceId)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            HostLogMessages.LifecycleBackgroundCancelled(_logger, operation, serviceId);
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.LifecycleBackgroundFailed(_logger, exception, operation, serviceId);
+        }
+    }
+
     private Task<HostServiceReadinessResult> StartOrSwitchAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
@@ -52,7 +75,10 @@ public sealed partial class HostServiceLifecycleManager
             slot.Startup = startup.Task;
         }
 
-        _ = CompleteStartOrSwitchAsync(slot, snapshot, service, stopReplacedGeneration, startup);
+        ObserveBackgroundTask(
+            CompleteStartOrSwitchAsync(slot, snapshot, service, stopReplacedGeneration, startup),
+            nameof(CompleteStartOrSwitchAsync),
+            service.Id);
         return startup.Task;
     }
 
@@ -72,8 +98,21 @@ public sealed partial class HostServiceLifecycleManager
                 stopReplacedGeneration).ConfigureAwait(false);
             startup.TrySetResult(result);
         }
+        catch (OperationCanceledException exception)
+        {
+            HostLogMessages.LifecycleBackgroundCancelled(
+                _logger,
+                nameof(CompleteStartOrSwitchAsync),
+                service.Id);
+            startup.TrySetException(exception);
+        }
         catch (Exception exception)
         {
+            HostLogMessages.LifecycleBackgroundFailed(
+                _logger,
+                exception,
+                nameof(CompleteStartOrSwitchAsync),
+                service.Id);
             startup.TrySetException(exception);
         }
         finally
@@ -180,6 +219,7 @@ public sealed partial class HostServiceLifecycleManager
         }
         catch (OperationCanceledException)
         {
+            HostLogMessages.LifecycleBackgroundCancelled(_logger, nameof(StartOrSwitchAsync), service.Id);
             return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
         }
         catch (Exception exception)
@@ -414,6 +454,7 @@ public sealed partial class HostServiceLifecycleManager
                 serviceId,
                 version,
                 state
-            });
+            },
+            _logger);
     }
 }

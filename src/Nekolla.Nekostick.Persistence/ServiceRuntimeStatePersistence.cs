@@ -78,8 +78,16 @@ public sealed partial class EfServiceRuntimePersistence
                 cancellationToken).ConfigureAwait(false);
             return value is null ? null : ToRuntimeSnapshot(value);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception) { return null; }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            PersistenceLogMessages.RuntimePersistenceCancelled(_logger, "ReadRuntime", nodeId, serviceId);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            PersistenceLogMessages.RuntimePersistenceFailed(_logger, exception, "ReadRuntime", nodeId, serviceId);
+            return null;
+        }
     }
 
     /// <inheritdoc />
@@ -151,14 +159,31 @@ public sealed partial class EfServiceRuntimePersistence
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.RuntimePersistenceCancelled(
+                _logger,
+                "WriteRuntime",
+                request?.NodeId ?? "unknown",
+                request?.ServiceId ?? Guid.Empty);
             return new(ServiceRuntimePersistenceStatus.Cancelled);
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.RuntimePersistenceFailed(
+                _logger,
+                exception,
+                "WriteRuntime",
+                request?.NodeId ?? "unknown",
+                request?.ServiceId ?? Guid.Empty);
             return new(ServiceRuntimePersistenceStatus.Conflict);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.RuntimePersistenceFailed(
+                _logger,
+                exception,
+                "WriteRuntime",
+                request?.NodeId ?? "unknown",
+                request?.ServiceId ?? Guid.Empty);
             return new(ServiceRuntimePersistenceStatus.DatabaseUnavailable);
         }
     }

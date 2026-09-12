@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -30,17 +31,18 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         Func<string, Type, object?> resolveProvider,
         IExtensionCapabilityFactory? capabilityFactory,
         ImmutableArray<Guid> routeIds = default,
-        string? dataDirectory = null)
+        string? dataDirectory = null,
+        ILogger? logger = null)
     {
         Manifest = manifest;
         Settings = settings;
         _loadHandle = loadHandle;
-        _events = new ExtensionEventQueue(NotifyFailureAsync, onDrop: RecordDroppedEvent);
+        _events = new ExtensionEventQueue(NotifyFailureAsync, onDrop: RecordDroppedEvent, logger: logger);
         _routeRegistrations = new ExtensionRouteRegistrationSet(
             manifest.Id,
             routeIds,
             callback => _events.TrySubscribe(callback));
-        _tasks = new ExtensionTaskTracker(NotifyFailureAsync);
+        _tasks = new ExtensionTaskTracker(NotifyFailureAsync, logger);
         _contracts = new ExtensionContractRegistry(
             manifest.Exports,
             manifest.Imports,
@@ -70,7 +72,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             lifecycle,
             _ => { },
             (_, _) => { },
-            dataDirectory);
+            dataDirectory,
+            logger);
         _entrypoint = loadHandle.CreateEntrypoint(_bridge);
     }
     internal ExtensionRouteRegistrationSet RouteRegistrations => _routeRegistrations;

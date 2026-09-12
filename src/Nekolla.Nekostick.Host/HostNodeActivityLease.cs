@@ -1,5 +1,7 @@
 using System.Data;
 using System.Data.Common;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -21,14 +23,16 @@ public sealed class PostgresHostNodeActivityLease : IHostNodeActivityLease
 
     private readonly bool _isDefaultNode;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly ILogger _logger;
     private DbConnection? _connection;
     private int _disposed;
 
     /// <summary>Creates the activity lease for the configured node.</summary>
-    public PostgresHostNodeActivityLease(HostRuntimeOptions options)
+    public PostgresHostNodeActivityLease(HostRuntimeOptions options, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         _isDefaultNode = string.Equals(options.NodeId, "0", StringComparison.Ordinal);
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -153,7 +157,7 @@ public sealed class PostgresHostNodeActivityLease : IHostNodeActivityLease
         }
 
     }
-    private static async Task ReleaseConnectionAsync(DbConnection connection)
+    private async Task ReleaseConnectionAsync(DbConnection connection)
     {
         try
         {
@@ -162,8 +166,9 @@ public sealed class PostgresHostNodeActivityLease : IHostNodeActivityLease
             AddAdvisoryLockKeyParameter(command);
             await command.ExecuteScalarAsync(CancellationToken.None);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.NodeActivityCleanupFailure(_logger, exception, "AdvisoryUnlock");
             // Closing the PostgreSQL session also releases a session advisory lock.
         }
 
@@ -171,8 +176,9 @@ public sealed class PostgresHostNodeActivityLease : IHostNodeActivityLease
         {
             await connection.CloseAsync();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.NodeActivityCleanupFailure(_logger, exception, "ConnectionClose");
             // The connection is owned by the node service and is disposed with its context.
         }
     }

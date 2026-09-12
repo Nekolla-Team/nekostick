@@ -151,6 +151,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     private readonly ExtensionContractCatalog _contractCatalog;
     private readonly IExtensionCapabilityFactory? _capabilityFactory;
     private readonly ILogger? _logger;
+    private readonly ExtensionLogThrottle _requestLogThrottle = new();
     private readonly string _dataDirectory;
     private readonly Dictionary<string, ExtensionInstance> _instances = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HandlerBinding> _handlers = new(StringComparer.Ordinal);
@@ -172,13 +173,14 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
         string? dataDirectory = null)
     {
         _hostApiVersion = hostApiVersion;
-        _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault();
+        _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault(logger);
         _capabilityFactory = capabilityFactory;
         _logger = logger;
         _dataDirectory = dataDirectory ?? string.Empty;
         _loader = new CollectibleExtensionLoader(
             new SemVersion(hostApiVersion.Major, hostApiVersion.Minor, hostApiVersion.Patch),
-            _contractCatalog);
+            _contractCatalog,
+            logger);
     }
     /// <summary>Gets the host API version injected for this runtime manager.</summary>
     public HostApiVersion ApiVersion => _hostApiVersion;

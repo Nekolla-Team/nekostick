@@ -43,15 +43,20 @@ public sealed class HostServiceEndpointSnapshotPublisher : IHostServiceEndpointS
 {
     private readonly object _gate = new();
     private readonly ExtensionRuntimeManager? _runtimeManager;
+    private readonly ILogger? _logger;
     private ImmutableDictionary<Guid, HostServiceEndpointLease> _current =
         ImmutableDictionary<Guid, HostServiceEndpointLease>.Empty;
     private long _publicationVersion;
 
     /// <summary>Creates an endpoint publisher with optional core-event fan-out.</summary>
     /// <param name="runtimeManager">The extension runtime manager, when core events are enabled.</param>
-    public HostServiceEndpointSnapshotPublisher(ExtensionRuntimeManager? runtimeManager = null)
+    /// <param name="logger">The optional host logger for core-event delivery diagnostics.</param>
+    public HostServiceEndpointSnapshotPublisher(
+        ExtensionRuntimeManager? runtimeManager = null,
+        ILogger? logger = null)
     {
         _runtimeManager = runtimeManager;
+        _logger = logger;
     }
 
     /// <summary>Gets the current immutable endpoint lease view.</summary>
@@ -111,7 +116,8 @@ public sealed class HostServiceEndpointSnapshotPublisher : IHostServiceEndpointS
                     version,
                     state = hasNext ? hasPrevious ? "changed" : "published" : "withdrawn",
                     port = hasNext ? newLease!.Port : (int?)null
-                });
+                },
+                _logger);
         }
     }
 

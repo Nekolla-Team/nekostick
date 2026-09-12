@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Routing;
@@ -36,8 +37,9 @@ public sealed class RouteMatchSnapshot
 
     /// <summary>Matches a request using only this immutable snapshot.</summary>
     /// <param name="input">The framework-independent matcher input.</param>
+    /// <param name="logger">The optional structured logger for expected host validation failures.</param>
     /// <returns>A matched, no-match, or invalid-request result.</returns>
-    public RouteMatchResult Match(RouteMatchInput input)
+    public RouteMatchResult Match(RouteMatchInput input, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(input);
         var normalized = RoutePathNormalizer.Normalize(input.Path);
@@ -53,7 +55,7 @@ public sealed class RouteMatchSnapshot
             return RouteMatchResult.InvalidRequest(PathNormalizationErrorCode.InvalidMethod, ImmutableArray<Guid>.Empty);
         }
 
-        if (!HostValue.TryCreate(input.Host, out var host, out _))
+        if (!HostValue.TryCreate(input.Host, out var host, out _, logger))
         {
             return RouteMatchResult.InvalidRequest(PathNormalizationErrorCode.InvalidHost, ImmutableArray<Guid>.Empty);
         }

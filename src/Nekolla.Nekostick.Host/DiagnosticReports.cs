@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
 namespace Nekolla.Nekostick.Host;
@@ -19,14 +20,14 @@ internal static class DiagnosticJson
         WriteIndented = false
     };
 
-    internal static string Serialize<T>(T report) =>
-        TrySerialize(report, out var json)
+    internal static string Serialize<T>(T report, ILogger? logger = null) =>
+        TrySerialize(report, logger, typeof(T).Name, out var json)
             ? json
             : GetFallback(report);
 
-    internal static int Write(StatusReport report)
+    internal static int Write(StatusReport report, ILogger? logger = null)
     {
-        if (TrySerialize(report, out var json))
+        if (TrySerialize(report, logger, nameof(StatusReport), out var json))
         {
             Console.Out.WriteLine(json);
             return report.ExitCode;
@@ -36,9 +37,9 @@ internal static class DiagnosticJson
         return 1;
     }
 
-    internal static int Write(DoctorReport report)
+    internal static int Write(DoctorReport report, ILogger? logger = null)
     {
-        if (TrySerialize(report, out var json))
+        if (TrySerialize(report, logger, nameof(DoctorReport), out var json))
         {
             Console.Out.WriteLine(json);
             return report.ExitCode;
@@ -48,15 +49,23 @@ internal static class DiagnosticJson
         return 1;
     }
 
-    private static bool TrySerialize<T>(T report, out string json)
+    private static bool TrySerialize<T>(
+        T report,
+        ILogger? logger,
+        string reportKind,
+        out string json)
     {
         try
         {
             json = JsonSerializer.Serialize(report, Options);
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.DiagnosticSerializationFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                reportKind);
             json = string.Empty;
             return false;
         }

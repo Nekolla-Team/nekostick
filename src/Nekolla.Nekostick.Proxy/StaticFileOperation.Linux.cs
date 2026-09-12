@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -18,11 +20,11 @@ internal sealed class LinuxStaticFileOperation : IStaticFileOperation
         _abi = abi;
     }
 
-    internal static IStaticFileOperation Create()
+    internal static IStaticFileOperation Create(ILogger? logger = null)
     {
         if (IntPtr.Size != 8
             || RuntimeInformation.ProcessArchitecture is not (Architecture.X64 or Architecture.Arm64)
-            || !LinuxStaticFileNative.IsVerifiedGlibc())
+            || !LinuxStaticFileNative.IsVerifiedGlibc(logger))
         {
             return new UnsupportedStaticFileOperation();
         }
@@ -35,7 +37,10 @@ internal sealed class LinuxStaticFileOperation : IStaticFileOperation
             : new UnsupportedStaticFileOperation();
     }
 
-    public StaticFileOperationResult OpenReadOnly(string canonicalRootPath, string canonicalTargetPath) =>
+    public StaticFileOperationResult OpenReadOnly(
+        string canonicalRootPath,
+        string canonicalTargetPath,
+        ILogger? logger = null) =>
         StaticFileOperationCore.OpenVerified(
             canonicalRootPath,
             canonicalTargetPath,
@@ -49,23 +54,24 @@ internal sealed class LinuxStaticFileOperation : IStaticFileOperation
             LinuxStaticFileNative.OpenAt,
             LinuxStaticFileNative.FStat,
             LinuxStaticFileNative.FStatAt,
-            LinuxStaticFileNative.Close);
+            LinuxStaticFileNative.Close,
+            logger);
 }
 
 internal static partial class LinuxStaticFileNative
 {
-    internal static bool IsVerifiedGlibc()
+    internal static bool IsVerifiedGlibc(ILogger? logger = null)
     {
         nint library = IntPtr.Zero;
         try
         {
             if (!NativeLibrary.TryLoad("libc.so.6", out library)
-                || !HasExport(library, "open")
-                || !HasExport(library, "openat")
-                || !HasExport(library, "fstat")
-                || !HasExport(library, "fstatat")
-                || !HasExport(library, "close")
-                || !HasExport(library, "gnu_get_libc_version"))
+                || !HasExport(library, "open", logger)
+                || !HasExport(library, "openat", logger)
+                || !HasExport(library, "fstat", logger)
+                || !HasExport(library, "fstatat", logger)
+                || !HasExport(library, "close", logger)
+                || !HasExport(library, "gnu_get_libc_version", logger))
             {
                 return false;
             }
@@ -78,8 +84,17 @@ internal static partial class LinuxStaticFileNative
                 && version![0] >= '0'
                 && version[0] <= '9';
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("LinuxStaticFileNative.IsVerifiedGlibc", out var occurrences))
+            {
+                ProxyLogMessages.NativeLibraryVerificationFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "Linux",
+                    occurrences);
+            }
+
             return false;
         }
         finally
@@ -90,21 +105,35 @@ internal static partial class LinuxStaticFileNative
                 {
                     NativeLibrary.Free(library);
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
+                    ProxyLogMessages.NativeLibraryReleaseFailed(
+                        logger ?? NullLogger.Instance,
+                        exception,
+                        "Linux");
                 }
             }
         }
     }
 
-    private static bool HasExport(nint library, string name)
+    private static bool HasExport(nint library, string name, ILogger? logger = null)
     {
         try
         {
             return NativeLibrary.GetExport(library, name) != IntPtr.Zero;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("LinuxStaticFileNative.HasExport", out var occurrences))
+            {
+                ProxyLogMessages.NativeExportLookupFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "Linux",
+                    name,
+                    occurrences);
+            }
+
             return false;
         }
     }

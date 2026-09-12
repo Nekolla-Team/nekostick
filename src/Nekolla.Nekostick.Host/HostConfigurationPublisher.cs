@@ -106,6 +106,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 {
                     return false;
                 }
+                HostLogMessages.PriorGenerationReused(
+                    _logger,
+                    "UnavailableLoadedRecordAndIdentitiesReused",
+                    previousGeneration.GenerationId);
 
                 // TryReplace consumed the staged snapshot; it is now the live
                 // publication, so staging cleanup and rejection no longer apply.
@@ -143,6 +147,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         desiredSet.NodeStates,
                         cancellationToken)
                     .ConfigureAwait(false);
+                HostLogMessages.UnsafeUnavailableBindingFallback(
+                    _logger,
+                    preparation.Generation.GenerationId,
+                    fallbackPublished);
                 // Fallback publishes the snapshot without forcing the requested
                 // reload; preserve publication cleanup while reporting failure.
                 published = fallbackPublished;
@@ -160,6 +168,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         desiredSet.NodeStates,
                         cancellationToken)
                     .ConfigureAwait(false);
+                HostLogMessages.GenerationReadyFallback(
+                    _logger,
+                    ready.FailureCode.ToString(),
+                    fallbackPublished);
                 published = fallbackPublished;
                 return requestedForceReloadIds.Count == 0 && fallbackPublished;
             }
@@ -225,8 +237,12 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     await activePreparation.AbortAsync().ConfigureAwait(false);
                 }
             }
-            catch (Exception)
+            catch (Exception exception)
             {
+                HostLogMessages.ConfigurationPublicationCleanupFailed(
+                    _logger,
+                    exception,
+                    "GenerationAbort");
                 // Abort owns its manager gate cleanup; publication cleanup must
                 // still release the publisher gate when lifecycle cleanup fails.
             }
@@ -351,6 +367,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             {
                 return false;
             }
+            HostLogMessages.ConfigurationFallbackPublished(
+                _logger,
+                "Previous",
+                publicationSnapshot.Version);
 
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
             await ReportNodeStatesAsync(nodeStates, cancellationToken).ConfigureAwait(false);
@@ -388,6 +408,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);
                 return false;
             }
+            HostLogMessages.ConfigurationFallbackPublished(
+                _logger,
+                "Empty",
+                publicationSnapshot.Version);
 
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
             await ReportNodeStatesAsync(nodeStates, cancellationToken).ConfigureAwait(false);
@@ -418,7 +442,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             await using var db = await _dbContextFactory
                 .CreateDbContextAsync(cancellationToken)
                 .ConfigureAwait(false);
-            var persistence = new EfExtensionNodeStatePersistence(db);
+            var persistence = new EfExtensionNodeStatePersistence(db, logger: _logger);
             if (!await persistence
                     .UpsertAsync(_runtimeOptions.NodeId, nodeStates, cancellationToken)
                     .ConfigureAwait(false))
@@ -566,7 +590,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             {
                 version = snapshot.Version,
                 state = "applied"
-            });
+            },
+            _logger);
 
         var previousRoutes = previous?.Routes
             .ToDictionary(static route => route.Id);
@@ -591,7 +616,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     routeId = route.Id,
                     version = snapshot.Version,
                     state
-                });
+                },
+                _logger);
         }
 
         if (previousRoutes is not null)
@@ -611,7 +637,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         routeId,
                         version = snapshot.Version,
                         state = "removed"
-                    });
+                    },
+                    _logger);
             }
         }
 
@@ -662,7 +689,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             _runtimeManager,
             ExtensionCoreEventKind.ExtensionSettingsChanged,
             new { extensionId },
-            extensionId);
+            extensionId,
+            _logger);
     }
 
     /// <inheritdoc />

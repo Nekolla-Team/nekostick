@@ -29,6 +29,12 @@ internal static class HostLoggerCategory
     internal const string Supervision = "Nekolla.Nekostick.Host.Supervision";
     internal const string Extensions = "Nekolla.Nekostick.Host.Extensions";
 }
+internal static class HostLoggerDefaults
+{
+    internal static ILogger Logger { get; } =
+        new SafeConsoleLoggerProvider(LogLevel.Debug).CreateLogger(HostLoggerCategory.Startup);
+}
+
 
 internal static partial class HostLogMessages
 {
@@ -250,6 +256,396 @@ internal static partial class HostLogMessages
         Level = LogLevel.Warning,
         Message = "Duplicate extension manifest id during scan. ExtensionId: {ExtensionId}. The conflicting directory was skipped.")]
     internal static partial void DuplicateExtensionManifestId(ILogger logger, string extensionId);
+    [LoggerMessage(
+        EventId = 1030,
+        Level = LogLevel.Warning,
+        Message = "Diagnostic report serialization failed. Report: {Report}.")]
+    internal static partial void DiagnosticSerializationFailed(
+        ILogger logger,
+        Exception exception,
+        string report);
+
+    [LoggerMessage(
+        EventId = 1031,
+        Level = LogLevel.Warning,
+        Message = "Extension capability read failed. Operation: {Operation}. ExtensionId: {ExtensionId}. ResourceId: {ResourceId}.")]
+    internal static partial void ExtensionCapabilityReadFailed(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        string? extensionId,
+        Guid? resourceId);
+
+    [LoggerMessage(
+        EventId = 1032,
+        Level = LogLevel.Warning,
+        Message = "Extension service lifecycle operation failed. ServiceId: {ServiceId}.")]
+    internal static partial void ExtensionServiceLifecycleFailed(
+        ILogger logger,
+        Exception exception,
+        Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 1033,
+        Level = LogLevel.Warning,
+        Message = "Extension content digest computation failed. ExtensionId: {ExtensionId}.")]
+    internal static partial void ExtensionContentDigestFailed(
+        ILogger logger,
+        Exception exception,
+        string extensionId);
+
+    [LoggerMessage(
+        EventId = 1034,
+        Level = LogLevel.Warning,
+        Message = "Executable route construction failed. RouteCount: {RouteCount}.")]
+    internal static partial void ExecutableRouteBuildFailed(
+        ILogger logger,
+        Exception exception,
+        int routeCount);
+
+    [LoggerMessage(
+        EventId = 1035,
+        Level = LogLevel.Warning,
+        Message = "Extension HTTP adapter operation failed. Operation: {Operation}. Occurrences: {Occurrences}.")]
+    internal static partial void ExtensionHttpAdapterFailed(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        long occurrences);
+
+    [LoggerMessage(
+        EventId = 1036,
+        Level = LogLevel.Warning,
+        Message = "Extension management operation failed. Operation: {Operation}. CallerExtensionId: {CallerExtensionId}. TargetExtensionId: {TargetExtensionId}. ErrorCode: {ErrorCode}.")]
+    internal static partial void ExtensionManagementFailure(
+        ILogger logger,
+        string operation,
+        string callerExtensionId,
+        string? targetExtensionId,
+        ConfigurationErrorCode errorCode);
+
+    [LoggerMessage(
+        EventId = 1037,
+        Level = LogLevel.Debug,
+        Message = "Extension management operation was rejected. Operation: {Operation}. CallerExtensionId: {CallerExtensionId}. TargetExtensionId: {TargetExtensionId}. ErrorCode: {ErrorCode}.")]
+    internal static partial void ExtensionManagementRejected(
+        ILogger logger,
+        string operation,
+        string callerExtensionId,
+        string? targetExtensionId,
+        ConfigurationErrorCode errorCode);
+
+    [LoggerMessage(
+        EventId = 1038,
+        Level = LogLevel.Warning,
+        Message = "Extension management operation raised an exception. Operation: {Operation}. CallerExtensionId: {CallerExtensionId}. TargetExtensionId: {TargetExtensionId}.")]
+    internal static partial void ExtensionManagementException(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        string callerExtensionId,
+        string? targetExtensionId);
+
+    [LoggerMessage(
+        EventId = 1039,
+        Level = LogLevel.Warning,
+        Message = "Extension management background operation failed. Operation: {Operation}. CallerExtensionId: {CallerExtensionId}.")]
+    internal static partial void ExtensionManagementBackgroundFailed(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        string callerExtensionId);
+
+    [LoggerMessage(
+        EventId = 1040,
+        Level = LogLevel.Warning,
+        Message = "Extension scan failed. Operation: {Operation}.")]
+    internal static partial void ExtensionScanFailed(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1041,
+        Level = LogLevel.Warning,
+        Message = "Configuration publication cleanup failed. Operation: {Operation}.")]
+    internal static partial void ConfigurationPublicationCleanupFailed(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1042,
+        Level = LogLevel.Warning,
+        Message = "Configuration snapshot validation failed. Operation: {Operation}.")]
+    internal static partial void SnapshotValidationFailed(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1043,
+        Level = LogLevel.Warning,
+        Message = "Configuration snapshot retirement cleanup failed. Operation: {Operation}.")]
+    internal static partial void SnapshotRetirementCleanupFailed(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1044,
+        Level = LogLevel.Warning,
+        Message = "Host core-event delivery failed. EventKind: {EventKind}.")]
+    internal static partial void CoreEventDeliveryFailed(
+        ILogger logger,
+        Exception exception,
+        ExtensionCoreEventKind eventKind);
+
+    [LoggerMessage(
+        EventId = 1046,
+        Level = LogLevel.Warning,
+        Message = "Process output logging failed. Operation: {Operation}.")]
+    internal static partial void ProcessOutputSinkFailure(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1047,
+        Level = LogLevel.Debug,
+        Message = "Process output cleanup logging failed. Operation: {Operation}.")]
+    internal static partial void ProcessOutputSinkCleanupFailure(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1048,
+        Level = LogLevel.Warning,
+        Message = "Lifecycle background operation failed. Operation: {Operation}. ServiceId: {ServiceId}.")]
+    internal static partial void LifecycleBackgroundFailed(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 1049,
+        Level = LogLevel.Debug,
+        Message = "Lifecycle background operation was cancelled. Operation: {Operation}. ServiceId: {ServiceId}.")]
+    internal static partial void LifecycleBackgroundCancelled(
+        ILogger logger,
+        string operation,
+        Guid serviceId);
+    [LoggerMessage(
+        EventId = 1050,
+        Level = LogLevel.Debug,
+        Message = "Extension HTTP adapter operation was cancelled. Operation: {Operation}.")]
+    internal static partial void ExtensionHttpAdapterCancelled(ILogger logger, string operation);
+    [LoggerMessage(
+        EventId = 1051,
+        Level = LogLevel.Debug,
+        Message = "Static target alignment check failed. Operation: {Operation}.")]
+    internal static partial void StaticTargetAlignmentFailed(
+        ILogger logger,
+        Exception exception,
+        string operation);
+    [LoggerMessage(
+        EventId = 1071,
+        Level = LogLevel.Warning,
+        Message = "Service endpoint publication failed; the published endpoint snapshot may be stale. NodeId: {NodeId}. Occurrences: {Occurrences}.")]
+    internal static partial void EndpointPublicationFailed(
+        ILogger logger,
+        Exception exception,
+        string nodeId,
+        long occurrences);
+    [LoggerMessage(
+        EventId = 1052,
+        Level = LogLevel.Warning,
+        Message = "Route event observation failed. Operation: {Operation}. Occurrences: {Occurrences}.")]
+    internal static partial void RouteEventObservationFailed(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        long occurrences);
+
+    [LoggerMessage(
+        EventId = 1053,
+        Level = LogLevel.Debug,
+        Message = "Lifecycle shutdown cleanup was skipped. Operation: {Operation}.")]
+    internal static partial void LifecycleShutdownCleanupSkipped(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1079,
+        Level = LogLevel.Debug,
+        Message = "Host node activity cleanup was skipped during shutdown. Operation: {Operation}.")]
+    internal static partial void NodeActivityCleanupFailure(
+        ILogger logger,
+        Exception exception,
+        string operation);
+
+    [LoggerMessage(
+        EventId = 1054,
+        Level = LogLevel.Information,
+        Message = "Extension enabled. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}. Version: {Version}.")]
+    internal static partial void ExtensionEnabled(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId,
+        long? version);
+
+    [LoggerMessage(
+        EventId = 1055,
+        Level = LogLevel.Debug,
+        Message = "Extension disable was already satisfied. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}. State: Disabled.")]
+    internal static partial void ExtensionDisableNoOp(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId);
+
+    [LoggerMessage(
+        EventId = 1056,
+        Level = LogLevel.Information,
+        Message = "Extension disabled. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}. Version: {Version}.")]
+    internal static partial void ExtensionDisabled(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId,
+        long? version);
+
+    [LoggerMessage(
+        EventId = 1057,
+        Level = LogLevel.Information,
+        Message = "Extension reload published. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}. Version: {Version}.")]
+    internal static partial void ExtensionReloadPublished(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId,
+        long version);
+
+    [LoggerMessage(
+        EventId = 1058,
+        Level = LogLevel.Warning,
+        Message = "Extension reload target unavailable. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}.")]
+    internal static partial void ExtensionReloadTargetUnavailable(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId);
+
+    [LoggerMessage(
+        EventId = 1059,
+        Level = LogLevel.Warning,
+        Message = "Extension reload failed. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}.")]
+    internal static partial void ExtensionReloadFailed(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId);
+
+    [LoggerMessage(
+        EventId = 1060,
+        Level = LogLevel.Debug,
+        Message = "Extension reload queued. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}.")]
+    internal static partial void ExtensionReloadQueued(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId);
+
+    [LoggerMessage(
+        EventId = 1061,
+        Level = LogLevel.Information,
+        Message = "Extension record deleted. CallerExtensionId: {CallerExtensionId}. ExtensionId: {ExtensionId}. Version: {Version}.")]
+    internal static partial void ExtensionRecordDeleted(
+        ILogger logger,
+        string callerExtensionId,
+        string extensionId,
+        long? version);
+
+    [LoggerMessage(
+        EventId = 1062,
+        Level = LogLevel.Information,
+        Message = "Extension refresh completed. CallerExtensionId: {CallerExtensionId}. Added: {Added}. VersionUpdated: {VersionUpdated}. Missing: {Missing}. Skipped: {Skipped}.")]
+    internal static partial void ExtensionRefreshCompleted(
+        ILogger logger,
+        string callerExtensionId,
+        int added,
+        int versionUpdated,
+        int missing,
+        int skipped);
+
+    [LoggerMessage(
+        EventId = 1063,
+        Level = LogLevel.Warning,
+        Message = "Prior extension generation reused. Reason: {Reason}. GenerationId: {GenerationId}.")]
+    internal static partial void PriorGenerationReused(
+        ILogger logger,
+        string reason,
+        long generationId);
+
+    [LoggerMessage(
+        EventId = 1064,
+        Level = LogLevel.Warning,
+        Message = "Unsafe unavailable binding triggered fallback. GenerationId: {GenerationId}. FallbackPublished: {FallbackPublished}.")]
+    internal static partial void UnsafeUnavailableBindingFallback(
+        ILogger logger,
+        long generationId,
+        bool fallbackPublished);
+
+    [LoggerMessage(
+        EventId = 1065,
+        Level = LogLevel.Warning,
+        Message = "Generation readiness failed; fallback attempted. FailureCode: {FailureCode}. FallbackPublished: {FallbackPublished}.")]
+    internal static partial void GenerationReadyFallback(
+        ILogger logger,
+        string failureCode,
+        bool fallbackPublished);
+
+    [LoggerMessage(
+        EventId = 1066,
+        Level = LogLevel.Warning,
+        Message = "Configuration fallback published. Mode: {Mode}. Version: {Version}.")]
+    internal static partial void ConfigurationFallbackPublished(
+        ILogger logger,
+        string mode,
+        long version);
+
+    [LoggerMessage(
+        EventId = 1067,
+        Level = LogLevel.Warning,
+        Message = "Extension binding quarantined. ExtensionId: {ExtensionId}. Code: {Code}.")]
+    internal static partial void ExtensionBindingQuarantined(
+        ILogger logger,
+        string extensionId,
+        string code);
+    [LoggerMessage(
+        EventId = 1068,
+        Level = LogLevel.Debug,
+        Message = "Port lease operation result. Status: {Status}. ServiceId: {ServiceId}. Port: {Port}.")]
+    internal static partial void PortLeaseOperationResult(
+        ILogger logger,
+        PersistencePortLeaseOperationStatus status,
+        Guid serviceId,
+        int port);
+
+    [LoggerMessage(
+        EventId = 1069,
+        Level = LogLevel.Debug,
+        Message = "Port lease operation rejected while new leases are disabled. ServiceId: {ServiceId}. Port: {Port}.")]
+    internal static partial void PortLeaseNewLeasesRejected(
+        ILogger logger,
+        Guid serviceId,
+        int port);
+
+    [LoggerMessage(
+        EventId = 1070,
+        Level = LogLevel.Debug,
+        Message = "Node heartbeat updated. NodeId: {NodeId}. ConfigurationVersion: {ConfigurationVersion}.")]
+    internal static partial void NodeHeartbeatUpdated(
+        ILogger logger,
+        string nodeId,
+        long configurationVersion);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -88,6 +89,7 @@ public sealed class ExtensionLoadHandle : IDisposable
     private readonly object _gate = new();
     private readonly WeakReference _weakContext;
     private readonly ExtensionManifest _manifest;
+    private readonly ILogger? _logger;
     private ExtensionLoadContext? _loadContext;
     private Assembly? _entryAssembly;
     private Type? _entryType;
@@ -97,7 +99,8 @@ public sealed class ExtensionLoadHandle : IDisposable
         ExtensionManifest manifest,
         ExtensionLoadContext loadContext,
         Assembly entryAssembly,
-        Type entryType)
+        Type entryType,
+        ILogger? logger = null)
     {
         _manifest = manifest;
         _loadContext = loadContext;
@@ -105,6 +108,7 @@ public sealed class ExtensionLoadHandle : IDisposable
         _entryType = entryType;
         _weakContext = new WeakReference(loadContext);
         _state = ExtensionRuntimeState.Loaded;
+        _logger = logger;
     }
 
     /// <summary>Gets the manifest associated with this load.</summary>
@@ -159,8 +163,13 @@ public sealed class ExtensionLoadHandle : IDisposable
 
             return ConfirmUnload(preparation.WeakContext);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionUnloadNotConfirmed(logger, exception, nameof(Unload));
+            }
+
             lock (_gate)
             {
                 _state = ExtensionRuntimeState.UnloadNotConfirmed;
@@ -273,16 +282,20 @@ public sealed class CollectibleExtensionLoader
 {
     private readonly SemVersion _hostApiVersion;
     private readonly ExtensionContractCatalog _contractCatalog;
+    private readonly ILogger? _logger;
 
     /// <summary>Creates a loader for one host API version and approved contract catalog.</summary>
     /// <param name="hostApiVersion">The host API version used for compatibility validation.</param>
     /// <param name="contractCatalog">The host-owned shared contract catalog.</param>
+    /// <param name="logger">The optional host logger for load and unload diagnostics.</param>
     public CollectibleExtensionLoader(
         SemVersion hostApiVersion,
-        ExtensionContractCatalog? contractCatalog = null)
+        ExtensionContractCatalog? contractCatalog = null,
+        ILogger? logger = null)
     {
         _hostApiVersion = hostApiVersion;
         _contractCatalog = contractCatalog ?? ExtensionContractCatalog.CreateDefault();
+        _logger = logger;
     }
 
     /// <summary>Loads an entry assembly from the manifest's approved extension root.</summary>
@@ -347,7 +360,7 @@ public sealed class CollectibleExtensionLoader
                 return ExtensionLoadResult.Failure(ExtensionFailureCode.EntryTypeNotCompatible);
             }
 
-            var handle = new ExtensionLoadHandle(manifest, loadContext, entryAssembly, entryType);
+            var handle = new ExtensionLoadHandle(manifest, loadContext, entryAssembly, entryType, _logger);
             loadContext = null;
             return ExtensionLoadResult.Success(handle);
         }

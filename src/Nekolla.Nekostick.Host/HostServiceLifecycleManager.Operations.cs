@@ -64,7 +64,8 @@ public sealed partial class HostServiceLifecycleManager
             },
             stopGracePeriod: StopGracePeriod,
             now: initialLeaseNow,
-            initialLease: initialLease);
+            initialLease: initialLease,
+            logger: _logger);
     }
     private async Task ReleaseAutomaticLeaseBestEffortAsync(
         PortLeaseRequest request,
@@ -330,6 +331,10 @@ public sealed partial class HostServiceLifecycleManager
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            HostLogMessages.LifecycleBackgroundCancelled(
+                _logger,
+                nameof(StopGenerationAsync),
+                generation.Configuration.Id);
         }
         catch (Exception exception)
         {

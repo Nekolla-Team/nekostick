@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Nekolla.Nekostick.Persistence.Entities;
 
@@ -13,13 +15,21 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
     private const int MaximumPort = 65535;
     private readonly NekostickDbContext _db;
     private readonly TimeProvider _time;
+    private readonly ILogger _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     /// <summary>Creates the lease store.</summary>
-    public EfPortLeaseStore(NekostickDbContext db, TimeProvider? timeProvider = null)
+    /// <param name="db">The persistence context.</param>
+    /// <param name="timeProvider">The clock used for persisted timestamps.</param>
+    /// <param name="logger">The optional persistence logger.</param>
+    public EfPortLeaseStore(
+        NekostickDbContext db,
+        TimeProvider? timeProvider = null,
+        ILogger? logger = null)
     {
         _db = db ?? throw new ArgumentNullException(nameof(db));
         _time = timeProvider ?? TimeProvider.System;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -103,18 +113,27 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.PortLeaseCancelled(
+                _logger,
+                "Acquire",
+                request.NodeId,
+                request.ServiceId,
+                request.Port);
             return PersistencePortLeaseOperationResult.Cancelled();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Acquire", request.NodeId, request.ServiceId, request.Port);
             return new(PersistencePortLeaseOperationStatus.Conflict);
         }
         catch (DbUpdateException exception) when (IsLeaseConflict(exception))
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Acquire", request.NodeId, request.ServiceId, request.Port);
             return new(PersistencePortLeaseOperationStatus.Conflict);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Acquire", request.NodeId, request.ServiceId, request.Port);
             return PersistencePortLeaseOperationResult.Unavailable();
         }
         finally
@@ -184,18 +203,27 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.PortLeaseCancelled(
+                _logger,
+                "Renew",
+                request.NodeId,
+                request.ServiceId,
+                request.Port);
             return PersistencePortLeaseOperationResult.Cancelled();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Renew", request.NodeId, request.ServiceId, request.Port);
             return new(PersistencePortLeaseOperationStatus.Conflict);
         }
         catch (DbUpdateException exception) when (IsLeaseConflict(exception))
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Renew", request.NodeId, request.ServiceId, request.Port);
             return new(PersistencePortLeaseOperationStatus.Conflict);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Renew", request.NodeId, request.ServiceId, request.Port);
             return PersistencePortLeaseOperationResult.Unavailable();
         }
         finally
@@ -257,18 +285,27 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.PortLeaseCancelled(
+                _logger,
+                "Release",
+                request.NodeId,
+                request.ServiceId,
+                request.Port);
             return PersistencePortLeaseOperationResult.Cancelled();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Release", request.NodeId, request.ServiceId, request.Port);
             return new(PersistencePortLeaseOperationStatus.Conflict);
         }
         catch (DbUpdateException exception) when (IsLeaseConflict(exception))
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Release", request.NodeId, request.ServiceId, request.Port);
             return new(PersistencePortLeaseOperationStatus.Conflict);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Release", request.NodeId, request.ServiceId, request.Port);
             return PersistencePortLeaseOperationResult.Unavailable();
         }
         finally
@@ -324,10 +361,12 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.PortLeaseCancelled(_logger, "ReadActive", nodeId, Guid.Empty, 0);
             return new(PersistencePortLeaseSnapshotStatus.Cancelled);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "ReadActive", nodeId, Guid.Empty, 0);
             return new(PersistencePortLeaseSnapshotStatus.DatabaseUnavailable);
         }
         finally
@@ -452,7 +491,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
     private static PersistencePortLease ToSnapshot(PortLease value) =>
         new(value.NodeId, value.ServiceId, value.Port, value.CreatedAt, value.LeaseExpiresAt, value.Version);
 
-    private static DateTimeOffset? TryGetExpiry(DateTimeOffset now, TimeSpan ttl)
+    private DateTimeOffset? TryGetExpiry(DateTimeOffset now, TimeSpan ttl)
     {
         try
         {
@@ -460,6 +499,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         }
         catch (ArgumentOutOfRangeException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "CalculateLeaseExpiry", "global");
             return null;
         }
     }

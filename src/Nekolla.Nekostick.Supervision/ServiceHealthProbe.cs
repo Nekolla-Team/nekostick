@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Domain;
 
 namespace Nekolla.Nekostick.Supervision;
@@ -12,6 +14,7 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
     private readonly IProcessLiveness? processLiveness;
     private readonly HttpClient httpClient;
     private readonly bool ownsHttpClient;
+    private readonly ILogger _logger;
 
     /// <summary>Creates a probe with no process liveness source.</summary>
     public ServiceHealthProbe()
@@ -21,7 +24,8 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
 
     /// <summary>Creates a probe that can perform process checks through the supplied executor.</summary>
     /// <param name="processExecutor">The process executor used only for safe liveness checks.</param>
-    public ServiceHealthProbe(IProcessExecutor? processExecutor)
+    /// <param name="logger">The optional supervision logger.</param>
+    public ServiceHealthProbe(IProcessExecutor? processExecutor, ILogger? logger = null)
     {
         processLiveness = processExecutor as IProcessLiveness;
         httpClient = new HttpClient(new SocketsHttpHandler
@@ -37,13 +41,19 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact
         };
         ownsHttpClient = true;
+        _logger = logger ?? NullLogger.Instance;
     }
 
-    internal ServiceHealthProbe(IProcessLiveness processLiveness, HttpClient httpClient)
+    /// <summary>Creates a probe for controlled process liveness and HTTP dependencies.</summary>
+    /// <param name="processLiveness">The process liveness source.</param>
+    /// <param name="httpClient">The HTTP client used for probes.</param>
+    /// <param name="logger">The optional supervision logger.</param>
+    internal ServiceHealthProbe(IProcessLiveness processLiveness, HttpClient httpClient, ILogger? logger = null)
     {
         this.processLiveness = processLiveness ?? throw new ArgumentNullException(nameof(processLiveness));
         this.httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         ownsHttpClient = false;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <inheritdoc />
@@ -70,14 +80,17 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            SupervisionLogMessages.HealthProbeCancelled(_logger, request.ServiceId);
             status = HealthObservationStatus.Cancelled;
         }
         catch (OperationCanceledException)
         {
+            SupervisionLogMessages.HealthProbeTimedOut(_logger, request.ServiceId);
             status = HealthObservationStatus.TimedOut;
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.HealthProbeOperationFailed(_logger, exception, request.ServiceId);
             status = HealthObservationStatus.Unavailable;
         }
 

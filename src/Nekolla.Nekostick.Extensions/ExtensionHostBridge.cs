@@ -1,10 +1,12 @@
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
 internal sealed class ExtensionHostBridge : IExtensionHostBridge13
 {
     private readonly Func<ExtensionHostInfoSnapshot>? _hostInfo;
+    private readonly ILogger? _logger;
 
     internal ExtensionHostBridge(
         HostApiVersion apiVersion,
@@ -16,7 +18,8 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         IExtensionLifecycleApi lifecycle,
         Action<ExtensionStatus> reportStatus,
         Action<ExtensionLogLevel, string> reportLog,
-        string? dataDirectory = null)
+        string? dataDirectory = null,
+        ILogger? logger = null)
     {
         ApiVersion = apiVersion;
         DataDirectory = dataDirectory ?? string.Empty;
@@ -55,6 +58,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         _hostInfo = ExtensionApiCapabilityGate.IsApi133Supported(apiVersion)
             ? capabilities.HostInfo
             : null;
+        _logger = logger;
     }
 
     public HostApiVersion ApiVersion { get; }
@@ -92,9 +96,16 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
             {
                 return _hostInfo?.Invoke() ?? ExtensionHostInfoSnapshot.Unavailable;
             }
-            catch
+            catch (Exception)
             {
                 // The provider reads host runtime state that may be mid-disposal during shutdown.
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionHostInfoUnavailable(
+                        logger,
+                        nameof(HostInfo));
+                }
+
                 return ExtensionHostInfoSnapshot.Unavailable;
             }
         }

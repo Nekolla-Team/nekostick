@@ -1,4 +1,6 @@
 using System.IO;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 
 namespace Nekolla.Nekostick.Proxy;
@@ -10,16 +12,23 @@ public sealed partial class StaticTargetDefinition
     /// The stream is exposed only after the post-open check succeeds, and directories are rejected.
     /// </summary>
     /// <param name="resolution">A successful resolution created by this target.</param>
+    /// <param name="logger">The optional structured logger for filesystem open failures.</param>
     /// <returns>A typed open result; failed results contain no filesystem path.</returns>
-    public StaticFileOpenResult OpenRead(StaticFileResolution resolution)
+    public StaticFileOpenResult OpenRead(
+        StaticFileResolution resolution,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(resolution);
-        return OpenRead(resolution, StaticFileOperationFactory.Create());
+        return OpenRead(
+            resolution,
+            StaticFileOperationFactory.Create(logger),
+            logger);
     }
 
     internal StaticFileOpenResult OpenRead(
         StaticFileResolution resolution,
-        IStaticFileOperation operation)
+        IStaticFileOperation operation,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(resolution);
         ArgumentNullException.ThrowIfNull(operation);
@@ -37,7 +46,11 @@ public sealed partial class StaticTargetDefinition
             return CreateOpenFailure(StaticFileOpenKind.Invalid, resolution.FailureReason);
         }
 
-        var currentRoot = CanonicalizeExistingPath(_rootPath, boundaryRoot: null, recursionDepth: 0);
+        var currentRoot = CanonicalizeExistingPath(
+            _rootPath,
+            boundaryRoot: null,
+            recursionDepth: 0,
+            logger: logger);
         if (currentRoot.Status != CanonicalPathStatus.Success
             || !string.Equals(currentRoot.CanonicalPath, resolution.CanonicalRootPath, StringComparison.Ordinal)
             || !Directory.Exists(currentRoot.CanonicalPath))
@@ -48,7 +61,8 @@ public sealed partial class StaticTargetDefinition
         var beforeOpen = CanonicalizeExistingPath(
             resolution.LexicalPath,
             currentRoot.CanonicalPath,
-            recursionDepth: 0);
+            recursionDepth: 0,
+            logger: logger);
         if (!IsSameSafeFile(beforeOpen, resolution.CanonicalPath, currentRoot.CanonicalPath))
         {
             return OpenFailureForPathStatus(beforeOpen.Status);
@@ -59,10 +73,20 @@ public sealed partial class StaticTargetDefinition
         {
             operationResult = operation.OpenReadOnly(
                 currentRoot.CanonicalPath,
-                resolution.CanonicalPath);
+                resolution.CanonicalPath,
+                logger);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.OpenRead.Operation", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenOperationFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticTargetDefinition.OpenRead.Operation",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.Forbidden, StaticFileFailureReason.TargetChanged);
         }
 
@@ -84,7 +108,8 @@ public sealed partial class StaticTargetDefinition
                 return CreateFileStreamResult(
                     resolution,
                     currentRoot.CanonicalPath,
-                    openedFile);
+                    openedFile,
+                    logger);
             }
         }
     }
@@ -92,7 +117,8 @@ public sealed partial class StaticTargetDefinition
     private static StaticFileOpenResult CreateFileStreamResult(
         StaticFileResolution resolution,
         string canonicalRootPath,
-        StaticOpenedFile openedFile)
+        StaticOpenedFile openedFile,
+        ILogger? logger = null)
     {
         FileStream? stream = null;
         SafeFileHandle? safeHandle = null;
@@ -101,7 +127,8 @@ public sealed partial class StaticTargetDefinition
             var afterOpen = CanonicalizeExistingPath(
                 resolution.LexicalPath!,
                 canonicalRootPath,
-                recursionDepth: 0);
+                recursionDepth: 0,
+                logger: logger);
             if (!IsSameSafeFile(afterOpen, resolution.CanonicalPath!, canonicalRootPath)
                 || Directory.Exists(afterOpen.CanonicalPath)
                 || !File.Exists(afterOpen.CanonicalPath))
@@ -133,30 +160,89 @@ public sealed partial class StaticTargetDefinition
         }
         catch (FileNotFoundException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Missing", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetMissing(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.NotFound, StaticFileFailureReason.TargetNotFound);
         }
         catch (DirectoryNotFoundException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Missing", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetMissing(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.NotFound, StaticFileFailureReason.TargetNotFound);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.Forbidden, StaticFileFailureReason.AccessDenied);
         }
-        catch (IOException)
+        catch (IOException exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.Forbidden, StaticFileFailureReason.TargetChanged);
         }
         catch (ArgumentException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Validation", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetValidationRejected(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.Invalid, StaticFileFailureReason.InvalidRequestPath);
         }
         catch (NotSupportedException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Validation", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetValidationRejected(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.Forbidden, StaticFileFailureReason.AccessDenied);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.CreateFileStreamResult.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticOpenTargetFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticTargetDefinition.CreateFileStreamResult",
+                    occurrences);
+            }
+
             return CreateOpenFailure(StaticFileOpenKind.Forbidden, StaticFileFailureReason.TargetChanged);
         }
         finally

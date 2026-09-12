@@ -1,10 +1,14 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Win32.SafeHandles;
 
 namespace Nekolla.Nekostick.Proxy;
 
 internal interface IStaticFileOperation
 {
-    StaticFileOperationResult OpenReadOnly(string canonicalRootPath, string canonicalTargetPath);
+    StaticFileOperationResult OpenReadOnly(
+        string canonicalRootPath,
+        string canonicalTargetPath,
+        ILogger? logger = null);
 }
 
 internal enum StaticFileOperationStatus

@@ -52,7 +52,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
             await using var db = await _dbContextFactory!
                 .CreateDbContextAsync(cancellationToken)
                 .ConfigureAwait(false);
-            return await ApplyToStoreAsync(new EfPortLeaseStore(db), intent, cancellationToken).ConfigureAwait(false);
+            return await ApplyToStoreAsync(new EfPortLeaseStore(db, logger: _logger), intent, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -91,6 +91,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
     {
         if (!_runtimeState.NewLeasesAllowed)
         {
+            HostLogMessages.PortLeaseNewLeasesRejected(_logger, request.ServiceId, request.Port);
             return new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable);
         }
 
@@ -104,6 +105,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
                 request.AutomaticPortRangeStart,
                 request.AutomaticPortRangeEnd),
             cancellationToken).ConfigureAwait(false);
+        HostLogMessages.PortLeaseOperationResult(_logger, result.Status, request.ServiceId, request.Port);
         return Map(result);
     }
 
@@ -114,6 +116,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
     {
         if (!_runtimeState.NewLeasesAllowed)
         {
+            HostLogMessages.PortLeaseNewLeasesRejected(_logger, request.ServiceId, request.Port);
             return new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable);
         }
 
@@ -125,6 +128,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
                 request.LeaseVersion,
                 request.TimeToLive),
             cancellationToken).ConfigureAwait(false);
+        HostLogMessages.PortLeaseOperationResult(_logger, result.Status, request.ServiceId, request.Port);
         return Map(result);
     }
 
@@ -140,6 +144,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
                 request.Port,
                 request.LeaseVersion),
             cancellationToken).ConfigureAwait(false);
+        HostLogMessages.PortLeaseOperationResult(_logger, result.Status, request.ServiceId, request.Port);
         return Map(result);
     }
 

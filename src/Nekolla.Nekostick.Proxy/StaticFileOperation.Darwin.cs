@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -18,11 +20,11 @@ internal sealed class DarwinStaticFileOperation : IStaticFileOperation
         _abi = abi;
     }
 
-    internal static IStaticFileOperation Create()
+    internal static IStaticFileOperation Create(ILogger? logger = null)
     {
         if (IntPtr.Size != 8
             || RuntimeInformation.ProcessArchitecture is not (Architecture.X64 or Architecture.Arm64)
-            || !DarwinStaticFileNative.IsVerifiedLibSystem())
+            || !DarwinStaticFileNative.IsVerifiedLibSystem(logger))
         {
             return new UnsupportedStaticFileOperation();
         }
@@ -35,7 +37,10 @@ internal sealed class DarwinStaticFileOperation : IStaticFileOperation
             : new UnsupportedStaticFileOperation();
     }
 
-    public StaticFileOperationResult OpenReadOnly(string canonicalRootPath, string canonicalTargetPath) =>
+    public StaticFileOperationResult OpenReadOnly(
+        string canonicalRootPath,
+        string canonicalTargetPath,
+        ILogger? logger = null) =>
         StaticFileOperationCore.OpenVerified(
             canonicalRootPath,
             canonicalTargetPath,
@@ -49,30 +54,40 @@ internal sealed class DarwinStaticFileOperation : IStaticFileOperation
             DarwinStaticFileNative.OpenAt,
             DarwinStaticFileNative.FStat,
             DarwinStaticFileNative.FStatAt,
-            DarwinStaticFileNative.Close);
+            DarwinStaticFileNative.Close,
+            logger);
 }
 
 internal static partial class DarwinStaticFileNative
 {
-    internal static bool IsVerifiedLibSystem()
+    internal static bool IsVerifiedLibSystem(ILogger? logger = null)
     {
         nint library = IntPtr.Zero;
         try
         {
             if (!NativeLibrary.TryLoad("libSystem.B.dylib", out library)
-                || !HasExport(library, "open")
-                || !HasExport(library, "openat")
-                || !HasExport(library, "fstat")
-                || !HasExport(library, "fstatat")
-                || !HasExport(library, "close"))
+                || !HasExport(library, "open", logger)
+                || !HasExport(library, "openat", logger)
+                || !HasExport(library, "fstat", logger)
+                || !HasExport(library, "fstatat", logger)
+                || !HasExport(library, "close", logger))
             {
                 return false;
             }
 
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("DarwinStaticFileNative.IsVerifiedLibSystem", out var occurrences))
+            {
+                ProxyLogMessages.NativeLibraryVerificationFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "Darwin",
+                    occurrences);
+            }
+
             return false;
         }
         finally
@@ -83,21 +98,35 @@ internal static partial class DarwinStaticFileNative
                 {
                     NativeLibrary.Free(library);
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
+                    ProxyLogMessages.NativeLibraryReleaseFailed(
+                        logger ?? NullLogger.Instance,
+                        exception,
+                        "Darwin");
                 }
             }
         }
     }
 
-    private static bool HasExport(nint library, string name)
+    private static bool HasExport(nint library, string name, ILogger? logger = null)
     {
         try
         {
             return NativeLibrary.GetExport(library, name) != IntPtr.Zero;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (ProxyLogThrottle.TryAcquire("DarwinStaticFileNative.HasExport", out var occurrences))
+            {
+                ProxyLogMessages.NativeExportLookupFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "Darwin",
+                    name,
+                    occurrences);
+            }
+
             return false;
         }
     }

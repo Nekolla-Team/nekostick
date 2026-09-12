@@ -1,5 +1,7 @@
 using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Nekolla.Nekostick.Contracts;
 
@@ -11,10 +13,12 @@ internal sealed class EfHostConfigRevisionHelper
     private const string ConfigurationChangedChannel = "nekostick_config_changed";
     internal const string Committer = "host-config-api";
     private readonly NekostickDbContext _dbContext;
+    private readonly ILogger _logger;
 
-    internal EfHostConfigRevisionHelper(NekostickDbContext dbContext)
+    internal EfHostConfigRevisionHelper(NekostickDbContext dbContext, ILogger? logger = null)
     {
         _dbContext = dbContext;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     internal async Task PublishConfigurationChangedAsync(long version)
@@ -41,9 +45,13 @@ internal sealed class EfHostConfigRevisionHelper
             command.Parameters.Add(payload);
             await command.ExecuteNonQueryAsync(CancellationToken.None);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            // Polling the singleton revision is the durable notification fallback.
+            PersistenceLogMessages.ConfigurationNotificationFailed(
+                _logger,
+                exception,
+                "PublishConfigurationChanged",
+                version);
         }
     }
 

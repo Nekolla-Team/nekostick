@@ -56,7 +56,8 @@ public sealed partial class ExtensionRuntimeManager
                 ResolveContractProvider,
                 _capabilityFactory,
                 routeIds,
-                _dataDirectory);
+                _dataDirectory,
+                _logger);
             instance.SetFailureCallback(exception =>
                 RecordFailureAsync(instance, ExtensionFailureCode.CallbackFailed, exception));
             instance.SetLifecycleCallbacks(
@@ -123,10 +124,27 @@ public sealed partial class ExtensionRuntimeManager
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            if (_logger is { } cancelledLogger)
+            {
+                ExtensionLogMessages.ExtensionLifecycleOperationCancelled(
+                    cancelledLogger,
+                    instance.Manifest.Id,
+                    nameof(RequestReloadAsync));
+            }
+
             return new(false, ExtensionLifecycleOperationCode.Cancelled, instance.GetLifecycleStatus());
         }
-        catch
+        catch (Exception exception)
         {
+            if (_logger is { } failedLogger)
+            {
+                ExtensionLogMessages.ExtensionLifecycleOperationFailed(
+                    failedLogger,
+                    exception,
+                    instance.Manifest.Id,
+                    nameof(RequestReloadAsync));
+            }
+
             return new(false, ExtensionLifecycleOperationCode.Failed, instance.GetLifecycleStatus());
         }
     }
@@ -147,10 +165,27 @@ public sealed partial class ExtensionRuntimeManager
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            if (_logger is { } cancelledLogger)
+            {
+                ExtensionLogMessages.ExtensionLifecycleOperationCancelled(
+                    cancelledLogger,
+                    instance.Manifest.Id,
+                    nameof(RequestUnloadAsync));
+            }
+
             return new(false, ExtensionLifecycleOperationCode.Cancelled, instance.GetLifecycleStatus());
         }
-        catch
+        catch (Exception exception)
         {
+            if (_logger is { } failedLogger)
+            {
+                ExtensionLogMessages.ExtensionLifecycleOperationFailed(
+                    failedLogger,
+                    exception,
+                    instance.Manifest.Id,
+                    nameof(RequestUnloadAsync));
+            }
+
             return new(false, ExtensionLifecycleOperationCode.Failed, instance.GetLifecycleStatus());
         }
     }
@@ -383,9 +418,17 @@ public sealed partial class ExtensionRuntimeManager
                     payloadJson));
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             // Lifecycle publication is best effort and must not alter extension transitions.
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionLifecyclePublicationFailed(
+                    logger,
+                    exception,
+                    instance.Manifest.Id,
+                    nameof(PublishExtensionState));
+            }
         }
     }
 

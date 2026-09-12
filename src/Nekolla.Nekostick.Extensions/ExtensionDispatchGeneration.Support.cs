@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -7,8 +9,13 @@ namespace Nekolla.Nekostick.Extensions;
 public sealed class ExtensionDispatchLease : IDisposable, IAsyncDisposable
 {
     private ExtensionDispatchGeneration? _generation;
+    private readonly ILogger? _logger;
 
-    internal ExtensionDispatchLease(ExtensionDispatchGeneration generation) => _generation = generation;
+    internal ExtensionDispatchLease(ExtensionDispatchGeneration generation, ILogger? logger = null)
+    {
+        _generation = generation;
+        _logger = logger;
+    }
 
     /// <summary>Releases the Host lease.</summary>
     public void Dispose() => Interlocked.Exchange(ref _generation, null)?.ReleaseLease();
@@ -45,8 +52,16 @@ public sealed class ExtensionDispatchLease : IDisposable, IAsyncDisposable
             {
                 request?.BodyStream.Dispose();
             }
-            catch
+            catch (Exception exception)
             {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionStreamingBodyDisposeFailed(
+                        logger,
+                        exception,
+                        handlerId ?? string.Empty,
+                        nameof(HandleStreamingAsync));
+                }
             }
 
             return ExtensionStreamingInvocationResult.Unavailable;
@@ -174,6 +189,7 @@ internal sealed class ExtensionDispatchBinding
 internal sealed class ExtensionDispatchContext
 {
     private readonly object _gate = new();
+    private readonly ILogger _logger;
     internal ExtensionInstance Instance { get; }
     internal ExtensionSettingsConfiguration? Settings { get; }
     internal ExtensionRouteRegistrationSet? RouteRegistrations { get; }
@@ -184,12 +200,14 @@ internal sealed class ExtensionDispatchContext
         ExtensionInstance instance,
         ExtensionSettingsConfiguration? settings,
         ExtensionRouteRegistrationSet? routeRegistrations = null,
-        string? contentHash = null)
+        string? contentHash = null,
+        ILogger? logger = null)
     {
         Instance = instance;
         Settings = settings;
         RouteRegistrations = routeRegistrations;
         ContentHash = contentHash;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>Gets the content digest recorded when this binding was candidated.</summary>
@@ -217,7 +235,7 @@ internal sealed class ExtensionDispatchContext
         }
     }
 
-    internal async ValueTask ReleaseGenerationAsync()
+    internal async ValueTask ReleaseGenerationAsync(long? generationId = null)
     {
         var release = false;
         lock (_gate)
@@ -239,6 +257,12 @@ internal sealed class ExtensionDispatchContext
             await Instance.StopForReplacementAsync(ExtensionRuntimeManager.LifecycleTimeout)
                 .ConfigureAwait(false);
             await Instance.ReleaseAsync().ConfigureAwait(false);
+            var releasedVersion = Instance.Manifest.Version.ToString();
+            ExtensionLogMessages.ExtensionGenerationContextReleased(
+                _logger,
+                Instance.Manifest.Id,
+                releasedVersion,
+                generationId);
         }
     }
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 
@@ -13,21 +14,24 @@ internal static class HostCoreEventPublisher
     internal static void Publish(
         ExtensionRuntimeManager? runtimeManager,
         ExtensionCoreEventKind kind,
-        object payload) =>
-        PublishCoreEvent(runtimeManager, kind, payload, targetExtensionId: null);
+        object payload,
+        ILogger? logger = null) =>
+        PublishCoreEvent(runtimeManager, kind, payload, targetExtensionId: null, logger: logger);
 
     internal static void Publish(
         ExtensionRuntimeManager? runtimeManager,
         ExtensionCoreEventKind kind,
         object payload,
-        string targetExtensionId) =>
-        PublishCoreEvent(runtimeManager, kind, payload, targetExtensionId);
+        string targetExtensionId,
+        ILogger? logger = null) =>
+        PublishCoreEvent(runtimeManager, kind, payload, targetExtensionId, logger);
 
     private static void PublishCoreEvent(
         ExtensionRuntimeManager? runtimeManager,
         ExtensionCoreEventKind kind,
         object payload,
-        string? targetExtensionId)
+        string? targetExtensionId,
+        ILogger? logger)
     {
         if (runtimeManager is null || payload is null)
         {
@@ -52,8 +56,12 @@ internal static class HostCoreEventPublisher
                 runtimeManager.PublishCoreEvent(@event, targetExtensionId);
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.CoreEventDeliveryFailed(
+                logger ?? HostLoggerDefaults.Logger,
+                exception,
+                kind);
             // Core-event delivery is best effort and must never change the Host transition outcome.
         }
     }

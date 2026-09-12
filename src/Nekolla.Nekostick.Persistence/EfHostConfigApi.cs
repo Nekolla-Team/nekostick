@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Persistence.Entities;
 
@@ -11,6 +13,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
 {
     private readonly NekostickDbContext _dbContext;
     private readonly TimeProvider _timeProvider;
+    private readonly ILogger _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly EfHostConfigEntityOperations _entityOperations;
     private readonly EfHostConfigRevisionHelper _revisionHelper;
@@ -25,12 +28,14 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
     /// <summary>Creates the EF-backed host configuration API.</summary>
     /// <param name="dbContext">The scoped PostgreSQL context owned by the host.</param>
     /// <param name="timeProvider">The clock used for persisted timestamps.</param>
-    public EfHostConfigApi(NekostickDbContext dbContext, TimeProvider? timeProvider = null)
+    /// <param name="logger">The optional persistence logger.</param>
+    public EfHostConfigApi(NekostickDbContext dbContext, TimeProvider? timeProvider = null, ILogger? logger = null)
     {
         _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _logger = logger ?? NullLogger.Instance;
         _entityOperations = new EfHostConfigEntityOperations(_dbContext);
-        _revisionHelper = new EfHostConfigRevisionHelper(_dbContext);
+        _revisionHelper = new EfHostConfigRevisionHelper(_dbContext, _logger);
     }
 
     /// <inheritdoc />
@@ -96,7 +101,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 services,
                 extensionRecords,
                 extensionSettings);
-            if (!HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot))
+            if (!HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger))
             {
                 return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.Validation));
@@ -106,25 +111,30 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "ReadSnapshot", "global");
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "ReadSnapshot", "global");
             return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.Validation));
         }
         catch (ArgumentException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "ReadSnapshot", "global");
             return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.Validation));
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "ReadSnapshot", "global");
             return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "ReadSnapshot", "global");
             return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
         }
@@ -148,7 +158,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 return EfHostConfigRevisionHelper.ValidationWriteFailure();
             }
 
-            if (!HostConfigurationSemanticValidator.TryValidateChangeSet(changes))
+            if (!HostConfigurationSemanticValidator.TryValidateChangeSet(changes, _logger))
             {
                 return EfHostConfigRevisionHelper.ValidationWriteFailure();
             }
@@ -254,34 +264,42 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "WriteSnapshot", "global");
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "WriteSnapshot", "global");
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
         finally
@@ -328,7 +346,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             if (initialState is not (ExtensionLoadState.Loaded or ExtensionLoadState.Disabled) ||
                 expectedVersion < 0 || records.IsDefaultOrEmpty ||
                 records.Any(record => record is null || record.LoadState != initialState) ||
-                !HostConfigurationSemanticValidator.TryValidateExtensionRecords(records))
+                !HostConfigurationSemanticValidator.TryValidateExtensionRecords(records, _logger))
             {
                 return EfHostConfigRevisionHelper.ValidationWriteFailure();
             }
@@ -423,34 +441,42 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "PersistDiscoveredExtensionRecords", "global");
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "PersistDiscoveredExtensionRecords", "global");
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
         finally
@@ -530,34 +556,42 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "SetExtensionLoadState", extensionId);
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "SetExtensionLoadState", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
         finally
@@ -632,34 +666,42 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "UpdateExtensionInstalledVersion", extensionId);
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "UpdateExtensionInstalledVersion", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
         finally
@@ -764,34 +806,42 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "DeleteExtensionRecordCascade", extensionId);
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "DeleteExtensionRecordCascade", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
         finally
@@ -915,7 +965,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 setting.setting.SchemaVersion,
                 HostConfigurationSemanticValidator.NormalizeJson(setting.setting.SettingsJson, null),
                 setting.setting.Version);
-            if (!HostConfigurationSemanticValidator.TryValidateExtensionSettings(result))
+            if (!HostConfigurationSemanticValidator.TryValidateExtensionSettings(result, _logger))
             {
                 return ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.Validation));
@@ -924,25 +974,30 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "ReadExtensionSettings", extensionId);
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "ReadExtensionSettings", extensionId);
             return ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.Validation));
         }
         catch (ArgumentException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "ReadExtensionSettings", extensionId);
             return ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.Validation));
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "ReadExtensionSettings", extensionId);
             return ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "ReadExtensionSettings", extensionId);
             return ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
                 new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
         }
@@ -968,7 +1023,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 return EfHostConfigRevisionHelper.ValidationWriteFailure();
             }
 
-            if (!HostConfigurationSemanticValidator.TryValidateExtensionSettings(settings))
+            if (!HostConfigurationSemanticValidator.TryValidateExtensionSettings(settings, _logger))
             {
                 return EfHostConfigRevisionHelper.ValidationWriteFailure();
             }
@@ -1061,34 +1116,42 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "WriteExtensionSettings", extensionId);
             throw;
         }
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException exception)
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
+            PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.ConflictWriteFailure();
         }
         catch (InvalidOperationException)
         {
+            PersistenceLogMessages.ValidationRejected(_logger, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.ValidationWriteFailure();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            PersistenceLogMessages.OperationFailed(_logger, exception, "WriteExtensionSettings", extensionId);
             return EfHostConfigRevisionHelper.StorageWriteFailure();
         }
         finally

@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Persistence;
 
 namespace Nekolla.Nekostick.Host;
@@ -10,19 +12,24 @@ public sealed class HostServiceEndpointPublicationService : BackgroundService
     private readonly IDbContextFactory<NekostickDbContext> _dbContextFactory;
     private readonly IHostServiceEndpointAuthority _authority;
     private readonly HostRuntimeOptions _options;
+    private readonly ILogger _logger;
+    private readonly HostLogThrottle _publicationThrottle = new();
 
     /// <summary>Creates the endpoint publication background service.</summary>
     /// <param name="dbContextFactory">The factory for persistence contexts.</param>
     /// <param name="authority">The lifecycle-authoritative endpoint publisher.</param>
     /// <param name="options">The host runtime options containing the node identity.</param>
+    /// <param name="logger">The optional host logger for endpoint publication diagnostics.</param>
     public HostServiceEndpointPublicationService(
         IDbContextFactory<NekostickDbContext> dbContextFactory,
         IHostServiceEndpointAuthority authority,
-        HostRuntimeOptions options)
+        HostRuntimeOptions options,
+        ILogger? logger = null)
     {
         _dbContextFactory = dbContextFactory ?? throw new ArgumentNullException(nameof(dbContextFactory));
         _authority = authority ?? throw new ArgumentNullException(nameof(authority));
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>Publishes endpoint leases initially and at a fixed interval until cancellation.</summary>
@@ -60,9 +67,13 @@ public sealed class HostServiceEndpointPublicationService : BackgroundService
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
             // Keep the lifecycle-authoritative snapshot unchanged while the database is unavailable.
+            if (_publicationThrottle.TryAcquire("endpoint-publication", out var occurrences))
+            {
+                HostLogMessages.EndpointPublicationFailed(_logger, exception, _options.NodeId, occurrences);
+            }
         }
     }
 }

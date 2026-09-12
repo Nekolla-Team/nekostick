@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -175,6 +176,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
     private readonly ExtensionDispatchBinding? _fallback;
     private readonly ImmutableArray<ExtensionDispatchContext> _contexts;
     private readonly ImmutableArray<ExtensionGenerationBindingStatus> _bindings;
+    private readonly ILogger? _logger;
+    private readonly ExtensionLogThrottle _requestLogThrottle = new();
     private TaskCompletionSource<bool> _leasesDrained =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _releaseTask;
@@ -189,7 +192,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         IEnumerable<ExtensionDispatchContext> contexts,
         ImmutableArray<ExtensionGenerationBindingStatus> bindings,
         object owner,
-        ImmutableDictionary<string, ImmutableArray<Guid>>? routeIdsByExtension = null)
+        ImmutableDictionary<string, ImmutableArray<Guid>>? routeIdsByExtension = null,
+        ILogger? logger = null)
     {
         GenerationId = generationId;
         _handlers = handlers;
@@ -197,6 +201,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         _contexts = contexts.Distinct().ToImmutableArray();
         _bindings = bindings;
         Owner = owner;
+        _logger = logger;
         RouteIdsByExtension = routeIdsByExtension ?? ImmutableDictionary<string, ImmutableArray<Guid>>.Empty;
         InitializeRouteDispatch();
         if (_activeLeases == 0)
@@ -232,7 +237,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             }
 
             _activeLeases++;
-            return new ExtensionDispatchLease(this);
+            return new ExtensionDispatchLease(this, _logger);
         }
     }
 
@@ -287,8 +292,16 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             {
                 request?.BodyStream.Dispose();
             }
-            catch
+            catch (Exception exception)
             {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionStreamingBodyDisposeFailed(
+                        logger,
+                        exception,
+                        string.Empty,
+                        nameof(HandleStreamingAsync));
+                }
             }
 
             return ExtensionStreamingInvocationResult.Unavailable;
@@ -334,12 +347,31 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionHandlerInvocationCancelled(
+                    logger,
+                    binding.Context.Instance.Manifest.Id,
+                    nameof(HandleWithLeaseAsync));
+            }
+
             return ExtensionInvocationResult.Failed;
         }
         catch (Exception exception)
         {
             await binding.Context.RecordFailureAsync(ExtensionFailureCode.HandlerFailed, exception)
                 .ConfigureAwait(false);
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"handler:{binding.Context.Instance.Manifest.Id}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionHandlerInvocationFailed(
+                    logger,
+                    exception,
+                    binding.Context.Instance.Manifest.Id,
+                    nameof(HandleWithLeaseAsync),
+                    occurrences);
+            }
+
             return ExtensionInvocationResult.Failed;
         }
         finally
@@ -374,22 +406,60 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     response = await handler.HandleStreamingAsync(request, cancellationToken)
                         .ConfigureAwait(false);
                 }
-                catch (ExtensionRequestBodyLimitExceededException)
+                catch (ExtensionRequestBodyLimitExceededException exception)
                 {
+                    if (_logger is { } logger &&
+                        _requestLogThrottle.TryAcquire($"streaming:{binding.Context.Instance.Manifest.Id}", out var occurrences))
+                    {
+                        ExtensionLogMessages.ExtensionStreamingRequestRejected(
+                            logger,
+                            exception,
+                            binding.Context.Instance.Manifest.Id,
+                            nameof(HandleStreamingWithLeaseAsync),
+                            occurrences);
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
                 catch (ExtensionRequestReadTimeoutException)
                 {
+                    if (_logger is { } logger)
+                    {
+                        ExtensionLogMessages.ExtensionStreamingReadTimedOut(
+                            logger,
+                            binding.Context.Instance.Manifest.Id,
+                            nameof(HandleStreamingWithLeaseAsync));
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
                 catch (OperationCanceledException)
                 {
+                    if (_logger is { } logger)
+                    {
+                        ExtensionLogMessages.ExtensionStreamingRequestCancelled(
+                            logger,
+                            binding.Context.Instance.Manifest.Id,
+                            nameof(HandleStreamingWithLeaseAsync));
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
                 catch (Exception exception)
                 {
                     await binding.Context.RecordFailureAsync(ExtensionFailureCode.HandlerFailed, exception)
                         .ConfigureAwait(false);
+                    if (_logger is { } logger &&
+                        _requestLogThrottle.TryAcquire($"streaming:{binding.Context.Instance.Manifest.Id}", out var occurrences))
+                    {
+                        ExtensionLogMessages.ExtensionStreamingRequestRejected(
+                            logger,
+                            exception,
+                            binding.Context.Instance.Manifest.Id,
+                            nameof(HandleStreamingWithLeaseAsync),
+                            occurrences);
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
             }
@@ -408,8 +478,16 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             {
                 request.BodyStream.Dispose();
             }
-            catch
+            catch (Exception exception)
             {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionStreamingBodyDisposeFailed(
+                        logger,
+                        exception,
+                        binding.Context.Instance.Manifest.Id,
+                        nameof(HandleStreamingWithLeaseAsync));
+                }
             }
 
             if (!holdRequestLease)
@@ -452,6 +530,17 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         {
             await fallbackBinding.Context.RecordFailureAsync(ExtensionFailureCode.CallbackFailed, exception)
                 .ConfigureAwait(false);
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"fallback:{fallbackBinding.Context.Instance.Manifest.Id}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionFallbackInvocationFailed(
+                    logger,
+                    exception,
+                    fallbackBinding.Context.Instance.Manifest.Id,
+                    nameof(HandleFallbackWithLeaseAsync),
+                    occurrences);
+            }
+
             return ExtensionInvocationResult.Failed;
         }
         finally
@@ -505,6 +594,11 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionGenerationRetireTimedOut(logger, nameof(RetireAsync));
+            }
+
             _ = GetOrCreateReleaseTask(leasesDrained);
             return false;
         }
@@ -556,7 +650,20 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
 
         foreach (var context in contexts)
         {
-            await context.ReleaseGenerationAsync().ConfigureAwait(false);
+            try
+            {
+                await context.ReleaseGenerationAsync(GenerationId).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionGenerationReleaseFailed(
+                        logger,
+                        exception,
+                        nameof(ReleaseGenerationAfterDrainAsync));
+                }
+            }
         }
 
         DisposeRouteDispatch();

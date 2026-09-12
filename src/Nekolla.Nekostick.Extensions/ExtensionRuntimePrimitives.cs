@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -364,12 +365,14 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
     private readonly HashSet<Task> _tasks = new();
     private readonly CancellationTokenSource _stop = new();
     private readonly Func<Exception, ValueTask> _onFailure;
+    private readonly ILogger? _logger;
     private bool _stopped;
     private bool _disposed;
 
-    internal ExtensionTaskTracker(Func<Exception, ValueTask> onFailure)
+    internal ExtensionTaskTracker(Func<Exception, ValueTask> onFailure, ILogger? logger = null)
     {
         _onFailure = onFailure;
+        _logger = logger;
     }
 
     internal int Count
@@ -443,8 +446,15 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
         {
             await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(timeout)).ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionTaskStopTimedOut(
+                    logger,
+                    exception,
+                    nameof(StopAsync));
+            }
         }
 
         DisposeStopSourceIfIdle();
@@ -487,15 +497,36 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
         {
+            if (_logger is { } cancelledLogger)
+            {
+                ExtensionLogMessages.ExtensionEventSubscriberCancelled(
+                    cancelledLogger,
+                    nameof(RunTrackedAsync));
+            }
         }
         catch (Exception exception)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionFailureCallbackFailed(
+                    logger,
+                    exception,
+                    nameof(RunTrackedAsync));
+            }
+
             try
             {
                 await _onFailure(exception).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception failureException)
             {
+                if (_logger is { } failureLogger)
+                {
+                    ExtensionLogMessages.ExtensionFailureCallbackFailed(
+                        failureLogger,
+                        failureException,
+                        nameof(RunTrackedAsync));
+                }
             }
         }
     }

@@ -97,6 +97,7 @@ internal readonly struct MicroserviceCancellationInputs
 internal sealed class MicroserviceCancellationScope : IDisposable
 {
     private readonly MicroserviceCancellationCauseTracker _causeTracker;
+    private readonly ILogger _logger;
     private readonly CancellationTokenSource? _ownedTotal;
     private readonly Timer? _ownedTotalTimer;
     private readonly CancellationTokenSource _linkedCancellation;
@@ -106,8 +107,10 @@ internal sealed class MicroserviceCancellationScope : IDisposable
     internal MicroserviceCancellationScope(
         MicroserviceCancellationInputs inputs,
         TimeSpan httpTotalTimeout,
-        bool isWebSocket)
+        bool isWebSocket,
+        ILogger? logger = null)
     {
+        _logger = logger ?? NullLogger.Instance;
         var callerCancellation = inputs.CallerCancellation;
         var requestAborted = inputs.RequestAborted;
         _causeTracker = new MicroserviceCancellationCauseTracker();
@@ -125,7 +128,7 @@ internal sealed class MicroserviceCancellationScope : IDisposable
             ? null
             : new Timer(
                 static state => ((OwnedTotalTimeoutState)state!).Fire(),
-                new OwnedTotalTimeoutState(_causeTracker, _ownedTotal),
+                new OwnedTotalTimeoutState(_causeTracker, _ownedTotal, _logger),
                 httpTotalTimeout,
                 Timeout.InfiniteTimeSpan);
         _linkedCancellation = _ownedTotal is null
@@ -158,13 +161,16 @@ internal sealed class MicroserviceCancellationScope : IDisposable
     {
         private readonly MicroserviceCancellationCauseTracker _causeTracker;
         private readonly CancellationTokenSource _ownedTotal;
+        private readonly ILogger _logger;
 
         internal OwnedTotalTimeoutState(
             MicroserviceCancellationCauseTracker causeTracker,
-            CancellationTokenSource ownedTotal)
+            CancellationTokenSource ownedTotal,
+            ILogger logger)
         {
             _causeTracker = causeTracker;
             _ownedTotal = ownedTotal;
+            _logger = logger;
         }
 
         internal void Fire()
@@ -174,12 +180,17 @@ internal sealed class MicroserviceCancellationScope : IDisposable
             {
                 _ownedTotal.Cancel();
             }
-            catch (ObjectDisposedException)
+            catch (ObjectDisposedException exception)
             {
+                ProxyLogMessages.CancellationDisposedRace(
+                    _logger,
+                    exception,
+                    "MicroserviceCancellationScope.OwnedTotal");
             }
         }
     }
 }
+
 
 /// <summary>Executes one safe microservice request through YARP's forwarder.</summary>
 public sealed partial class MicroserviceHttpExecutor
@@ -238,7 +249,8 @@ public sealed partial class MicroserviceHttpExecutor
                 RequestAborted = httpContext.RequestAborted
             },
             timeoutPolicy.HttpTotalTimeout,
-            isWebSocket);
+            isWebSocket,
+            _logger);
         var operationToken = cancellationScope.OperationToken;
         MicroserviceEndpointResolution? resolution;
         try

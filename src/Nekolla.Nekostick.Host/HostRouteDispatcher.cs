@@ -185,7 +185,7 @@ internal sealed partial class HostRouteDispatcher
                     HostRequestPathAdapter.GetPath(context),
                     GetHostValue(context),
                     context.Request.Method);
-                result = snapshot.Matcher.Match(input);
+                result = snapshot.Matcher.Match(input, logger: _logger);
             }
             catch (Exception exception)
             {

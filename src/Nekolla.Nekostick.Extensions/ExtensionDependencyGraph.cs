@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -9,11 +10,13 @@ public static class ExtensionManifestGraph
     /// <param name="manifests">The manifests already discovered by the caller.</param>
     /// <param name="hostApiVersion">The host API version used for compatibility checks.</param>
     /// <param name="contractCatalog">The immutable host-owned shared contract catalog.</param>
+    /// <param name="logger">The optional host logger for validation diagnostics.</param>
     /// <returns>A graph result whose layers are ordinal ID sorted.</returns>
     public static ExtensionGraphResult ValidateAndOrder(
         IEnumerable<ExtensionManifest>? manifests,
         SemVersion hostApiVersion,
-        ExtensionContractCatalog? contractCatalog = null)
+        ExtensionContractCatalog? contractCatalog = null,
+        ILogger? logger = null)
     {
         if (manifests is null)
         {
@@ -25,8 +28,16 @@ public static class ExtensionManifestGraph
         {
             items = manifests.ToImmutableArray();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (logger is { } diagnosticLogger)
+            {
+                ExtensionLogMessages.ExtensionDependencyGraphFailed(
+                    diagnosticLogger,
+                    exception,
+                    nameof(ValidateAndOrder));
+            }
+
             return ExtensionGraphResult.Failure(ExtensionFailureCode.InvalidArgument);
         }
 

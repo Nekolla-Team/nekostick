@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -79,7 +81,8 @@ internal static class StaticFileIdentityReader
     internal static bool TryRead(
         IntPtr statBuffer,
         StaticFileOperationAbiDescriptor abi,
-        out StaticFileMetadata metadata)
+        out StaticFileMetadata metadata,
+        ILogger? logger = null)
     {
         metadata = default;
         try
@@ -113,9 +116,18 @@ internal static class StaticFileIdentityReader
                 modificationNanoseconds);
             return true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             metadata = default;
+            if (ProxyLogThrottle.TryAcquire("StaticFileIdentityReader.TryRead", out var occurrences))
+            {
+                ProxyLogMessages.StaticFileIdentityReadFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticFileIdentityReader.TryRead",
+                    occurrences);
+            }
+
             return false;
         }
     }

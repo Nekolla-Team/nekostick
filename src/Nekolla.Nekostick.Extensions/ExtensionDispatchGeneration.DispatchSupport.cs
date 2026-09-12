@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
+using Microsoft.Extensions.Logging;
  
 
 namespace Nekolla.Nekostick.Extensions;
@@ -237,8 +238,18 @@ public sealed partial class ExtensionDispatchGeneration
         {
             extensionEvent = observation.ToExtensionEvent();
         }
-        catch
+        catch (Exception exception)
         {
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"route-event:{GenerationId}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionRouteEventPublicationFailed(
+                    logger,
+                    exception,
+                    nameof(PublishRouteEvent),
+                    occurrences);
+            }
+
             return 0;
         }
 
@@ -388,6 +399,10 @@ public sealed partial class ExtensionDispatchGeneration
         }
         catch (ObjectDisposedException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionRouteDispatchCancelSkipped(logger, nameof(CancelRouteDispatch));
+            }
         }
     }
 
@@ -415,8 +430,19 @@ public sealed partial class ExtensionDispatchGeneration
                 return await registration.Callback(context, linked.Token).ConfigureAwait(false);
             });
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"hook-start:{GenerationId}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionRouteHookFailed(
+                    logger,
+                    exception,
+                    registration.Stage.ToString(),
+                    nameof(InvokeRouteHookAsync),
+                    occurrences);
+            }
+
             return ExtensionRouteHookResult.FailClosed;
         }
 
@@ -432,10 +458,21 @@ public sealed partial class ExtensionDispatchGeneration
 
             return await callbackTask.ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             linked.Cancel();
             ObserveLateHook(callbackTask);
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"hook-run:{GenerationId}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionRouteHookFailed(
+                    logger,
+                    exception,
+                    registration.Stage.ToString(),
+                    nameof(InvokeRouteHookAsync),
+                    occurrences);
+            }
+
             return ExtensionRouteHookResult.FailClosed;
         }
     }

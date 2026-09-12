@@ -118,13 +118,18 @@ public sealed partial class ServiceSupervisor
         {
             return liveness.IsRunning(launchSpecification.ServiceId, active.Id);
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.ProcessLivenessFailed(
+                _logger,
+                exception,
+                launchSpecification.ServiceId,
+                active.Id.ToString());
             return false;
         }
     }
 
-    private static DateTimeOffset? NormalizeStartedAt(DateTimeOffset? startedAt)
+    private DateTimeOffset? NormalizeStartedAt(DateTimeOffset? startedAt)
     {
         if (startedAt is not { } value)
         {
@@ -137,8 +142,12 @@ public sealed partial class ServiceSupervisor
             var now = DateTimeOffset.UtcNow;
             return utc > now ? now : utc;
         }
-        catch
+        catch (Exception exception)
         {
+            SupervisionLogMessages.ProcessTimestampNormalizationFailed(
+                _logger,
+                exception,
+                launchSpecification.ServiceId);
             return null;
         }
     }
@@ -266,9 +275,14 @@ public sealed partial class ServiceSupervisor
             var release = new PortLeaseRelease(current.NodeId, current.ServiceId, current.Port, current.Version);
             _ = await leaseStore.ApplyAsync(PortLeaseIntent.ReleaseLease(release), cancellationToken).ConfigureAwait(false);
         }
-        catch
+        catch (Exception exception)
         {
-            // The lease is removed from publication; persistence will expire it safely.
+            SupervisionLogMessages.LeaseReleaseFailed(
+                _logger,
+                exception,
+                current.NodeId.ToString(),
+                current.ServiceId,
+                current.Port);
         }
     }
 

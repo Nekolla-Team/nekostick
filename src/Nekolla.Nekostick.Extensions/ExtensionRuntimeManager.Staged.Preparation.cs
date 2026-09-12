@@ -99,7 +99,8 @@ public sealed partial class ExtensionRuntimeManager
             var graph = ExtensionManifestGraph.ValidateAndOrder(
                 graphManifests,
                 new SemVersion(_hostApiVersion.Major, _hostApiVersion.Minor, _hostApiVersion.Patch),
-                _contractCatalog);
+                _contractCatalog,
+                _logger);
             if (!graph.Succeeded)
             {
                 return ExtensionGenerationPreparationResult.Failure(graph.FailureCode);
@@ -205,7 +206,8 @@ public sealed partial class ExtensionRuntimeManager
                             started,
                             descriptor.Settings,
                             started.RouteRegistrations,
-                            descriptor.ContentHash);
+                            descriptor.ContentHash,
+                            _logger);
                         candidateContexts.Add(context);
                     }
                     else
@@ -333,7 +335,8 @@ public sealed partial class ExtensionRuntimeManager
                 contexts,
                 statuses.ToImmutableArray(),
                 this,
-                routeIdsByExtension);
+                routeIdsByExtension,
+                _logger);
             var handoffPrevious = changedPrevious
                 .Where(previousContext => candidateById.ContainsKey(previousContext.Manifest.Id))
                 .ToImmutableArray();
@@ -349,17 +352,60 @@ public sealed partial class ExtensionRuntimeManager
             {
                 _activePreparation = preparation;
             }
+            if (_logger is { } preparationLogger)
+            {
+                var retainedCount = statuses.Count(static status => status.Reused);
+                if (retainedCount > 0)
+                {
+                    var retainedList = string.Join(", ", statuses
+                        .Where(static status => status.Reused)
+                        .Select(static status => $"{status.ExtensionId}@{status.Version}")
+                        .OrderBy(static value => value, StringComparer.Ordinal));
+                    ExtensionLogMessages.ExtensionGenerationContextsRetained(
+                        preparationLogger,
+                        true,
+                        retainedCount,
+                        retainedList);
+                }
+
+                if (candidates.Count > 0)
+                {
+                    var startedList = string.Join(", ", candidates
+                        .Select(static candidate => $"{candidate.Manifest.Id}@{candidate.Manifest.Version}")
+                        .OrderBy(static value => value, StringComparer.Ordinal));
+                    ExtensionLogMessages.ExtensionGenerationCandidatesStarted(
+                        preparationLogger,
+                        false,
+                        candidates.Count,
+                        startedList);
+                }
+            }
 
             keepGate = true;
             return ExtensionGenerationPreparationResult.Success(preparation);
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } cancelledLogger)
+            {
+                ExtensionLogMessages.ExtensionGenerationPreparationCancelled(
+                    cancelledLogger,
+                    nameof(PrepareGenerationAsync));
+            }
+
             await AbortUnpublishedAsync(generationContexts, candidateContexts, candidates).ConfigureAwait(false);
             return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.Cancelled);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            if (_logger is { } failedLogger)
+            {
+                ExtensionLogMessages.ExtensionGenerationPreparationFailed(
+                    failedLogger,
+                    exception,
+                    nameof(PrepareGenerationAsync));
+            }
+
             await AbortUnpublishedAsync(generationContexts, candidateContexts, candidates).ConfigureAwait(false);
             return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
         }

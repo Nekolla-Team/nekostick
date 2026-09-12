@@ -31,6 +31,11 @@ public sealed partial class ExtensionRuntimeManager
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionOperationCancelled(logger, manifest.Id, nameof(LoadAsync));
+            }
+
             return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
         }
 
@@ -110,6 +115,11 @@ public sealed partial class ExtensionRuntimeManager
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionOperationCancelled(logger, replacement.Id, nameof(ReloadAsync));
+            }
+
             return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
         }
 
@@ -249,6 +259,11 @@ public sealed partial class ExtensionRuntimeManager
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionOperationCancelled(logger, extensionId, nameof(UnloadAsync));
+            }
+
             return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
         }
 
@@ -346,12 +361,31 @@ public sealed partial class ExtensionRuntimeManager
         }
         catch (OperationCanceledException)
         {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionHandlerInvocationCancelled(
+                    logger,
+                    binding.Instance.Manifest.Id,
+                    nameof(HandleAsync));
+            }
+
             return ExtensionInvocationResult.Failed;
         }
         catch (Exception exception)
         {
             await RecordFailureAsync(binding.Instance, ExtensionFailureCode.HandlerFailed, exception)
                 .ConfigureAwait(false);
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"handler:{binding.Instance.Manifest.Id}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionHandlerInvocationFailed(
+                    logger,
+                    exception,
+                    binding.Instance.Manifest.Id,
+                    nameof(HandleAsync),
+                    occurrences);
+            }
+
             return ExtensionInvocationResult.Failed;
         }
         finally
@@ -407,6 +441,17 @@ public sealed partial class ExtensionRuntimeManager
         {
             await RecordFailureAsync(binding.Instance, ExtensionFailureCode.CallbackFailed, exception)
                 .ConfigureAwait(false);
+            if (_logger is { } logger &&
+                _requestLogThrottle.TryAcquire($"fallback:{binding.Instance.Manifest.Id}", out var occurrences))
+            {
+                ExtensionLogMessages.ExtensionFallbackInvocationFailed(
+                    logger,
+                    exception,
+                    binding.Instance.Manifest.Id,
+                    nameof(HandleFallbackAsync),
+                    occurrences);
+            }
+
             return ExtensionInvocationResult.Failed;
         }
         finally
@@ -460,22 +505,60 @@ public sealed partial class ExtensionRuntimeManager
                     response = await handler.HandleStreamingAsync(request, cancellationToken)
                         .ConfigureAwait(false);
                 }
-                catch (ExtensionRequestBodyLimitExceededException)
+                catch (ExtensionRequestBodyLimitExceededException exception)
                 {
+                    if (_logger is { } logger &&
+                        _requestLogThrottle.TryAcquire($"streaming:{binding.Instance.Manifest.Id}", out var occurrences))
+                    {
+                        ExtensionLogMessages.ExtensionStreamingRequestRejected(
+                            logger,
+                            exception,
+                            binding.Instance.Manifest.Id,
+                            nameof(HandleStreamingAsync),
+                            occurrences);
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
                 catch (ExtensionRequestReadTimeoutException)
                 {
+                    if (_logger is { } logger)
+                    {
+                        ExtensionLogMessages.ExtensionStreamingReadTimedOut(
+                            logger,
+                            binding.Instance.Manifest.Id,
+                            nameof(HandleStreamingAsync));
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
                 catch (OperationCanceledException)
                 {
+                    if (_logger is { } logger)
+                    {
+                        ExtensionLogMessages.ExtensionStreamingRequestCancelled(
+                            logger,
+                            binding.Instance.Manifest.Id,
+                            nameof(HandleStreamingAsync));
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
                 catch (Exception exception)
                 {
                     await RecordFailureAsync(binding.Instance, ExtensionFailureCode.HandlerFailed, exception)
                         .ConfigureAwait(false);
+                    if (_logger is { } logger &&
+                        _requestLogThrottle.TryAcquire($"streaming:{binding.Instance.Manifest.Id}", out var occurrences))
+                    {
+                        ExtensionLogMessages.ExtensionStreamingRequestRejected(
+                            logger,
+                            exception,
+                            binding.Instance.Manifest.Id,
+                            nameof(HandleStreamingAsync),
+                            occurrences);
+                    }
+
                     return ExtensionStreamingInvocationResult.Failed;
                 }
             }
@@ -494,8 +577,16 @@ public sealed partial class ExtensionRuntimeManager
             {
                 request.BodyStream.Dispose();
             }
-            catch
+            catch (Exception exception)
             {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionStreamingBodyDisposeFailed(
+                        logger,
+                        exception,
+                        binding.Instance.Manifest.Id,
+                        nameof(HandleStreamingAsync));
+                }
             }
 
             if (!holdRequestLease)

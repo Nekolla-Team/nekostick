@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Primitives;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Proxy;
@@ -41,7 +43,8 @@ internal sealed partial class HostRouteTargetExecutor
             context.Request.Method,
             forwardedPath,
             requestHeaders,
-            StaticHttpExecutionOptions.Default);
+            StaticHttpExecutionOptions.Default,
+            logger: _logger);
 
         if (!execution.HasResponse || execution.Response is null)
         {
@@ -279,7 +282,8 @@ internal sealed partial class HostRouteTargetExecutor
     private static bool IsStaticTargetAligned(
         StaticTargetDefinition target,
         string configuredRoot,
-        string? matchedRoot)
+        string? matchedRoot,
+        ILogger? logger = null)
     {
         if (!string.Equals(configuredRoot, matchedRoot, StringComparison.Ordinal))
         {
@@ -300,8 +304,9 @@ internal sealed partial class HostRouteTargetExecutor
                 fullPath[..end],
                 StringComparison.Ordinal);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            HostLogMessages.StaticTargetAlignmentFailed(logger ?? NullLogger.Instance, exception, nameof(IsStaticTargetAligned));
             return false;
         }
     }

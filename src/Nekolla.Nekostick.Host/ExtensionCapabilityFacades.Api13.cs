@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Proxy;
 
@@ -14,6 +15,7 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
     private readonly IHostServiceLifecycleCoordinator? _lifecycle;
     private readonly IHostServiceRuntimeSnapshotAccessor? _runtime;
     private readonly IMicroserviceForwardingTelemetry? _forwarding;
+    private readonly ILogger _logger;
 
     internal ExtensionSupervisorFacade(
         IHostServiceRuntimeSnapshotAccessor? runtime,
@@ -27,13 +29,15 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         HostRuntimeState? runtimeState,
         IHostServiceLifecycleCoordinator? lifecycle,
         IHostServiceRuntimeSnapshotAccessor? runtime,
-        IMicroserviceForwardingTelemetry? forwarding)
+        IMicroserviceForwardingTelemetry? forwarding,
+        ILogger? logger = null)
     {
         _extensionId = extensionId;
         _runtimeState = runtimeState;
         _lifecycle = lifecycle;
         _runtime = runtime;
         _forwarding = forwarding;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadAsync(
@@ -60,8 +64,14 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionCapabilityReadFailed(
+                _logger,
+                exception,
+                "ReadRuntime",
+                _extensionId,
+                null);
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
@@ -99,8 +109,14 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionCapabilityReadFailed(
+                _logger,
+                exception,
+                "ReadRuntimeForExtension",
+                extensionId,
+                null);
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
@@ -135,8 +151,14 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.ExtensionCapabilityReadFailed(
+                _logger,
+                exception,
+                "GetRuntime",
+                _extensionId,
+                serviceId);
             return ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
                     new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));

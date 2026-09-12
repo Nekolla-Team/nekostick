@@ -141,8 +141,13 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             {
                 _processExitSubscription = observer.Subscribe(HandleProcessExitObservation);
             }
-            catch
+            catch (Exception exception)
             {
+                HostLogMessages.LifecycleBackgroundFailed(
+                    _logger,
+                    exception,
+                    "ProcessExitSubscription",
+                    Guid.Empty);
                 _processExitSubscription = null;
             }
         }
@@ -291,7 +296,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             startups = pending.ToArray();
         }
 
-        await QuiesceStartupsAsync(startups).ConfigureAwait(false);
+        await QuiesceStartupsAsync(startups, _logger).ConfigureAwait(false);
         foreach (var slot in _slots.Values)
         {
             ServiceGeneration? generation;
@@ -310,9 +315,13 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                     generation.SnapshotVersion,
                     "stopped");
             }
-            catch
+            catch (Exception exception)
             {
                 // Continue stopping all owned generations and the executor below.
+                HostLogMessages.LifecycleShutdownCleanupSkipped(
+                    _logger,
+                    exception,
+                    nameof(StopOrReleaseGenerationAfterExitAsync));
             }
         }
 
@@ -322,9 +331,10 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             {
                 await cleanup.CleanupAsync(StopGracePeriod, CancellationToken.None).ConfigureAwait(false);
             }
-            catch
+            catch (Exception exception)
             {
                 // Cleanup is best effort; endpoint publication remains fail-closed.
+                HostLogMessages.LifecycleShutdownCleanupSkipped(_logger, exception, "ProcessExecutorCleanup");
             }
         }
 
@@ -332,16 +342,18 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         {
             _endpointPublisher.Publish(Array.Empty<HostServiceEndpointLease>());
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.LifecycleShutdownCleanupSkipped(_logger, exception, "PublishEmptyEndpoints");
         }
 
         try
         {
             Interlocked.Exchange(ref _processExitSubscription, null)?.Dispose();
         }
-        catch
+        catch (Exception exception)
         {
+            HostLogMessages.LifecycleShutdownCleanupSkipped(_logger, exception, "DisposeProcessExitSubscription");
         }
 
         _retiringGenerations.Clear();
@@ -349,7 +361,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     }
 
     private static async Task QuiesceStartupsAsync(
-        (ServiceSlot Slot, Task<HostServiceReadinessResult> Startup)[] startups)
+        (ServiceSlot Slot, Task<HostServiceReadinessResult> Startup)[] startups,
+        ILogger logger)
     {
         if (startups.Length == 0)
         {
@@ -368,8 +381,10 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 {
                     await all.ConfigureAwait(false);
                 }
-                catch
+                catch (Exception exception)
                 {
+                    // Individual startup failures are already recorded on their readiness results.
+                    HostLogMessages.LifecycleShutdownCleanupSkipped(logger, exception, nameof(QuiesceStartupsAsync));
                 }
             }
         }

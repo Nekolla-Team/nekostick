@@ -1,5 +1,7 @@
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -10,13 +12,16 @@ public sealed class PostgresMigrationCoordinator : IStartupDatabaseProbe
 {
     private readonly string _connectionString;
     private readonly IMigrationSchemaValidator _schemaValidator;
+    private readonly ILogger _logger;
 
     /// <summary>Creates a migration coordinator without enabling sensitive diagnostics.</summary>
     /// <param name="connectionString">The sensitive PostgreSQL connection string.</param>
     /// <param name="schemaValidator">The schema validator, or the PostgreSQL default.</param>
+    /// <param name="logger">The optional persistence logger.</param>
     public PostgresMigrationCoordinator(
         string connectionString,
-        IMigrationSchemaValidator? schemaValidator = null)
+        IMigrationSchemaValidator? schemaValidator = null,
+        ILogger? logger = null)
     {
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -24,7 +29,8 @@ public sealed class PostgresMigrationCoordinator : IStartupDatabaseProbe
         }
 
         _connectionString = connectionString;
-        _schemaValidator = schemaValidator ?? new PostgresMigrationSchemaValidator();
+        _logger = logger ?? NullLogger.Instance;
+        _schemaValidator = schemaValidator ?? new PostgresMigrationSchemaValidator(PersistenceDatabaseDefaults.Schema, _logger);
     }
 
     /// <inheritdoc />
@@ -60,22 +66,26 @@ public sealed class PostgresMigrationCoordinator : IStartupDatabaseProbe
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            PersistenceLogMessages.OperationCancelled(_logger, "MigrateAndValidate", PersistenceDatabaseDefaults.Schema);
             throw;
         }
         catch (PostgresException exception)
         {
+            PersistenceLogMessages.StartupFailed(_logger, exception, "Migrate", PersistenceDatabaseDefaults.Schema);
             return StartupDatabaseResult.Failure(
                 StartupDatabaseErrorCode.MigrationFailed,
                 exception.ToString());
         }
         catch (DbException exception)
         {
+            PersistenceLogMessages.StartupFailed(_logger, exception, "AdvisoryLock", PersistenceDatabaseDefaults.Schema);
             return StartupDatabaseResult.Failure(
                 StartupDatabaseErrorCode.AdvisoryLockUnavailable,
                 exception.ToString());
         }
         catch (Exception exception)
         {
+            PersistenceLogMessages.StartupFailed(_logger, exception, "MigrateAndValidate", PersistenceDatabaseDefaults.Schema);
             return StartupDatabaseResult.Failure(
                 StartupDatabaseErrorCode.MigrationFailed,
                 exception.ToString());

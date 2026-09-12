@@ -1,4 +1,5 @@
 using System.Globalization;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -9,12 +10,19 @@ public static class StaticHttpExecutor
     /// Resolves and opens one normalized static request, then creates a response plan.
     /// Query strings are intentionally outside this API and never participate in disk mapping.
     /// </summary>
+    /// <param name="target">The immutable static target definition.</param>
+    /// <param name="method">The HTTP method.</param>
+    /// <param name="normalizedRequestPath">The routing-normalized absolute request path.</param>
+    /// <param name="requestHeaders">The optional request headers used for conditional requests.</param>
+    /// <param name="options">The optional execution options.</param>
+    /// <param name="logger">The optional structured logger for static filesystem failures.</param>
     public static StaticHttpExecutionResult Execute(
         StaticTargetDefinition target,
         string method,
         string normalizedRequestPath,
         StaticHttpRequestHeaders? requestHeaders = null,
-        StaticHttpExecutionOptions? options = null)
+        StaticHttpExecutionOptions? options = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(target);
 
@@ -36,13 +44,17 @@ public static class StaticHttpExecutor
             return StaticHttpExecutionResult.Failure(StaticHttpExecutionKind.InvalidRequest);
         }
 
-        var resolution = StaticFileRequestMapper.Map(target, method, normalizedRequestPath);
+        var resolution = StaticFileRequestMapper.Map(
+            target,
+            method,
+            normalizedRequestPath,
+            logger);
         if (!resolution.IsOpenable)
         {
             return FailureForResolution(resolution);
         }
 
-        using var openResult = target.OpenRead(resolution);
+        using var openResult = target.OpenRead(resolution, logger);
         if (!openResult.IsOpened)
         {
             return FailureForOpen(openResult);

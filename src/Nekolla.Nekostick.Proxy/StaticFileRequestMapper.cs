@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace Nekolla.Nekostick.Proxy;
 
 /// <summary>Maps routing-normalized request paths into a static target without performing HTTP I/O.</summary>
@@ -9,13 +11,15 @@ public static class StaticFileRequestMapper
     /// </summary>
     /// <param name="target">The immutable static target definition.</param>
     /// <param name="normalizedRequestPath">The normalized absolute request path.</param>
+    /// <param name="logger">The optional structured logger for filesystem probe failures.</param>
     /// <returns>A typed resolution result with no user path in its diagnostics or string representation.</returns>
     public static StaticFileResolution Map(
         StaticTargetDefinition target,
-        string normalizedRequestPath)
+        string normalizedRequestPath,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(target);
-        return target.Resolve(normalizedRequestPath);
+        return target.Resolve(normalizedRequestPath, logger);
     }
 
     /// <summary>
@@ -25,11 +29,13 @@ public static class StaticFileRequestMapper
     /// <param name="target">The immutable static target definition.</param>
     /// <param name="method">The HTTP method token.</param>
     /// <param name="normalizedRequestPath">The normalized absolute request path.</param>
+    /// <param name="logger">The optional structured logger for filesystem probe failures.</param>
     /// <returns>A typed resolution result with no user path in its diagnostics or string representation.</returns>
     public static StaticFileResolution Map(
         StaticTargetDefinition target,
         string method,
-        string normalizedRequestPath)
+        string normalizedRequestPath,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(target);
 
@@ -44,6 +50,6 @@ public static class StaticFileRequestMapper
             return target.CreateForbiddenResolution(StaticFileFailureReason.UnsupportedMethod);
         }
 
-        return target.Resolve(normalizedRequestPath);
+        return target.Resolve(normalizedRequestPath, logger);
     }
 }

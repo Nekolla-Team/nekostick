@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Routing;
 
@@ -15,7 +17,10 @@ internal sealed class HostPattern
     internal string Value { get; }
     internal bool IsWildcard { get; }
 
-    internal static bool TryCreate(string? value, out HostPattern? pattern)
+    internal static bool TryCreate(
+        string? value,
+        out HostPattern? pattern,
+        ILogger? logger = null)
     {
         pattern = null;
         if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsWhiteSpace) || value.Any(char.IsControl))
@@ -30,7 +35,7 @@ internal sealed class HostPattern
             return false;
         }
 
-        if (!HostValue.TryParse(hostText, out var normalized, out var isIp) || (wildcard && isIp))
+        if (!HostValue.TryParse(hostText, out var normalized, out var isIp, logger) || (wildcard && isIp))
         {
             return false;
         }
@@ -55,7 +60,11 @@ internal sealed class HostValue
 
     internal string Value { get; }
 
-    internal static bool TryCreate(string? input, out HostValue? value, out bool isValid)
+    internal static bool TryCreate(
+        string? input,
+        out HostValue? value,
+        out bool isValid,
+        ILogger? logger = null)
     {
         if (string.IsNullOrEmpty(input))
         {
@@ -64,7 +73,7 @@ internal sealed class HostValue
             return true;
         }
 
-        if (TryParse(input, out var normalized, out _))
+        if (TryParse(input, out var normalized, out _, logger))
         {
             value = new HostValue(normalized);
             isValid = true;
@@ -76,7 +85,11 @@ internal sealed class HostValue
         return false;
     }
 
-    internal static bool TryParse(string input, out string normalized, out bool isIp)
+    internal static bool TryParse(
+        string input,
+        out string normalized,
+        out bool isIp,
+        ILogger? logger = null)
     {
         normalized = string.Empty;
         isIp = false;
@@ -160,6 +173,9 @@ internal sealed class HostValue
         }
         catch (ArgumentException)
         {
+            RoutingLogMessages.HostValueValidationRejected(
+                logger ?? NullLogger.Instance,
+                "HostValue.TryParse");
             return false;
         }
     }

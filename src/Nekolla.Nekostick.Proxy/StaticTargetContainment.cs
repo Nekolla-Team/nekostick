@@ -1,4 +1,6 @@
 using System.IO;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Nekolla.Nekostick.Proxy;
 
@@ -7,7 +9,8 @@ public sealed partial class StaticTargetDefinition
     private static CanonicalPathResult CanonicalizeExistingPath(
         string path,
         string? boundaryRoot,
-        int recursionDepth)
+        int recursionDepth,
+        ILogger? logger = null)
     {
         if (recursionDepth > 64)
         {
@@ -21,10 +24,30 @@ public sealed partial class StaticTargetDefinition
         }
         catch (ArgumentException)
         {
+            if (ProxyLogThrottle.TryAcquire(
+                    "StaticTargetDefinition.CanonicalizeExistingPath.Validation",
+                    out var occurrences))
+            {
+                ProxyLogMessages.StaticPathCanonicalizationRejected(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.CanonicalizeExistingPath",
+                    occurrences);
+            }
+
             return new(CanonicalPathStatus.Error, null);
         }
         catch (NotSupportedException)
         {
+            if (ProxyLogThrottle.TryAcquire(
+                    "StaticTargetDefinition.CanonicalizeExistingPath.Validation",
+                    out var occurrences))
+            {
+                ProxyLogMessages.StaticPathCanonicalizationRejected(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.CanonicalizeExistingPath",
+                    occurrences);
+            }
+
             return new(CanonicalPathStatus.Error, null);
         }
 
@@ -40,7 +63,7 @@ public sealed partial class StaticTargetDefinition
             var nextPath = currentPath == "/"
                 ? "/" + segment
                 : currentPath + "/" + segment;
-            var probe = ProbePath(nextPath);
+            var probe = ProbePath(nextPath, logger);
             switch (probe.Status)
             {
                 case PathProbeStatus.Missing:
@@ -57,7 +80,11 @@ public sealed partial class StaticTargetDefinition
                         return new(CanonicalPathStatus.OutsideRoot, null);
                     }
 
-                    var resolvedLink = CanonicalizeExistingPath(linkTarget, boundaryRoot, recursionDepth + 1);
+                    var resolvedLink = CanonicalizeExistingPath(
+                        linkTarget,
+                        boundaryRoot,
+                        recursionDepth + 1,
+                        logger);
                     if (resolvedLink.Status != CanonicalPathStatus.Success)
                     {
                         return resolvedLink;
@@ -81,10 +108,10 @@ public sealed partial class StaticTargetDefinition
         return new(CanonicalPathStatus.Success, TrimTrailingSeparators(currentPath));
     }
 
-    private static PathProbeResult ProbePath(string path)
+    private static PathProbeResult ProbePath(string path, ILogger? logger = null)
     {
-        var fileProbe = ProbeLinkTarget(path, directory: false);
-        var directoryProbe = ProbeLinkTarget(path, directory: true);
+        var fileProbe = ProbeLinkTarget(path, false, logger);
+        var directoryProbe = ProbeLinkTarget(path, true, logger);
 
         if (fileProbe.Status == LinkProbeStatus.Link)
         {
@@ -113,32 +140,88 @@ public sealed partial class StaticTargetDefinition
         }
         catch (FileNotFoundException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.ProbePath.Missing", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathProbeMissing(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.ProbePath",
+                    occurrences);
+            }
+
             return new(PathProbeStatus.Missing, null);
         }
         catch (DirectoryNotFoundException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.ProbePath.Missing", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathProbeMissing(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.ProbePath",
+                    occurrences);
+            }
+
             return new(PathProbeStatus.Missing, null);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.ProbePath.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathProbeFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticTargetDefinition.ProbePath",
+                    occurrences);
+            }
+
             return new(PathProbeStatus.Error, null);
         }
-        catch (IOException)
+        catch (IOException exception)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.ProbePath.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathProbeFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    "StaticTargetDefinition.ProbePath",
+                    occurrences);
+            }
+
             return new(PathProbeStatus.Error, null);
         }
         catch (ArgumentException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.ProbePath.Validation", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathCanonicalizationRejected(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.ProbePath",
+                    occurrences);
+            }
+
             return new(PathProbeStatus.Error, null);
         }
         catch (NotSupportedException)
         {
+            if (ProxyLogThrottle.TryAcquire("StaticTargetDefinition.ProbePath.Validation", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathCanonicalizationRejected(
+                    logger ?? NullLogger.Instance,
+                    "StaticTargetDefinition.ProbePath",
+                    occurrences);
+            }
+
             return new(PathProbeStatus.Error, null);
         }
     }
 
-    private static LinkProbeResult ProbeLinkTarget(string path, bool directory)
+    private static LinkProbeResult ProbeLinkTarget(
+        string path,
+        bool directory,
+        ILogger? logger = null)
     {
+        var operation = directory
+            ? "StaticTargetDefinition.ProbeLinkTarget.Directory"
+            : "StaticTargetDefinition.ProbeLinkTarget.File";
         try
         {
             FileSystemInfo info = directory
@@ -151,29 +234,80 @@ public sealed partial class StaticTargetDefinition
         }
         catch (FileNotFoundException)
         {
+            if (ProxyLogThrottle.TryAcquire($"{operation}.Missing", out var occurrences))
+            {
+                ProxyLogMessages.StaticLinkProbeMissing(
+                    logger ?? NullLogger.Instance,
+                    operation,
+                    occurrences);
+            }
+
             return new(LinkProbeStatus.Missing, null);
         }
         catch (DirectoryNotFoundException)
         {
+            if (ProxyLogThrottle.TryAcquire($"{operation}.Missing", out var occurrences))
+            {
+                ProxyLogMessages.StaticLinkProbeMissing(
+                    logger ?? NullLogger.Instance,
+                    operation,
+                    occurrences);
+            }
+
             return new(LinkProbeStatus.Missing, null);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException exception)
         {
+            if (ProxyLogThrottle.TryAcquire($"{operation}.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticLinkProbeFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    operation,
+                    occurrences);
+            }
+
             return new(LinkProbeStatus.Error, null);
         }
-        catch (IOException)
+        catch (IOException exception)
         {
+            if (ProxyLogThrottle.TryAcquire($"{operation}.Error", out var occurrences))
+            {
+                ProxyLogMessages.StaticLinkProbeFailed(
+                    logger ?? NullLogger.Instance,
+                    exception,
+                    operation,
+                    occurrences);
+            }
+
             return new(LinkProbeStatus.Error, null);
         }
         catch (ArgumentException)
         {
+            if (ProxyLogThrottle.TryAcquire($"{operation}.Validation", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathCanonicalizationRejected(
+                    logger ?? NullLogger.Instance,
+                    operation,
+                    occurrences);
+            }
+
             return new(LinkProbeStatus.Error, null);
         }
         catch (NotSupportedException)
         {
+            if (ProxyLogThrottle.TryAcquire($"{operation}.Validation", out var occurrences))
+            {
+                ProxyLogMessages.StaticPathCanonicalizationRejected(
+                    logger ?? NullLogger.Instance,
+                    operation,
+                    occurrences);
+            }
+
             return new(LinkProbeStatus.Error, null);
         }
     }
+
 
     private static string MakeAbsoluteLinkTarget(string linkPath, string linkTarget)
     {

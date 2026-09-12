@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
 using Nekolla.Nekostick.Contracts;
@@ -9,10 +10,14 @@ namespace Nekolla.Nekostick.Host;
 /// <summary>Converts ASP.NET requests and extension responses at the stable ABI boundary.</summary>
 internal static class ExtensionHttpAdapter
 {
+    private static readonly HostLogThrottle DefaultThrottle = new();
+
     internal static async ValueTask<ExtensionHandlerRequest?> CreateRequestAsync(
         HttpContext context,
         long maxBodyBytes,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HostLogThrottle? throttle = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         if (maxBodyBytes <= 0)
@@ -20,6 +25,8 @@ internal static class ExtensionHttpAdapter
             return null;
         }
 
+        var activeThrottle = throttle ?? DefaultThrottle;
+        var activeLogger = logger ?? HostLoggerDefaults.Logger;
         var headers = context.Request.Headers
             .Select(static pair => new KeyValuePair<string, IEnumerable<string>>(
                 pair.Key,
@@ -63,10 +70,12 @@ internal static class ExtensionHttpAdapter
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            LogCancelled(activeLogger, activeThrottle, "CreateRequest.Read");
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            LogFailure(activeLogger, activeThrottle, "CreateRequest.Read", exception);
             return null;
         }
 
@@ -86,8 +95,9 @@ internal static class ExtensionHttpAdapter
                 body,
                 context.Request.IsHttps);
         }
-        catch
+        catch (Exception exception)
         {
+            LogFailure(activeLogger, activeThrottle, "CreateRequest.Build", exception);
             return null;
         }
     }
@@ -95,7 +105,9 @@ internal static class ExtensionHttpAdapter
     internal static async ValueTask<bool> WriteResponseAsync(
         HttpContext context,
         ExtensionHandlerResponse response,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HostLogThrottle? throttle = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(response);
@@ -105,6 +117,8 @@ internal static class ExtensionHttpAdapter
             return false;
         }
 
+        var activeThrottle = throttle ?? DefaultThrottle;
+        var activeLogger = logger ?? HostLoggerDefaults.Logger;
         try
         {
             context.Response.Headers.Clear();
@@ -127,6 +141,7 @@ internal static class ExtensionHttpAdapter
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            LogCancelled(activeLogger, activeThrottle, "WriteResponse");
             if (context.Response.HasStarted)
             {
                 context.Abort();
@@ -134,8 +149,9 @@ internal static class ExtensionHttpAdapter
 
             return false;
         }
-        catch
+        catch (Exception exception)
         {
+            LogFailure(activeLogger, activeThrottle, "WriteResponse", exception);
             if (context.Response.HasStarted)
             {
                 context.Abort();
@@ -149,7 +165,9 @@ internal static class ExtensionHttpAdapter
         HttpContext context,
         long maxBodyBytes,
         TimeSpan readTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HostLogThrottle? throttle = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         if (maxBodyBytes <= 0)
@@ -157,6 +175,8 @@ internal static class ExtensionHttpAdapter
             return null;
         }
 
+        var activeThrottle = throttle ?? DefaultThrottle;
+        var activeLogger = logger ?? HostLoggerDefaults.Logger;
         var headers = context.Request.Headers
             .Select(static pair => new KeyValuePair<string, IEnumerable<string>>(
                 pair.Key,
@@ -173,14 +193,18 @@ internal static class ExtensionHttpAdapter
                 context.Request.Body,
                 maxBodyBytes,
                 readTimeout,
-                context.RequestAborted);
+                context.RequestAborted,
+                activeThrottle,
+                activeLogger);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            LogCancelled(activeLogger, activeThrottle, "CreateStreamingRequest.Build");
             throw;
         }
-        catch
+        catch (Exception exception)
         {
+            LogFailure(activeLogger, activeThrottle, "CreateStreamingRequest.Build", exception);
             return null;
         }
 
@@ -200,8 +224,9 @@ internal static class ExtensionHttpAdapter
                 bodyStream,
                 context.Request.IsHttps);
         }
-        catch
+        catch (Exception exception)
         {
+            LogFailure(activeLogger, activeThrottle, "CreateStreamingRequest.Build", exception);
             await bodyStream.DisposeAsync().ConfigureAwait(false);
             return null;
         }
@@ -210,7 +235,9 @@ internal static class ExtensionHttpAdapter
     internal static async ValueTask<bool> WriteStreamingResponseAsync(
         HttpContext context,
         ExtensionStreamingResponse response,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HostLogThrottle? throttle = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(response);
@@ -220,6 +247,8 @@ internal static class ExtensionHttpAdapter
             return false;
         }
 
+        var activeThrottle = throttle ?? DefaultThrottle;
+        var activeLogger = logger ?? HostLoggerDefaults.Logger;
         var bodyStream = response.BodyStream;
         var headersSet = false;
         try
@@ -258,6 +287,7 @@ internal static class ExtensionHttpAdapter
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            LogCancelled(activeLogger, activeThrottle, "WriteStreamingResponse");
             if (headersSet)
             {
                 context.Abort();
@@ -265,8 +295,9 @@ internal static class ExtensionHttpAdapter
 
             return false;
         }
-        catch
+        catch (Exception exception)
         {
+            LogFailure(activeLogger, activeThrottle, "WriteStreamingResponse", exception);
             if (context.Response.HasStarted)
             {
                 context.Abort();
@@ -279,6 +310,26 @@ internal static class ExtensionHttpAdapter
             bodyStream?.Dispose();
         }
     }
+
+    private static void LogFailure(
+        ILogger logger,
+        HostLogThrottle throttle,
+        string operation,
+        Exception exception)
+    {
+        if (throttle.TryAcquire($"HttpAdapter.{operation}", out var occurrences))
+        {
+            HostLogMessages.ExtensionHttpAdapterFailed(logger, exception, operation, occurrences);
+        }
+    }
+
+    private static void LogCancelled(ILogger logger, HostLogThrottle throttle, string operation)
+    {
+        if (throttle.TryAcquire($"HttpAdapter.{operation}.Cancelled", out _))
+        {
+            HostLogMessages.ExtensionHttpAdapterCancelled(logger, operation);
+        }
+    }
 }
 
 /// <summary>Applies the route/global body bound and read deadline to an extension streaming request body.</summary>
@@ -288,15 +339,20 @@ internal sealed class HostExtensionRequestBodyGuard : Stream
     private readonly long _maximumBytes;
     private readonly DateTimeOffset _deadline;
     private readonly CancellationTokenSource _disposeCancellation = new();
+    private readonly HostLogThrottle _throttle;
+    private readonly ILogger _logger;
     private long _readBytes;
     private int _completed;
     private int _disposed;
+    private readonly CancellationToken _requestAborted;
 
     internal HostExtensionRequestBodyGuard(
         Stream inner,
         long maximumBytes,
         TimeSpan readTimeout,
-        CancellationToken requestAborted)
+        CancellationToken requestAborted,
+        HostLogThrottle? throttle = null,
+        ILogger? logger = null)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
@@ -305,9 +361,9 @@ internal sealed class HostExtensionRequestBodyGuard : Stream
         _maximumBytes = maximumBytes;
         _deadline = DateTimeOffset.UtcNow + readTimeout;
         _requestAborted = requestAborted;
+        _throttle = throttle ?? new HostLogThrottle();
+        _logger = logger ?? HostLoggerDefaults.Logger;
     }
-
-    private readonly CancellationToken _requestAborted;
 
     public override bool CanRead => _inner.CanRead;
 
@@ -366,6 +422,10 @@ internal sealed class HostExtensionRequestBodyGuard : Stream
                 }
                 catch (OperationCanceledException)
                 {
+                    if (_throttle.TryAcquire("HttpAdapter.BodyGuard.ReadTimeout", out _))
+                    {
+                        HostLogMessages.ExtensionHttpAdapterCancelled(_logger, "BodyGuard.ReadTimeout");
+                    }
                     // The deadline owns this cancellation; surface the configured read-timeout result.
                 }
 
@@ -380,10 +440,18 @@ internal sealed class HostExtensionRequestBodyGuard : Stream
             catch (OperationCanceledException) when (
                 _requestAborted.IsCancellationRequested || cancellationToken.IsCancellationRequested)
             {
+                if (_throttle.TryAcquire("HttpAdapter.BodyGuard.Read", out _))
+                {
+                    HostLogMessages.ExtensionHttpAdapterCancelled(_logger, "BodyGuard.Read");
+                }
                 throw;
             }
             catch (OperationCanceledException) when (_disposeCancellation.IsCancellationRequested)
             {
+                if (_throttle.TryAcquire("HttpAdapter.BodyGuard.Dispose", out _))
+                {
+                    HostLogMessages.ExtensionHttpAdapterCancelled(_logger, "BodyGuard.Dispose");
+                }
                 throw;
             }
 
@@ -462,7 +530,8 @@ internal sealed class ExtensionRouteFallbackDispatcher : ILeasedRouteFallbackDis
         var request = await ExtensionHttpAdapter.CreateRequestAsync(
                 context,
                 publicationLease.Snapshot.Configuration.GlobalSettings.MaxRequestBodyBytes,
-                context.RequestAborted)
+                context.RequestAborted,
+                logger: HostLoggerDefaults.Logger)
             .ConfigureAwait(false);
         if (request is null)
         {
@@ -480,7 +549,8 @@ internal sealed class ExtensionRouteFallbackDispatcher : ILeasedRouteFallbackDis
         return await ExtensionHttpAdapter.WriteResponseAsync(
                 context,
                 result.Response,
-                context.RequestAborted)
+                context.RequestAborted,
+                logger: HostLoggerDefaults.Logger)
             .ConfigureAwait(false);
     }
 }

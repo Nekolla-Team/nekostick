@@ -1,10 +1,14 @@
 using System.IO;
+using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Proxy;
 
 public sealed partial class StaticTargetDefinition
 {
-    private StaticFileResolution ResolveDirectoryIndex(string canonicalRoot, string canonicalDirectory)
+    private StaticFileResolution ResolveDirectoryIndex(
+        string canonicalRoot,
+        string canonicalDirectory,
+        ILogger? logger = null)
     {
         foreach (var indexFileName in IndexFileNames)
         {
@@ -13,7 +17,11 @@ public sealed partial class StaticTargetDefinition
                 return CreateForbiddenResolution(StaticFileFailureReason.UnsafeFilesystemTarget);
             }
 
-            var indexResult = CanonicalizeExistingPath(indexPath, canonicalRoot, recursionDepth: 0);
+            var indexResult = CanonicalizeExistingPath(
+                indexPath,
+                canonicalRoot,
+                recursionDepth: 0,
+                logger: logger);
             if (indexResult.Status == CanonicalPathStatus.Missing)
             {
                 continue;

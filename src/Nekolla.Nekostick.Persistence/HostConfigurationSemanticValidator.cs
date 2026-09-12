@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Persistence;
@@ -20,10 +22,12 @@ public static class HostConfigurationSemanticValidator
     /// </summary>
     /// <param name="snapshot">The contract-only configuration snapshot.</param>
     /// <returns><see langword="true"/> when every semantic and persisted-version rule passes.</returns>
-    public static bool TryValidateSnapshot(HostConfigurationSnapshot? snapshot)
+    /// <param name="logger">The optional persistence logger.</param>
+    public static bool TryValidateSnapshot(HostConfigurationSnapshot? snapshot, ILogger? logger = null)
     {
         if (snapshot is null)
         {
+            PersistenceLogMessages.ValidationRejected(logger ?? NullLogger.Instance, "ValidateSnapshot", "configuration");
             return false;
         }
 
@@ -34,9 +38,10 @@ public static class HostConfigurationSemanticValidator
                 snapshot.Routes,
                 snapshot.Services,
                 snapshot.ExtensionRecords,
-                snapshot.ExtensionSettings);
+                snapshot.ExtensionSettings,
+                logger);
             HostConfigurationGlobalValidator.ValidatePersistedVersions(snapshot);
-        });
+        }, logger, "ValidateSnapshot");
     }
 
     /// <summary>
@@ -44,10 +49,12 @@ public static class HostConfigurationSemanticValidator
     /// </summary>
     /// <param name="changes">The complete replacement configuration change set.</param>
     /// <returns><see langword="true"/> when every semantic rule passes.</returns>
-    public static bool TryValidateChangeSet(ConfigurationChangeSet? changes)
+    /// <param name="logger">The optional persistence logger.</param>
+    public static bool TryValidateChangeSet(ConfigurationChangeSet? changes, ILogger? logger = null)
     {
         if (changes is null)
         {
+            PersistenceLogMessages.ValidationRejected(logger ?? NullLogger.Instance, "ValidateChangeSet", "configuration");
             return false;
         }
 
@@ -56,7 +63,8 @@ public static class HostConfigurationSemanticValidator
             changes.Routes,
             changes.Services,
             changes.ExtensionRecords,
-            changes.ExtensionSettings));
+            changes.ExtensionSettings,
+            logger), logger, "ValidateChangeSet");
     }
 
     /// <summary>
@@ -64,18 +72,26 @@ public static class HostConfigurationSemanticValidator
     /// </summary>
     /// <param name="settings">The extension settings DTO.</param>
     /// <returns><see langword="true"/> when the identifier, schema, version, and JSON pass.</returns>
-    public static bool TryValidateExtensionSettings(ExtensionSettingsConfiguration? settings) =>
-        settings is not null && TryValidate(() => HostConfigurationExtensionValidator.ValidateSettings(settings));
+    /// <param name="logger">The optional persistence logger.</param>
+    public static bool TryValidateExtensionSettings(ExtensionSettingsConfiguration? settings, ILogger? logger = null) =>
+        settings is not null
+            ? TryValidate(
+                () => HostConfigurationExtensionValidator.ValidateSettings(settings),
+                logger,
+                "ValidateExtensionSettings")
+            : RejectNull(logger, "ValidateExtensionSettings");
 
     /// <summary>Validates a collection of extension records for persistence.</summary>
     /// <param name="records">The extension records to validate.</param>
     /// <returns><see langword="true"/> when every record is semantically valid and unique.</returns>
+    /// <param name="logger">The optional persistence logger.</param>
     internal static bool TryValidateExtensionRecords(
-        IEnumerable<ExtensionRecordConfiguration>? records)
+        IEnumerable<ExtensionRecordConfiguration>? records,
+        ILogger? logger = null)
     {
         if (records is null)
         {
-            return false;
+            return RejectNull(logger, "ValidateExtensionRecords");
         }
 
         return TryValidate(() =>
@@ -88,7 +104,7 @@ public static class HostConfigurationSemanticValidator
             {
                 HostConfigurationExtensionValidator.ValidateRecord(record);
             }
-        });
+        }, logger, "ValidateExtensionRecords");
     }
 
     internal static bool IsSafeExtensionId(string? value) => HostConfigurationValueValidator.IsSafeExtensionId(value);
@@ -116,17 +132,40 @@ public static class HostConfigurationSemanticValidator
         "Design",
         "CA1031:Do not catch general exception types",
         Justification = "The public DTO validation boundary is deliberately fail-closed and never exposes validation exception details.")]
-    private static bool TryValidate(Action validation)
+    private static bool TryValidate(Action validation, ILogger? logger, string operation)
     {
         try
         {
             validation();
             return true;
         }
-        catch (Exception)
+        catch (Exception exception) when (
+            exception is ArgumentException or
+            InvalidOperationException or
+            JsonException or
+            ConfigurationValidationException)
         {
+            PersistenceLogMessages.SemanticValidationFailed(
+                logger ?? NullLogger.Instance,
+                operation,
+                "configuration");
             return false;
         }
+        catch (Exception exception)
+        {
+            PersistenceLogMessages.OperationFailed(
+                logger ?? NullLogger.Instance,
+                exception,
+                operation,
+                "configuration");
+            return false;
+        }
+    }
+
+    private static bool RejectNull(ILogger? logger, string operation)
+    {
+        PersistenceLogMessages.ValidationRejected(logger ?? NullLogger.Instance, operation, "configuration");
+        return false;
     }
 
     internal sealed class ConfigurationValidationException : Exception
