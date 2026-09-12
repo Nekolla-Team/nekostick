@@ -32,7 +32,8 @@ ENV NEKOSTICK_LISTEN_ADDRESS=0.0.0.0 \
 EXPOSE 8080
 
 COPY --from=publish /app/publish .
-RUN mkdir -p /app/extensions /app/data
+RUN mkdir -p /app/extensions /app/data \
+    && chown -R "$APP_UID" /app/extensions /app/data
 
 # Kerberos/GSSAPI system libraries so Npgsql can authenticate to PostgreSQL.
 RUN apt-get update \
