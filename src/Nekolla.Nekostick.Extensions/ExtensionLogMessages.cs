@@ -416,4 +416,13 @@ internal static partial class ExtensionLogMessages
         ILogger logger,
         Exception exception,
         string extensionId);
+
+    [LoggerMessage(
+        EventId = 2049,
+        Level = LogLevel.Warning,
+        Message = "Extension assembly shadow link cleanup failed. Operation: {Operation}.")]
+    internal static partial void ExtensionAssemblyShadowLinkCleanupFailed(
+        ILogger logger,
+        Exception exception,
+        string operation);
 }

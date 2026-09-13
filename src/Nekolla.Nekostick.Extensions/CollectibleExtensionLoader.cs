@@ -497,6 +497,7 @@ internal sealed class ContractsIdentityException : Exception
 /// </summary>
 internal static class ExtensionAssemblyShadowLink
 {
+    private static int _cleanupRunning;
     private static readonly string TempRoot = Path.Combine(
         "/tmp",
         "nekostick",
@@ -600,6 +601,86 @@ internal static class ExtensionAssemblyShadowLink
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Schedules a fire-and-forget background sweep removing shadow links whose target directory
+    /// is gone. Failures are logged; a clean sweep completes silently. Concurrent runs collapse
+    /// into one.
+    /// </summary>
+    internal static void ScheduleInvalidLinkCleanup(ILogger? logger)
+    {
+        if (Interlocked.Exchange(ref _cleanupRunning, 1) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                CleanupInvalidLinks(logger);
+            }
+            catch (Exception exception)
+            {
+                if (logger is { } target)
+                {
+                    ExtensionLogMessages.ExtensionAssemblyShadowLinkCleanupFailed(
+                        target,
+                        exception,
+                        "Sweep");
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _cleanupRunning, 0);
+            }
+        });
+    }
+
+    internal static void CleanupInvalidLinks(ILogger? logger)
+    {
+        if (!Directory.Exists(TempRoot))
+        {
+            return;
+        }
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(TempRoot))
+        {
+            try
+            {
+                FileSystemInfo info = new DirectoryInfo(entry);
+                if (info.LinkTarget is null)
+                {
+                    info = new FileInfo(entry);
+                }
+
+                if (info.LinkTarget is null)
+                {
+                    // Regular entries are not created by the shadow loader and are left alone.
+                    continue;
+                }
+
+                if (!Directory.Exists(entry))
+                {
+                    // A symlink whose target is missing or is not a directory can never serve a
+                    // payload generation again. File.Delete unlinks the entry itself, which also
+                    // works for broken directory symlinks (DirectoryInfo.Delete follows the link
+                    // and would throw for a missing target).
+                    File.Delete(entry);
+                }
+            }
+            catch (Exception exception)
+            {
+                if (logger is { } target)
+                {
+                    ExtensionLogMessages.ExtensionAssemblyShadowLinkCleanupFailed(
+                        target,
+                        exception,
+                        "SweepEntry");
+                }
+            }
         }
     }
 

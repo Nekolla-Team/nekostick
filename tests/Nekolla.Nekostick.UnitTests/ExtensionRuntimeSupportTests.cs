@@ -114,6 +114,41 @@ public sealed partial class ExtensionRuntimeTests
         }
     }
 
+    [Fact]
+    public void ShadowLinkCleanupRemovesOnlyLinksWithoutAValidTargetDirectory()
+    {
+        var brokenLink = Path.Combine(ShadowLinkRoot, "cleanup-broken-" + Guid.NewGuid().ToString("N"));
+        var validLink = Path.Combine(ShadowLinkRoot, "cleanup-valid-" + Guid.NewGuid().ToString("N"));
+        var regularFile = Path.Combine(ShadowLinkRoot, "cleanup-keep-" + Guid.NewGuid().ToString("N"));
+        using var fixture = TestExtensionDirectory.CreateJson();
+        Directory.CreateDirectory(ShadowLinkRoot);
+        try
+        {
+            Directory.CreateSymbolicLink(
+                brokenLink,
+                Path.Combine(fixture.RootPath, "missing-" + Guid.NewGuid().ToString("N")));
+            Directory.CreateSymbolicLink(validLink, fixture.RootPath);
+            File.WriteAllText(regularFile, "keep");
+
+            ExtensionAssemblyShadowLink.CleanupInvalidLinks(logger: null);
+
+            Assert.Null(new DirectoryInfo(brokenLink).LinkTarget);
+            Assert.False(Directory.Exists(brokenLink));
+            Assert.NotNull(new DirectoryInfo(validLink).LinkTarget);
+            Assert.NotEmpty(Directory.GetFiles(validLink, "Fixtures.Extension.dll"));
+            Assert.True(File.Exists(regularFile));
+        }
+        finally
+        {
+            DeleteShadowLink(brokenLink);
+            DeleteShadowLink(validLink);
+            if (File.Exists(regularFile))
+            {
+                File.Delete(regularFile);
+            }
+        }
+    }
+
     private static readonly string ShadowLinkRoot = Path.Combine(
         "/tmp",
         "nekostick",

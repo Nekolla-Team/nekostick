@@ -919,6 +919,8 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
 
             contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest, _logger);
         }
+
+        ExtensionAssemblyShadowLink.ScheduleInvalidLinkCleanup(_logger);
         return ExtensionScanResult.Success(manifests, contentHashes, duplicateIds, skipped);
     }
 

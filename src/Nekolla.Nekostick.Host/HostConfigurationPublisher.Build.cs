@@ -183,6 +183,8 @@ public sealed partial class HostConfigurationPublisher
             contentHashes[manifest.Id] = ExtensionContentDigest.TryCompute(manifest, _logger);
         }
 
+        ExtensionAssemblyShadowLink.ScheduleInvalidLinkCleanup(_logger);
+
         var quarantinedIds = new HashSet<string>(StringComparer.Ordinal);
         var unavailableLoadedIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var id in duplicateDurableIds)

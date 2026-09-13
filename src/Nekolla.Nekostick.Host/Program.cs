@@ -159,6 +159,7 @@ internal static class Program
             }
 
             app.Services.GetRequiredService<HostRuntimeState>().MarkSnapshotAccepted();
+            ExtensionAssemblyShadowLink.ScheduleInvalidLinkCleanup(logger);
             ConfigureRunPipeline(app);
             var startupLogger = app.Services.GetRequiredService<ILoggerFactory>()
                 .CreateLogger(HostLoggerCategory.Startup);
