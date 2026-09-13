@@ -11,7 +11,8 @@ public sealed partial class ExtensionRuntimeManager
         ExtensionSettingsConfiguration? settings,
         bool reloading,
         CancellationToken cancellationToken,
-        ImmutableArray<Guid> routeIds = default)
+        ImmutableArray<Guid> routeIds = default,
+        string? contentHash = null)
     {
         if (cancellationToken.IsCancellationRequested)
         {
@@ -23,7 +24,7 @@ public sealed partial class ExtensionRuntimeManager
         {
             return CandidateResult.Failure(contractFailure);
         }
-        var loaded = _loader.Load(manifest);
+        var loaded = _loader.Load(manifest, contentHash);
         if (!loaded.Succeeded || loaded.Handle is null)
         {
             var loadFailureCode = loaded.FailureCode.ToString();

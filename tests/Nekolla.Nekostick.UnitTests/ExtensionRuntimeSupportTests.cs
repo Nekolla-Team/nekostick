@@ -53,6 +53,87 @@ public sealed partial class ExtensionRuntimeTests
         Assert.Equal(ExtensionRuntimeState.Unloaded, unload.State);
     }
 
+    [Fact]
+    public void LoaderLoadsThroughAPerContentShadowLink()
+    {
+        const string extensionId = "fixture.extension.shadow.link";
+        var hash = new string('c', 64);
+        var linkPath = Path.Combine(ShadowLinkRoot, extensionId + "-" + hash);
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson(extensionId));
+        var manifest = Discover(fixture.RootPath);
+        var loader = new CollectibleExtensionLoader(new SemVersion(1, 0, 0));
+        try
+        {
+            var loaded = loader.Load(manifest, "sha256:" + hash);
+
+            Assert.True(loaded.Succeeded, loaded.FailureCode.ToString());
+            Assert.NotNull(new DirectoryInfo(linkPath).LinkTarget);
+            Assert.NotEmpty(Directory.GetFiles(linkPath, "Fixtures.Extension.dll"));
+            loaded.Handle!.Dispose();
+        }
+        finally
+        {
+            DeleteShadowLink(linkPath);
+        }
+    }
+
+    [Fact]
+    public void LoaderReadsFreshBytesAfterAnInPlaceReplacementWithANewContentHash()
+    {
+        const string extensionId = "fixture.extension.shadow.fresh";
+        var firstHash = new string('d', 64);
+        var secondHash = new string('e', 64);
+        var firstLink = Path.Combine(ShadowLinkRoot, extensionId + "-" + firstHash);
+        var secondLink = Path.Combine(ShadowLinkRoot, extensionId + "-" + secondHash);
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson(extensionId));
+        var manifest = Discover(fixture.RootPath);
+        var loader = new CollectibleExtensionLoader(new SemVersion(1, 0, 0));
+        try
+        {
+            var first = loader.Load(manifest, "sha256:" + firstHash);
+            Assert.True(first.Succeeded, first.FailureCode.ToString());
+
+            // Replace the payload in place while the previous generation's context stays alive.
+            var entryPath = Path.Combine(fixture.RootPath, "Fixtures.Extension.dll");
+            var stagedPath = entryPath + ".staged";
+            File.WriteAllBytes(stagedPath, new byte[64 * 1024]);
+            File.Move(stagedPath, entryPath, overwrite: true);
+
+            // A stale image cached for the real path would load successfully; the fresh garbage
+            // bytes behind the new shadow path must fail instead.
+            var second = loader.Load(manifest, "sha256:" + secondHash);
+
+            Assert.False(second.Succeeded);
+            Assert.Equal(ExtensionFailureCode.LoadFailed, second.FailureCode);
+            first.Handle!.Dispose();
+        }
+        finally
+        {
+            DeleteShadowLink(firstLink);
+            DeleteShadowLink(secondLink);
+        }
+    }
+
+    private static readonly string ShadowLinkRoot = Path.Combine(
+        "/tmp",
+        "nekostick",
+        "extension-assembly-temp");
+
+    private static void DeleteShadowLink(string path)
+    {
+        try
+        {
+            var info = new DirectoryInfo(path);
+            if (info.LinkTarget is not null)
+            {
+                info.Delete();
+            }
+        }
+        catch (IOException)
+        {
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static ExtensionUnloadResult LoadAndUnloadCollectibleExtension(ExtensionManifest manifest)
     {

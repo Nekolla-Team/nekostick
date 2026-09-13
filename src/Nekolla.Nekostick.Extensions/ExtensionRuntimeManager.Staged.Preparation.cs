@@ -190,7 +190,8 @@ public sealed partial class ExtensionRuntimeManager
                             descriptor.Settings,
                             reloading: true,
                             operationToken,
-                            descriptor.RouteIds)
+                            descriptor.RouteIds,
+                            descriptor.ContentHash)
                         .ConfigureAwait(false);
                     if (candidateResult.Succeeded && candidateResult.Instance is { } started)
                     {

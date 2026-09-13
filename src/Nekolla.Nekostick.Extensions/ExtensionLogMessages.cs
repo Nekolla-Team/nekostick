@@ -407,4 +407,13 @@ internal static partial class ExtensionLogMessages
         ILogger logger,
         long generationId,
         int candidateCount);
+
+    [LoggerMessage(
+        EventId = 2048,
+        Level = LogLevel.Debug,
+        Message = "Extension assembly shadow link was unavailable; loading from the real path. ExtensionId: {ExtensionId}.")]
+    internal static partial void ExtensionAssemblyShadowLinkUnavailable(
+        ILogger logger,
+        Exception exception,
+        string extensionId);
 }

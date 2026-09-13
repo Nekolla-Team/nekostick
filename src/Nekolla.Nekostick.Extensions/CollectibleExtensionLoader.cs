@@ -1,6 +1,8 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
+using System.Security.Cryptography;
+using System.Text;
 using Nekolla.Nekostick.Contracts;
 using Microsoft.Extensions.Logging;
 
@@ -300,8 +302,9 @@ public sealed class CollectibleExtensionLoader
 
     /// <summary>Loads an entry assembly from the manifest's approved extension root.</summary>
     /// <param name="manifest">The manifest returned by explicit discovery.</param>
+    /// <param name="contentHash">The optional recorded content digest used to key the per-content shadow load path.</param>
     /// <returns>A safe result with no raw exception or path data.</returns>
-    public ExtensionLoadResult Load(ExtensionManifest? manifest)
+    public ExtensionLoadResult Load(ExtensionManifest? manifest, string? contentHash = null)
     {
         if (manifest is null)
         {
@@ -344,8 +347,17 @@ public sealed class CollectibleExtensionLoader
         ExtensionLoadContext? loadContext = null;
         try
         {
-            loadContext = new ExtensionLoadContext(entryPath, root, _contractCatalog);
-            var entryAssembly = loadContext.LoadFromAssemblyPath(entryPath);
+            var shadowRoot = ExtensionAssemblyShadowLink.TryCreate(
+                manifest.Id,
+                contentHash,
+                root,
+                entryPath,
+                _logger);
+            var loadEntryPath = shadowRoot is null
+                ? entryPath
+                : Path.Combine(shadowRoot, Path.GetRelativePath(root, entryPath));
+            loadContext = new ExtensionLoadContext(loadEntryPath, root, _contractCatalog, shadowRoot);
+            var entryAssembly = loadContext.LoadFromAssemblyPath(loadEntryPath);
             var entryType = entryAssembly.GetType(manifest.EntryType, throwOnError: false, ignoreCase: false);
             if (entryType is null)
             {
@@ -381,6 +393,7 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
 {
     private readonly AssemblyDependencyResolver _resolver;
     private readonly string _root;
+    private readonly string? _shadowRoot;
     private readonly ExtensionContractCatalog _contractCatalog;
     private readonly Assembly _contractsAssembly = typeof(HostApiVersion).Assembly;
     private readonly AssemblyName _contractsIdentity = typeof(HostApiVersion).Assembly.GetName();
@@ -388,12 +401,14 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
     internal ExtensionLoadContext(
         string entryAssemblyPath,
         string root,
-        ExtensionContractCatalog contractCatalog)
+        ExtensionContractCatalog contractCatalog,
+        string? shadowRoot = null)
         : base(isCollectible: true)
     {
         _resolver = new AssemblyDependencyResolver(entryAssemblyPath);
         _root = root;
         _contractCatalog = contractCatalog;
+        _shadowRoot = shadowRoot;
     }
 
     protected override Assembly? Load(AssemblyName assemblyName)
@@ -432,12 +447,33 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
             return null;
         }
 
+        var loadPath = ResolveLoadPath(resolvedPath);
+        return LoadFromAssemblyPath(loadPath);
+    }
+
+    private string ResolveLoadPath(string resolvedPath)
+    {
+        // The shadow root is a directory symlink into the approved extension root. Containment is
+        // still enforced against the canonical real root, but the bytes are read through the
+        // per-content shadow path so the runtime cannot serve a stale image cached for the real
+        // path of an in-place replaced file.
+        if (_shadowRoot is not null && CanonicalPath.IsWithin(_shadowRoot, resolvedPath))
+        {
+            var realCandidate = Path.Combine(_root, Path.GetRelativePath(_shadowRoot, resolvedPath));
+            if (!CanonicalPath.TryCanonicalFileInRoot(_root, realCandidate, out var shadowedCanonical))
+            {
+                throw new InvalidOperationException();
+            }
+
+            return Path.Combine(_shadowRoot, Path.GetRelativePath(_root, shadowedCanonical));
+        }
+
         if (!CanonicalPath.TryCanonicalFileInRoot(_root, resolvedPath, out var canonicalPath))
         {
             throw new InvalidOperationException();
         }
 
-        return LoadFromAssemblyPath(canonicalPath);
+        return canonicalPath;
     }
 
     private static bool AssemblyIdentityMatches(AssemblyName requested, AssemblyName approved)
@@ -453,4 +489,129 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
 
 internal sealed class ContractsIdentityException : Exception
 {
+}
+
+/// <summary>
+/// Maintains per-content directory symlinks under the shared temp root so every distinct payload
+/// generation is loaded through a path the runtime assembly image cache has never seen.
+/// </summary>
+internal static class ExtensionAssemblyShadowLink
+{
+    private static readonly string TempRoot = Path.Combine(
+        "/tmp",
+        "nekostick",
+        "extension-assembly-temp");
+
+    /// <summary>
+    /// Returns the shadow directory for one extension content generation, creating the directory
+    /// symlink when missing, or <see langword="null" /> when shadowing is unavailable and the
+    /// caller must load from the real path.
+    /// </summary>
+    internal static string? TryCreate(
+        string extensionId,
+        string? contentHash,
+        string extensionRoot,
+        string entryAssemblyPath,
+        ILogger? logger)
+    {
+        try
+        {
+            var suffix = ResolveSuffix(contentHash, entryAssemblyPath);
+            if (suffix is null)
+            {
+                return null;
+            }
+
+            Directory.CreateDirectory(TempRoot);
+            var linkPath = Path.Combine(TempRoot, Sanitize(extensionId) + "-" + suffix);
+            if (LinkTargets(linkPath, extensionRoot))
+            {
+                return linkPath;
+            }
+
+            // A name owned by different content is never rewritten: identical names imply
+            // identical bytes, so the loser simply loads from the real path instead.
+            if (new DirectoryInfo(linkPath).LinkTarget is not null || Directory.Exists(linkPath))
+            {
+                return null;
+            }
+
+            try
+            {
+                Directory.CreateSymbolicLink(linkPath, extensionRoot);
+            }
+            catch (IOException)
+            {
+                // A concurrent loader won the creation race; accept its link only when it names
+                // the same content generation.
+            }
+
+            return LinkTargets(linkPath, extensionRoot) ? linkPath : null;
+        }
+        catch (Exception exception)
+        {
+            if (logger is { } target)
+            {
+                ExtensionLogMessages.ExtensionAssemblyShadowLinkUnavailable(target, exception, extensionId);
+            }
+
+            return null;
+        }
+    }
+
+    private static bool LinkTargets(string linkPath, string extensionRoot)
+    {
+        var info = new DirectoryInfo(linkPath);
+        if (info.LinkTarget is null)
+        {
+            return false;
+        }
+
+        var target = info.ResolveLinkTarget(returnFinalTarget: true);
+        return target is not null &&
+            string.Equals(
+                Path.GetFullPath(target.FullName),
+                Path.GetFullPath(extensionRoot),
+                StringComparison.Ordinal);
+    }
+
+    private static string? ResolveSuffix(string? contentHash, string entryAssemblyPath)
+    {
+        if (!string.IsNullOrWhiteSpace(contentHash))
+        {
+            var value = contentHash.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                ? contentHash["sha256:".Length..]
+                : contentHash;
+            return Sanitize(value);
+        }
+
+        // Without a recorded digest the entry assembly bytes still yield a content-true key.
+        try
+        {
+            using var stream = new FileStream(
+                entryAssemblyPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                128 * 1024,
+                FileOptions.SequentialScan);
+            return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string Sanitize(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            builder.Append(
+                char.IsLetterOrDigit(character) || character is '-' or '.' or '_' ? character : '-');
+        }
+
+        return builder.ToString();
+    }
 }
