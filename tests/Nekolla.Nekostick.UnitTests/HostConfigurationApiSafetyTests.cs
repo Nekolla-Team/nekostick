@@ -139,6 +139,10 @@ public sealed class HostConfigurationSafetyTests
         Assert.False(state.NewServicesAllowed);
         Assert.False(state.IsReady);
         Assert.False(state.Status.SnapshotAvailable);
+        Assert.Equal(HostReadinessState.Publishing, state.Status.Readiness);
+
+        state.EndStagedConfigurationWrites();
+
         Assert.Equal(HostReadinessState.Unready, state.Status.Readiness);
     }
 

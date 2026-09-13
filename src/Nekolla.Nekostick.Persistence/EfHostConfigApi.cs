@@ -957,7 +957,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             if (setting is null)
             {
                 return ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound));
+                    new ConfigurationError(ConfigurationErrorCode.NoSettings));
             }
 
             var result = new ExtensionSettingsConfiguration(

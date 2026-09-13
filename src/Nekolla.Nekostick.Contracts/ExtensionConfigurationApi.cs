@@ -277,6 +277,11 @@ public sealed record ExtensionConfigurationChangeSet
 /// The host binds the caller identity to this facade; callers cannot select an owner.
 /// Reads contain only caller-owned records. Applies are optimistic-versioned, atomic, validated,
 /// and publish notifications only after commit. Domain failures are returned as safe results.
+/// <para>
+/// Scoped writes through this facade are contractually safe from <c>StartAsync</c> onward: during a
+/// configuration publication the host keeps the staged write path open for starting extensions, so
+/// startup code may write its own records and settings without waiting for the host to become ready.
+/// </para>
 /// </remarks>
 public interface IExtensionConfigurationApi
 {
@@ -300,6 +305,11 @@ public interface IExtensionConfigurationApi
         CancellationToken cancellationToken = default);
 
     /// <summary>Reads the caller's own persisted settings document.</summary>
+    /// <remarks>
+    /// A freshly installed extension has no settings document; the read then fails with
+    /// <see cref="ConfigurationErrorCode.NoSettings" /> (not <see cref="ConfigurationErrorCode.NotFound" />).
+    /// Absence is a normal initial state: create the document with <see cref="WriteSettingsAsync" />.
+    /// </remarks>
     /// <param name="cancellationToken">The operation cancellation token.</param>
     /// <returns>The settings document or safe errors.</returns>
     ValueTask<ConfigurationReadResult<ExtensionSettingsConfiguration>> ReadSettingsAsync(

@@ -137,7 +137,7 @@ public interface IExtensionOwnedConfigurationApi
         Func<string, bool>? handlerIsOwned = null,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Reads only the supplied extension's settings.</summary>
+    /// <summary>Reads only the supplied extension's settings; a missing document fails with <see cref="ConfigurationErrorCode.NoSettings" />.</summary>
     ValueTask<ConfigurationReadResult<ExtensionSettingsConfiguration>> ReadOwnedSettingsAsync(
         string extensionId,
         CancellationToken cancellationToken = default);

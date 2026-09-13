@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Tests.Fixtures.Extension;
@@ -10,6 +11,67 @@ namespace Nekolla.Nekostick.UnitTests;
 
 public sealed partial class ExtensionRuntimeTests
 {
+    [Fact]
+    public async Task ExtensionReportedStatusIsRecordedAndLogged()
+    {
+        const string extensionId = "fixture.extension.deterministic";
+        var logger = new CapturingLogger();
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, logger: logger);
+
+        var load = await manager.LoadAsync(
+            manifest,
+            Settings(extensionId, reportStatus: "settings-unavailable"),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(load.Succeeded, load.FailureCode.ToString());
+        var status = manager.GetStatus(extensionId);
+        Assert.NotNull(status);
+        Assert.Equal(ExtensionStatusKind.Degraded, status!.ReportedStatusKind);
+        Assert.Equal("settings-unavailable", status.ReportedStatusCode);
+        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Warning);
+        Assert.Equal(2050, entry.EventId.Id);
+    }
+
+    [Fact]
+    public async Task ExtensionWithoutReportedStatusStaysSilent()
+    {
+        const string extensionId = "fixture.extension.deterministic";
+        var logger = new CapturingLogger();
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, logger: logger);
+
+        var load = await manager.LoadAsync(
+            manifest,
+            Settings(extensionId),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(load.Succeeded, load.FailureCode.ToString());
+        var status = manager.GetStatus(extensionId);
+        Assert.NotNull(status);
+        Assert.Null(status!.ReportedStatusKind);
+        Assert.Null(status.ReportedStatusCode);
+        Assert.DoesNotContain(logger.Entries, item => item.Level == LogLevel.Warning);
+    }
+
+    private sealed class CapturingLogger : ILogger
+    {
+        internal List<(LogLevel Level, EventId EventId, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, eventId, formatter(state, exception)));
+    }
     [Fact]
     public void LoaderRejectsContractCatalogEntriesInsideExtensionRoots()
     {
@@ -226,7 +288,8 @@ public sealed partial class ExtensionRuntimeTests
         int lifecycleObservationPort = 0,
         int unregisterBarrierPort = 0,
         bool subscribeSettingsChanged = false,
-        bool readDataDirectory = false)
+        bool readDataDirectory = false,
+        string? reportStatus = null)
     {
         var json = JsonSerializer.Serialize(new
         {
@@ -265,7 +328,8 @@ public sealed partial class ExtensionRuntimeTests
             lifecycleObservationPort,
             unregisterBarrierPort,
             subscribeSettingsChanged,
-            readDataDirectory
+            readDataDirectory,
+            reportStatus
         });
         return new ExtensionSettingsConfiguration(extensionId, 1, json, 0);
     }

@@ -57,7 +57,7 @@ public sealed partial class PostgresConfigurationContractTests
             ExtensionId,
             cancellationToken);
         Assert.False(missingSettings.IsSuccess);
-        Assert.Equal(ConfigurationErrorCode.NotFound, missingSettings.Errors.Single().Code);
+        Assert.Equal(ConfigurationErrorCode.NoSettings, missingSettings.Errors.Single().Code);
 
         var staleBootstrap = await api.PersistDiscoveredExtensionRecordsAsync(
             initial.Value.Version,

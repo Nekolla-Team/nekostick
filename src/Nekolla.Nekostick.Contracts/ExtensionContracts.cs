@@ -131,7 +131,14 @@ public enum ExtensionHostReadinessState
     Ready,
 
     /// <summary>A snapshot remains available while persistence capabilities are degraded.</summary>
-    Degraded
+    Degraded,
+
+    /// <summary>
+    /// A configuration publication is in flight: no validated snapshot is available yet, but readiness
+    /// advances when the publication completes. Distinct from <see cref="Unready" />, which means no
+    /// publication is progressing.
+    /// </summary>
+    Publishing
 }
 
 /// <summary>Contains immutable, non-sensitive host state visible to an extension.</summary>
@@ -235,6 +242,12 @@ public sealed record ExtensionHostInfoSnapshot
     public DateTimeOffset? LastSnapshotStateAt { get; }
 
     /// <summary>Gets the safe host readiness state.</summary>
+    /// <remarks>
+    /// Lifecycle callbacks (for example <c>StartAsync</c>) run inside a publication: readiness is then
+    /// <see cref="ExtensionHostReadinessState.Publishing" /> (or <see cref="ExtensionHostReadinessState.Unready" />
+    /// on older hosts) by construction, never <see cref="ExtensionHostReadinessState.Ready" />. Treat this
+    /// value as observational during lifecycle callbacks; do not gate the extension's main work on it there.
+    /// </remarks>
     public ExtensionHostReadinessState Readiness { get; }
 }
 

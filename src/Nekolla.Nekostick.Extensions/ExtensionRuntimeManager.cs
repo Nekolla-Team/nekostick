@@ -96,7 +96,9 @@ public sealed record ExtensionRuntimeStatus
         int activeTasks,
         int failureCount,
         long droppedEvents,
-        ExtensionFailureCode lastFailure)
+        ExtensionFailureCode lastFailure,
+        ExtensionStatusKind? reportedStatusKind = null,
+        string? reportedStatusCode = null)
     {
         ExtensionId = extensionId;
         Version = version;
@@ -108,6 +110,8 @@ public sealed record ExtensionRuntimeStatus
         FailureCount = failureCount;
         DroppedEvents = droppedEvents;
         LastFailure = lastFailure;
+        ReportedStatusKind = reportedStatusKind;
+        ReportedStatusCode = reportedStatusCode;
     }
 
     /// <summary>Gets the stable extension identifier.</summary>
@@ -139,6 +143,12 @@ public sealed record ExtensionRuntimeStatus
 
     /// <summary>Gets the last safe failure category.</summary>
     public ExtensionFailureCode LastFailure { get; }
+
+    /// <summary>Gets the latest status kind reported by the extension, or <see langword="null" /> when none was reported.</summary>
+    public ExtensionStatusKind? ReportedStatusKind { get; }
+
+    /// <summary>Gets the latest status code reported by the extension, or <see langword="null" /> when none was reported.</summary>
+    public string? ReportedStatusCode { get; }
 }
 
 /// <summary>Runs explicit extension load, unload, reload, and handler operations.</summary>

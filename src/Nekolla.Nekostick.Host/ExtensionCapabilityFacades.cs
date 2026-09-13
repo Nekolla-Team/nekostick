@@ -103,6 +103,7 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             HostReadinessState.Ready => ExtensionHostReadinessState.Ready,
             HostReadinessState.Degraded => ExtensionHostReadinessState.Degraded,
             HostReadinessState.Unready => ExtensionHostReadinessState.Unready,
+            HostReadinessState.Publishing => ExtensionHostReadinessState.Publishing,
             _ => ExtensionHostReadinessState.Unknown
         };
 

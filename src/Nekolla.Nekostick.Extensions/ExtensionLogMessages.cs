@@ -425,4 +425,22 @@ internal static partial class ExtensionLogMessages
         ILogger logger,
         Exception exception,
         string operation);
+
+    [LoggerMessage(
+        EventId = 2050,
+        Level = LogLevel.Warning,
+        Message = "Extension reported an unhealthy status. ExtensionId: {ExtensionId}. Kind: {Kind}. Code: {Code}.")]
+    internal static partial void ExtensionReportedUnhealthyStatus(
+        ILogger logger,
+        string extensionId,
+        string kind,
+        string code);
+
+    [LoggerMessage(
+        EventId = 2051,
+        Level = LogLevel.Information,
+        Message = "Extension reported a healthy status again. ExtensionId: {ExtensionId}.")]
+    internal static partial void ExtensionReportedHealthyStatus(
+        ILogger logger,
+        string extensionId);
 }

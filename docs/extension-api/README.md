@@ -12,8 +12,9 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
 | [api-1.1.md](api-1.1.md) | 1.1.0 | 属主配置 API、属主路由 CRUD、属主服务 CRUD 与生命周期、端点租约、自身生命周期 |
 | [api-1.2.md](api-1.2.md) | 1.2.0 | 全量配置读写（`FullConfiguration`） |
 | [api-1.3.md](api-1.3.md) | 1.3.1 / 1.3.2 / 1.3.3 patch | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新；1.3.2 追加设置内容变更事件、Host 数据目录、流式请求/响应处理器；1.3.3 追加节点本地 Resume/Restart、HostInfo、Waiting 状态与内容摘要 |
+| [api-1.4.md](api-1.4.md) | 1.4.0 | 完善扩展能力与全局管控 |
 
-当前 Contracts 包版本为 **1.3.3**（`HostApiVersion.Current`）。
+当前 Contracts 包版本为 **1.4.0-preview.1**（`HostApiVersion.Current` 为 `1.4.0`）。
 
 ## 快速开始
 
@@ -260,6 +261,7 @@ ConfigurationWriteResult    // IsSuccess / NewVersion / Errors
 | `Validation` | 配置未通过语义校验。 |
 | `ConcurrencyConflict` | `expectedVersion` 已过期。 |
 | `NotFound` | 目标配置项不存在。 |
+| `NoSettings` | 扩展自身还没有已持久化的设置文档（初始状态，可用 `WriteSettingsAsync` 创建）。 |
 | `Unsupported` | 当前协商版本不支持该操作（低版本 Host）。 |
 | `StorageUnavailable` | 配置存储暂不可用。 |
 

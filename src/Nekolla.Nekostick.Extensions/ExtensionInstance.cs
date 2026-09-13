@@ -23,6 +23,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     private readonly ExtensionRouteRegistrationSet _routeRegistrations;
     private ExtensionLoadState _state = ExtensionLoadState.Discovered;
     private ExtensionFailureCode _lastFailure;
+    private ExtensionStatus? _reportedStatus;
+    private readonly ILogger? _logger;
     internal ExtensionInstance(
         ExtensionManifest manifest,
         ExtensionLoadHandle loadHandle,
@@ -37,6 +39,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         Manifest = manifest;
         Settings = settings;
         _loadHandle = loadHandle;
+        _logger = logger;
         _events = new ExtensionEventQueue(NotifyFailureAsync, onDrop: RecordDroppedEvent, logger: logger);
         _routeRegistrations = new ExtensionRouteRegistrationSet(
             manifest.Id,
@@ -70,11 +73,39 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             _contracts,
             capabilities,
             lifecycle,
-            _ => { },
+            ReportStatus,
             (_, _) => { },
             dataDirectory,
             logger);
         _entrypoint = loadHandle.CreateEntrypoint(_bridge);
+    }
+
+    private void ReportStatus(ExtensionStatus status)
+    {
+        ExtensionStatus? previous;
+        lock (_gate)
+        {
+            previous = _reportedStatus;
+            _reportedStatus = status;
+        }
+
+        if (_logger is not { } logger)
+        {
+            return;
+        }
+
+        if (status.Kind != ExtensionStatusKind.Healthy)
+        {
+            ExtensionLogMessages.ExtensionReportedUnhealthyStatus(
+                logger,
+                Manifest.Id,
+                status.Kind.ToString(),
+                status.Code);
+        }
+        else if (previous is { Kind: not ExtensionStatusKind.Healthy })
+        {
+            ExtensionLogMessages.ExtensionReportedHealthyStatus(logger, Manifest.Id);
+        }
     }
     internal ExtensionRouteRegistrationSet RouteRegistrations => _routeRegistrations;
 
@@ -309,7 +340,9 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                 _tasks.Count,
                 _failures.Count,
                 _events.DroppedCount,
-                _lastFailure);
+                _lastFailure,
+                _reportedStatus?.Kind,
+                _reportedStatus?.Code);
         }
     }
     internal bool IsServing

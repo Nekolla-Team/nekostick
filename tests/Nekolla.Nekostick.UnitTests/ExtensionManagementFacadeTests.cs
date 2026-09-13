@@ -443,6 +443,47 @@ public sealed class ExtensionManagementFacadeTests
         Assert.Null(entry.ManifestVersion);
     }
 
+    [Fact]
+    public async Task ListSurfacesExtensionReportedStatus()
+    {
+        var extensionId = "list.reported." + Guid.NewGuid().ToString("N");
+        var manifestJson = ExtensionManifestTestDefaults.Json.Replace(
+            "fixture.extension.deterministic",
+            extensionId,
+            StringComparison.Ordinal);
+        using var fixture = TestExtensionDirectory.CreateJson(manifestJson);
+        var discovered = ExtensionManifestDiscovery.Discover(fixture.RootPath);
+        Assert.True(discovered.Succeeded, discovered.FailureCode.ToString());
+
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        var settings = new ExtensionSettingsConfiguration(
+            extensionId,
+            schemaVersion: 1,
+            settingsJson: JsonSerializer.Serialize(new { reportStatus = "settings-unavailable" }),
+            version: 1);
+        var loaded = await manager.LoadAsync(
+            discovered.Manifest!,
+            settings,
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(loaded.Succeeded, loaded.FailureCode.ToString());
+
+        var snapshot = CreateSnapshot(new ExtensionRecordConfiguration(
+            extensionId,
+            "1.0.0",
+            ExtensionLoadState.Loaded,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            1));
+        var facade = CreateFacade(manager, snapshot, new SnapshotHostConfigApi(snapshot));
+
+        var result = await facade.ListAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(result.IsSuccess, result.Errors.FirstOrDefault()?.Message);
+        var entry = Assert.Single(result.Value!);
+        Assert.Equal(ExtensionStatusKind.Degraded, entry.ReportedStatusKind);
+        Assert.Equal("settings-unavailable", entry.ReportedStatusCode);
+    }
+
     private static ExtensionManagementFacade CreateFacade(
         ExtensionRuntimeManager manager,
         HostConfigurationSnapshot snapshot,

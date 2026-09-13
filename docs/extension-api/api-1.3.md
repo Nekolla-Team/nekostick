@@ -1,6 +1,6 @@
 # API 1.3：遥测、路由观测、自定义日志、扩展管理与流式处理
 
-本文描述 API 1.3 的完整能力。当前 Contracts 包版本为 **1.3.3**；`HostApiVersion.Current` 与 `ExtensionAbi.Version` 均为 `1.3.3`。`1.3.2` / `1.3.3` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.3 Host 满足）。
+本文描述 API 1.3 的完整能力。`1.3.2` / `1.3.3` 是 API 1.3 代次内的增量补丁，不引入新的 API version，也不改变 1.2 桥契约。要求 Host API 1.3 的既有扩展 manifest 仍然有效（例如要求 1.3 major/minor 且 `<2.0.0` 的范围可以由 1.3.3 Host 满足）。后续代次的追加能力见 [api-1.4.md](api-1.4.md)。
 
 API 1.3 通过旁路桥 `IExtensionHostBridge13` 追加七组能力：
 
@@ -171,11 +171,16 @@ ValueTask<ConfigurationWriteResult> RestartAsync(Guid serviceId, CancellationTok
 
 ```csharp
 var info = bridge13.HostInfo;
-if (info.Readiness != ExtensionHostReadinessState.Ready)
+if (info.Readiness == ExtensionHostReadinessState.Degraded)
 {
-    // 例如：数据库暂不可用或快照尚未发布时跳过依赖配置的主动作
+    // 例如：数据库暂不可用时主动降级非关键功能
 }
 ```
+
+> 注意：生命周期回调（如 `StartAsync`）运行在发布流程内部，此时 `Readiness` 必然是
+> `Unready`，绝不可能是 `Ready` —— 在那里等待 `Ready` 会死锁；生命周期回调里只把
+> `HostInfo` 当观测信息使用。1.4 起该窗口细分为独立的 `Publishing` 状态，见
+> [api-1.4.md](api-1.4.md#发布中的-readinesspublishing)。
 
 | 属性 | 类型 | 说明 |
 | --- | --- | --- |
@@ -189,7 +194,7 @@ if (info.Readiness != ExtensionHostReadinessState.Ready)
 | `PublishedConfigurationVersion` | `long?` | 当前已发布的配置版本；未知为 `null`。 |
 | `LastSnapshotState` | 枚举 | 最近一次快照接受 / 拒绝状态。 |
 | `LastSnapshotStateAt` | `DateTimeOffset?` | 最近一次快照状态迁移时间（UTC）。 |
-| `Readiness` | 枚举 | `Unknown` / `Unready` / `Ready` / `Degraded`。 |
+| `Readiness` | 枚举 | `Unknown` / `Unready` / `Ready` / `Degraded`。1.4 起追加 `Publishing`，见 [api-1.4.md](api-1.4.md#发布中的-readinesspublishing)。 |
 
 协商版本低于 1.3.3 时返回 `ExtensionHostInfoSnapshot.Unavailable`（所有字段未知/空）。快照绝不包含连接串、机密、环境变量值、进程句柄等宿主实现细节；扩展不应依赖它做安全判定，只用作可观测性与降级提示。
 
@@ -217,7 +222,7 @@ var records = await management.ListAsync(cancellationToken);
 | `RecordVersion` | 记录的乐观并发版本。 |
 | `IsRunning` | 当前运行时是否有该扩展的 Loaded 代次；它不是持久化启用意图。 |
 | `ManifestVersion` | 最近一次目录扫描观察到的 manifest 版本；manifest 缺失时为 `null`。 |
-| `ContentHash` | 扩展目录内容的 SHA-256 摘要（`sha256:<64 位小写十六进制>`），未记录时为 `null`。用于多节点内容一致性检测，见 [README](README.md#内容摘要与多节点部署)。 |
+| `ContentHash` | 扩展目录内容的 SHA-256 摘要（`sha256:<64 位小写十六进制>`），未记录时为 `null`。用于多节点内容一致性检测，见 [README](README.md#内容摘要与多节点部署)。1.4 起条目还包含扩展自定义上报状态（`ReportedStatusKind` / `ReportedStatusCode`），见 [api-1.4.md](api-1.4.md#扩展状态上报的持久观测)。 |
 
 `RequestRefreshAsync` 返回 `ExtensionRefreshSummary`：
 

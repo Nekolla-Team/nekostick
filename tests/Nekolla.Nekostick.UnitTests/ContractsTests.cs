@@ -195,8 +195,8 @@ public sealed partial class ContractsTests
         var compatibleFix = new HostApiVersion(current.Major, current.Minor, current.Patch + 1);
         var incompatible = new HostApiVersion(current.Major + 1, 0, 0);
 
-        Assert.Equal(new HostApiVersion(1, 3, 4), current);
-        Assert.Equal("1.3.4", current.ToString());
+        Assert.Equal(new HostApiVersion(1, 4, 0), current);
+        Assert.Equal("1.4.0", current.ToString());
         Assert.True(legacyCompatible < current);
         Assert.True(ExtensionAbi.IsCompatible(legacyCompatible, current));
         Assert.False(ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), legacyCompatible));
@@ -204,7 +204,7 @@ public sealed partial class ContractsTests
         Assert.True(compatibleFeature.CompareTo(current) > 0);
         Assert.True(compatibleFix.CompareTo(current) > 0);
         Assert.True(incompatible.CompareTo(current) > 0);
-        Assert.Equal(0, current.CompareTo(new HostApiVersion(1, 3, 4)));
+        Assert.Equal(0, current.CompareTo(new HostApiVersion(1, 4, 0)));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(-1, 0, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(0, -1, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new HostApiVersion(0, 0, -1));

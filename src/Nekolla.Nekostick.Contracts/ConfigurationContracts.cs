@@ -19,7 +19,10 @@ public enum ConfigurationErrorCode
     Unsupported,
 
     /// <summary>The backing configuration store was unavailable.</summary>
-    StorageUnavailable
+    StorageUnavailable,
+
+    /// <summary>The extension has no persisted settings document yet; creating one is the expected next step.</summary>
+    NoSettings
 }
 
 /// <summary>Contains a safe configuration error without exception or secret data.</summary>
@@ -37,6 +40,7 @@ public sealed record ConfigurationError
             ConfigurationErrorCode.NotFound => "Configuration item was not found.",
             ConfigurationErrorCode.Unsupported => "Configuration operation is unsupported.",
             ConfigurationErrorCode.StorageUnavailable => "Configuration storage is unavailable.",
+            ConfigurationErrorCode.NoSettings => "The extension has no persisted settings document.",
             _ => "Configuration operation failed."
         };
     }

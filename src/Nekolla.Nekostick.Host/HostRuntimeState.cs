@@ -9,7 +9,8 @@ public sealed record HostRuntimeStatus
         bool snapshotAvailable,
         bool databaseAvailable,
         bool configurationValid,
-        bool readOnly)
+        bool readOnly,
+        bool publicationInProgress)
     {
         SnapshotAvailable = snapshotAvailable;
         DatabaseAvailable = databaseAvailable;
@@ -19,7 +20,7 @@ public sealed record HostRuntimeStatus
         NewServicesAllowed = snapshotAvailable && databaseAvailable && configurationValid;
         Readiness = snapshotAvailable
             ? databaseAvailable && configurationValid ? HostReadinessState.Ready : HostReadinessState.Degraded
-            : HostReadinessState.Unready;
+            : publicationInProgress ? HostReadinessState.Publishing : HostReadinessState.Unready;
     }
 
     /// <summary>Gets whether a validated complete snapshot is available in memory.</summary>
@@ -54,7 +55,10 @@ public enum HostReadinessState
     Ready,
 
     /// <summary>A snapshot remains routable while persistence capabilities are disabled.</summary>
-    Degraded
+    Degraded,
+
+    /// <summary>A configuration publication is in flight and no validated snapshot is available yet.</summary>
+    Publishing
 }
 
 /// <summary>Tracks database and configuration capability state independently of the snapshot.</summary>
@@ -116,7 +120,8 @@ public sealed class HostRuntimeState
         _snapshotHolder.Current is not null,
         Volatile.Read(ref _databaseAvailable) == 1,
         Volatile.Read(ref _configurationValid) == 1,
-        _readOnly);
+        _readOnly,
+        Volatile.Read(ref _stagedConfigurationWritesAllowed) == 1);
     /// <summary>Gets whether host-wide configuration writes may be attempted.</summary>
     public bool ConfigurationWritesAllowed => Status.ConfigurationWritesAllowed;
 

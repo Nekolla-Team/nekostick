@@ -15,6 +15,8 @@ public sealed record ExtensionManagementEntry
     /// <param name="isRunning">Whether the extension is currently running.</param>
     /// <param name="manifestVersion">The manifest version observed at the latest scan, or <see langword="null" /> when the manifest was absent.</param>
     /// <param name="contentHash">The optional canonical content digest in <c>sha256:&lt;hex&gt;</c> form; producers MUST emit lowercase hexadecimal digits.</param>
+    /// <param name="reportedStatusKind">The latest status kind reported by the running extension, or <see langword="null" /> when it has not reported one.</param>
+    /// <param name="reportedStatusCode">The latest status code reported by the running extension, or <see langword="null" /> when it has not reported one.</param>
     public ExtensionManagementEntry(
         string extensionId,
         string installedVersion,
@@ -24,7 +26,9 @@ public sealed record ExtensionManagementEntry
         long recordVersion,
         bool isRunning,
         string? manifestVersion,
-        string? contentHash = null)
+        string? contentHash = null,
+        ExtensionStatusKind? reportedStatusKind = null,
+        string? reportedStatusCode = null)
     {
         ExtensionId = string.IsNullOrWhiteSpace(extensionId)
             ? throw new ArgumentException("An extension identifier is required.", nameof(extensionId))
@@ -45,6 +49,8 @@ public sealed record ExtensionManagementEntry
                 ? throw new ArgumentException("A manifest version is required when supplied.", nameof(manifestVersion))
                 : manifestVersion;
         ContentHash = ExtensionRecordConfiguration.ValidateContentHash(contentHash);
+        ReportedStatusKind = reportedStatusKind;
+        ReportedStatusCode = reportedStatusCode;
     }
 
     /// <summary>Gets the stable extension identifier.</summary>
@@ -73,6 +79,12 @@ public sealed record ExtensionManagementEntry
 
     /// <summary>Gets the optional SHA-256 content digest; producers MUST emit lowercase hexadecimal digits, or <see langword="null" /> when not recorded.</summary>
     public string? ContentHash { get; }
+
+    /// <summary>Gets the latest status kind reported by the running extension, or <see langword="null" /> when none was reported.</summary>
+    public ExtensionStatusKind? ReportedStatusKind { get; }
+
+    /// <summary>Gets the latest status code reported by the running extension, or <see langword="null" /> when none was reported.</summary>
+    public string? ReportedStatusCode { get; }
 }
 
 /// <summary>Describes one extension directory skipped during a refresh scan.</summary>

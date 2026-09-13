@@ -79,24 +79,32 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 new ConfigurationError(scan.ErrorCode));
         }
 
-        var running = _runtimeManager.GetStatuses()
+        var runtimeStatuses = _runtimeManager.GetStatuses()
+            .ToImmutableDictionary(static status => status.ExtensionId, StringComparer.Ordinal);
+        var running = runtimeStatuses.Values
             .Where(static status => status.State == ExtensionLoadState.Loaded)
             .Select(static status => status.ExtensionId)
             .ToImmutableHashSet(StringComparer.Ordinal);
         var entries = snapshot.ExtensionRecords
             .OrderBy(static record => record.ExtensionId, StringComparer.Ordinal)
-            .Select(record => new ExtensionManagementEntry(
-                record.ExtensionId,
-                record.Version,
-                record.LoadState,
-                record.CreatedAt,
-                record.UpdatedAt,
-                record.RecordVersion,
-                running.Contains(record.ExtensionId),
-                scan.Manifests.TryGetValue(record.ExtensionId, out var manifest)
-                    ? manifest.Version.ToString()
-                    : null,
-                record.ContentHash))
+            .Select(record =>
+            {
+                runtimeStatuses.TryGetValue(record.ExtensionId, out var runtimeStatus);
+                return new ExtensionManagementEntry(
+                    record.ExtensionId,
+                    record.Version,
+                    record.LoadState,
+                    record.CreatedAt,
+                    record.UpdatedAt,
+                    record.RecordVersion,
+                    running.Contains(record.ExtensionId),
+                    scan.Manifests.TryGetValue(record.ExtensionId, out var manifest)
+                        ? manifest.Version.ToString()
+                        : null,
+                    record.ContentHash,
+                    runtimeStatus?.ReportedStatusKind,
+                    runtimeStatus?.ReportedStatusCode);
+            })
             .ToImmutableArray();
         return ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>.Success(entries);
     }

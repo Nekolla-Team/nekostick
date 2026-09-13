@@ -274,6 +274,7 @@ var write = await host.ConfigurationApi.WriteSettingsAsync(settings.Version, set
 ```
 
 - `WriteSettingsAsync` 的 `expectedVersion` 是**设置文档自身**的版本（`ExtensionSettingsConfiguration.Version`），不是全局配置版本。
+- 刚安装的扩展还没有设置文档：`ReadSettingsAsync` 返回失败，错误码为专用的 `NoSettings`（与 `NotFound` 区分）。这是正常初始状态，用 `version: 0` 调 `WriteSettingsAsync` 创建即可（即上文示例里 `current.IsSuccess ? ... : 0` 的分支）。
 - `SettingsJson` 可以保存机密（如 API key），Host 不会把它写进日志；扩展自己也不要通过 `LogWriter` / 状态码输出它。
 
 ## 自身生命周期（Lifecycle）

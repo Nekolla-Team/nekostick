@@ -158,7 +158,7 @@ Extensions are trusted in-process code. A collectible `AssemblyLoadContext` prov
 The stable Host and extension contract surface is distributed as the `Nekolla.Nekostick.Contracts` NuGet package:
 
 ```sh
-dotnet add package Nekolla.Nekostick.Contracts --version 1.3.4
+dotnet add package Nekolla.Nekostick.Contracts --version 1.4.0-preview.1
 ```
 
 Extension projects should reference Contracts and their explicitly declared shared-contract assemblies only. They should not reference Host, Persistence, ASP.NET, EF Core, or another extension's implementation assembly.

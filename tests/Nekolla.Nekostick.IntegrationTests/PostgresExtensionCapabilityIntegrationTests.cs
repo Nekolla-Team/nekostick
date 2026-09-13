@@ -417,6 +417,21 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
     }
 
     [Fact]
+    public async Task MissingSettingsDocumentReturnsNoSettings()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var fresh = harness.CreateCapability(
+            "capability.no-settings." + Guid.NewGuid().ToString("N"),
+            static _ => false);
+
+        var read = await fresh.ConfigurationApi.ReadSettingsAsync(cancellationToken);
+
+        Assert.False(read.IsSuccess);
+        Assert.Contains(read.Errors, error => error.Code == ConfigurationErrorCode.NoSettings);
+    }
+
+    [Fact]
     public async Task FailedAtomicApplyPreservesUnrelatedRowsAndNullableHostOwnership()
     {
         await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();

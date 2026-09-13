@@ -13,7 +13,7 @@ namespace Nekolla.Nekostick.Contracts;
 public static class ExtensionAbi
 {
     /// <summary>Gets the current ABI version used by extension entrypoints.</summary>
-    public static HostApiVersion Version { get; } = new(1, 3, 4);
+    public static HostApiVersion Version { get; } = new(1, 4, 0);
 
     /// <summary>Determines whether a host API version can satisfy an extension ABI requirement.</summary>
     /// <param name="required">The required version.</param>

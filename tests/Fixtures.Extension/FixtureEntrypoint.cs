@@ -30,6 +30,11 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
             throw new InvalidOperationException("Fixture start deliberately failed.");
         }
 
+        if (options.ReportStatus is { } reportedStatusCode)
+        {
+            context.Host.Status.Report(new ExtensionStatus(ExtensionStatusKind.Degraded, reportedStatusCode));
+        }
+
         var state = new FixtureState(options, context.Host.Lifecycle, context.Registration);
         if (options.VerifyBridgeCapabilities)
         {
