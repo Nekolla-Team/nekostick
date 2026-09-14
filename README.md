@@ -94,9 +94,10 @@ The equivalent bootstrap environment variables are:
 | Listen port | `--listen-port` | `NEKOSTICK_LISTEN_PORT` | `8080` |
 | Node identifier (max 128 characters) | `--node-id` | `NEKOSTICK_NODE_ID` | `0` |
 | Minimum log level | `--log-level` | `NEKOSTICK_LOG_LEVEL` | `Information` |
+| Stderr log colors | `--log-color` | `NEKOSTICK_LOG_COLOR` | `auto` |
 | Include EF Core logs | `--include-ef-logs` | `NEKOSTICK_INCLUDE_EF_LOGS` | off |
 
-Accepted log levels are case-insensitive: `trace`, `debug`, `information` (alias `info`), `warning` (alias `warn`), `error`, `critical`, `none`. `--include-ef-logs` is a flag whose presence enables EF Core logging; the environment form accepts `true` or `false` and any other value fails startup validation. Diagnostics commands (`status`, `doctor`) accept the same bootstrap options and emit JSON instead of serving routes.
+Accepted log levels are case-insensitive: `trace`, `debug`, `information` (alias `info`), `warning` (alias `warn`), `error`, `critical`, `none`. `--log-color` accepts `always`, `auto`, or `disabled`; `auto` emits ANSI colors only when stderr is an interactive terminal that supports them. `--include-ef-logs` is a flag whose presence enables EF Core logging; the environment form accepts `true` or `false` and any other value fails startup validation. Diagnostics commands (`status`, `doctor`) accept the same bootstrap options and emit JSON instead of serving routes.
 
 ## Deployment
 

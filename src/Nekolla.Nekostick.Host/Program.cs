@@ -247,7 +247,7 @@ internal static class Program
             ? minimumLevel
             : LogLevel.Warning;
         builder.Logging.AddFilter("Microsoft.EntityFrameworkCore", entityFrameworkLevel);
-        builder.Logging.AddProvider(new SafeConsoleLoggerProvider(minimumLevel));
+        builder.Logging.AddProvider(new SafeConsoleLoggerProvider(minimumLevel, command.BootstrapOptions.LogColor));
         builder.Host.UseConsoleLifetime();
 
         var bootstrap = command.BootstrapOptions;
@@ -747,6 +747,7 @@ internal static class Program
         BootstrapDefaults.ListenPortOption or
         BootstrapDefaults.NodeIdOption or
         BootstrapDefaults.LogLevelOption or
+        BootstrapDefaults.LogColorOption or
         BootstrapDefaults.DataDirectoryOption;
     private static Dictionary<string, string?> ReadBootstrapEnvironment() =>
         new Dictionary<string, string?>(StringComparer.Ordinal)
@@ -761,6 +762,8 @@ internal static class Program
                 Environment.GetEnvironmentVariable(BootstrapDefaults.NodeIdEnvironmentVariable),
             [BootstrapDefaults.LogLevelEnvironmentVariable] =
                 Environment.GetEnvironmentVariable(BootstrapDefaults.LogLevelEnvironmentVariable),
+            [BootstrapDefaults.LogColorEnvironmentVariable] =
+                Environment.GetEnvironmentVariable(BootstrapDefaults.LogColorEnvironmentVariable),
             [BootstrapDefaults.DataDirectoryEnvironmentVariable] =
                 Environment.GetEnvironmentVariable(BootstrapDefaults.DataDirectoryEnvironmentVariable)
         };

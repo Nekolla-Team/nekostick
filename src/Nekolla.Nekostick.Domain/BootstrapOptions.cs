@@ -34,7 +34,23 @@ public enum BootstrapErrorCode
     InvalidIncludeEfLogs,
 
     /// <summary>The host data directory was empty, unsafe, or invalid.</summary>
-    InvalidDataDirectory
+    InvalidDataDirectory,
+
+    /// <summary>The requested log color mode was not a supported name.</summary>
+    InvalidLogColor
+}
+
+/// <summary>Controls when ANSI colors decorate the stderr log output.</summary>
+public enum LogColorMode
+{
+    /// <summary>Colors are always emitted, even when stderr is redirected.</summary>
+    Always,
+
+    /// <summary>Colors are emitted only when the terminal environment supports them.</summary>
+    Auto,
+
+    /// <summary>Colors are never emitted.</summary>
+    Disabled
 }
 
 /// <summary>Contains a bootstrap error without echoing supplied values.</summary>
@@ -68,7 +84,8 @@ public sealed record BootstrapOptions
         string nodeId,
         string minimumLevel,
         bool includeEfLogs,
-        string dataDirectory)
+        string dataDirectory,
+        LogColorMode logColor)
     {
         ConnectionString = connectionString;
         ListenAddress = listenAddress;
@@ -77,6 +94,7 @@ public sealed record BootstrapOptions
         MinimumLevel = minimumLevel;
         IncludeEfLogs = includeEfLogs;
         DataDirectory = dataDirectory;
+        LogColor = logColor;
     }
 
     /// <summary>Gets the PostgreSQL connection string. Callers must treat it as secret.</summary>
@@ -99,6 +117,9 @@ public sealed record BootstrapOptions
     /// <summary>Gets the normalized absolute host data directory for extension-owned files.</summary>
     public string DataDirectory { get; }
 
+    /// <summary>Gets when ANSI colors decorate the stderr log output.</summary>
+    public LogColorMode LogColor { get; }
+
     internal static BootstrapOptions CreateValidated(
         string connectionString,
         string listenAddress,
@@ -106,14 +127,16 @@ public sealed record BootstrapOptions
         string nodeId,
         string minimumLevel,
         bool includeEfLogs,
-        string dataDirectory) => new(
+        string dataDirectory,
+        LogColorMode logColor) => new(
             connectionString,
             listenAddress,
             listenPort,
             nodeId,
             minimumLevel,
             includeEfLogs,
-            dataDirectory);
+            dataDirectory,
+            logColor);
 }
 
 /// <summary>Registers bootstrap environment names and safe defaults.</summary>
@@ -136,6 +159,9 @@ public static class BootstrapDefaults
     /// <summary>The environment variable controlling EF log inclusion.</summary>
     public const string IncludeEfLogsEnvironmentVariable = "NEKOSTICK_INCLUDE_EF_LOGS";
 
+    /// <summary>The environment variable controlling stderr log coloring.</summary>
+    public const string LogColorEnvironmentVariable = "NEKOSTICK_LOG_COLOR";
+
     /// <summary>The environment variable for the host data directory.</summary>
     public const string DataDirectoryEnvironmentVariable = "NEKOSTICK_DATA_DIRECTORY";
 
@@ -156,6 +182,9 @@ public static class BootstrapDefaults
     /// <summary>The CLI switch controlling EF log inclusion.</summary>
     public const string IncludeEfLogsOption = "--include-ef-logs";
 
+    /// <summary>The CLI option controlling stderr log coloring.</summary>
+    public const string LogColorOption = "--log-color";
+
     /// <summary>The CLI option for the host data directory.</summary>
     public const string DataDirectoryOption = "--data-directory";
 
@@ -170,6 +199,9 @@ public static class BootstrapDefaults
 
     /// <summary>The default minimum log level name.</summary>
     public const string DefaultLogLevel = "Information";
+
+    /// <summary>The default stderr log color mode.</summary>
+    public const string DefaultLogColor = "auto";
 
     /// <summary>The default host data directory beside the executable.</summary>
     public static string DefaultDataDirectory => Path.Combine(AppContext.BaseDirectory, "data");

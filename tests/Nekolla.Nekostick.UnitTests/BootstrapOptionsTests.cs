@@ -278,6 +278,50 @@ public sealed class BootstrapOptionsTests
     }
 
     [Fact]
+    public void LogColorDefaultsToAuto()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>());
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(LogColorMode.Auto, result.Options!.LogColor);
+    }
+
+    [Theory]
+    [InlineData("always", LogColorMode.Always)]
+    [InlineData("AUTO", LogColorMode.Auto)]
+    [InlineData("Disabled", LogColorMode.Disabled)]
+    public void LogColorCanBeConfiguredByCliAndEnvironment(string value, LogColorMode expected)
+    {
+        var cli = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret", BootstrapDefaults.LogColorOption, value],
+            new Dictionary<string, string?>());
+        var environment = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.LogColorEnvironmentVariable] = value
+            });
+
+        Assert.True(cli.IsSuccess);
+        Assert.Equal(expected, cli.Options!.LogColor);
+        Assert.True(environment.IsSuccess);
+        Assert.Equal(expected, environment.Options!.LogColor);
+    }
+
+    [Fact]
+    public void InvalidLogColorIsRejected()
+    {
+        var result = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret", BootstrapDefaults.LogColorOption, "sometimes"],
+            new Dictionary<string, string?>());
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(BootstrapErrorCode.InvalidLogColor, result.Error!.Code);
+    }
+
+    [Fact]
     public void ConnectionStringIsRequired()
     {
         var result = BootstrapOptionsParser.Parse(

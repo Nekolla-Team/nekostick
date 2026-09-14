@@ -1,5 +1,8 @@
+using System.Globalization;
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
+using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence;
 
 namespace Nekolla.Nekostick.Host;
@@ -658,28 +661,167 @@ internal static partial class HostLogMessages
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
 {
+    private const string ColorReset = "\x1b[0m";
+    private const string KeyColor = "\x1b[36m";
     private readonly LogLevel _minimumLevel;
+    private readonly bool _useColor;
 
-    /// <summary>Creates the stderr sink with the configured minimum level.</summary>
-    public SafeConsoleLoggerProvider(LogLevel minimumLevel = LogLevel.Information) =>
-        _minimumLevel = minimumLevel;
+    /// <summary>Creates the stderr sink with the configured minimum level and color mode.</summary>
+    public SafeConsoleLoggerProvider(
+        LogLevel minimumLevel = LogLevel.Information,
+        LogColorMode logColor = LogColorMode.Auto) =>
+        (_minimumLevel, _useColor) = (minimumLevel, ResolveColor(logColor));
 
     public ILogger CreateLogger(string categoryName) =>
-        new SafeConsoleLogger(categoryName, _minimumLevel);
+        new SafeConsoleLogger(categoryName, _minimumLevel, _useColor);
 
     public void Dispose()
     {
+    }
+
+    /// <summary>Renders one stderr line with timestamp and level headers, optionally ANSI-colored.</summary>
+    internal static string FormatLine<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Func<TState, Exception?, string> formatter,
+        bool useColor)
+    {
+        var timestamp = DateTime.Now.ToString("MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+        var levelToken = LevelToken(logLevel);
+        var message = formatter(state, null);
+        if (!useColor)
+        {
+            return $"[{timestamp}] [{levelToken}] HOST_EVENT {eventId.Id}: {message}";
+        }
+
+        return string.Concat(
+            "[", timestamp, "] [",
+            LevelColor(logLevel), levelToken, ColorReset,
+            "] HOST_EVENT ", eventId.Id.ToString(CultureInfo.InvariantCulture), ": ",
+            ColorizeStructuredKeys(message, state));
+    }
+
+    private static string LevelToken(LogLevel logLevel) => logLevel switch
+    {
+        LogLevel.Trace => "trace",
+        LogLevel.Debug => "debug",
+        LogLevel.Information => "info",
+        LogLevel.Warning => "warn",
+        LogLevel.Error => "error",
+        LogLevel.Critical => "crit",
+        _ => logLevel.ToString().ToLowerInvariant()
+    };
+
+    private static string LevelColor(LogLevel logLevel) => logLevel switch
+    {
+        LogLevel.Trace => "\x1b[90m",
+        LogLevel.Debug => "\x1b[34m",
+        LogLevel.Information => "\x1b[32m",
+        LogLevel.Warning => "\x1b[33m",
+        LogLevel.Error => "\x1b[31m",
+        LogLevel.Critical => "\x1b[1;31m",
+        _ => string.Empty
+    };
+
+    private static string ColorizeStructuredKeys(string message, object? state)
+    {
+        if (state is not IReadOnlyList<KeyValuePair<string, object?>> pairs)
+        {
+            return message;
+        }
+
+        List<(int Index, int Length)>? spans = null;
+        foreach (var pair in pairs)
+        {
+            var key = pair.Key;
+            if (key.Length == 0 || key == "{OriginalFormat}")
+            {
+                continue;
+            }
+
+            var searchFrom = 0;
+            while (true)
+            {
+                var index = message.IndexOf(key, searchFrom, StringComparison.Ordinal);
+                if (index < 0)
+                {
+                    break;
+                }
+
+                var after = index + key.Length;
+                if (after < message.Length && message[after] == ':')
+                {
+                    (spans ??= []).Add((index, key.Length));
+                    break;
+                }
+
+                searchFrom = after;
+            }
+        }
+
+        if (spans is null)
+        {
+            return message;
+        }
+
+        spans.Sort(static (left, right) => left.Index.CompareTo(right.Index));
+        var builder = new StringBuilder(message.Length + spans.Count * (KeyColor.Length + ColorReset.Length));
+        var cursor = 0;
+        foreach (var (index, length) in spans)
+        {
+            if (index < cursor)
+            {
+                continue;
+            }
+
+            builder.Append(message, cursor, index - cursor);
+            builder.Append(KeyColor).Append(message, index, length).Append(ColorReset);
+            cursor = index + length;
+        }
+
+        return builder.Append(message, cursor, message.Length - cursor).ToString();
+    }
+
+    private static bool ResolveColor(LogColorMode mode) => mode switch
+    {
+        LogColorMode.Always => true,
+        LogColorMode.Disabled => false,
+        _ => DetectTerminalColorSupport()
+    };
+
+    private static bool DetectTerminalColorSupport()
+    {
+        bool redirected;
+        try
+        {
+            redirected = Console.IsErrorRedirected;
+        }
+        catch (IOException)
+        {
+            redirected = true;
+        }
+
+        if (redirected || Environment.GetEnvironmentVariable("NO_COLOR") is not null)
+        {
+            return false;
+        }
+
+        var term = Environment.GetEnvironmentVariable("TERM");
+        return !string.Equals(term, "dumb", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed class SafeConsoleLogger : ILogger
     {
         private readonly string _categoryName;
         private readonly LogLevel _minimumLevel;
+        private readonly bool _useColor;
 
-        public SafeConsoleLogger(string categoryName, LogLevel minimumLevel)
+        public SafeConsoleLogger(string categoryName, LogLevel minimumLevel, bool useColor)
         {
             _categoryName = categoryName;
             _minimumLevel = minimumLevel;
+            _useColor = useColor;
         }
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull =>
@@ -704,8 +846,7 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
                 return;
             }
 
-            var safeMessage = formatter(state, null);
-            Console.Error.WriteLine($"HOST_EVENT {eventId.Id}: {safeMessage}");
+            Console.Error.WriteLine(FormatLine(logLevel, eventId, state, formatter, _useColor));
             if (exception is not null)
             {
                 Console.Error.WriteLine(exception.ToString());

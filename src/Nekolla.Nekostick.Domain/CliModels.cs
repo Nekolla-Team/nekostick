@@ -126,6 +126,7 @@ public static class CliCommandParser
         BootstrapDefaults.ListenPortOption,
         BootstrapDefaults.NodeIdOption,
         BootstrapDefaults.LogLevelOption,
+        BootstrapDefaults.LogColorOption,
         BootstrapDefaults.DataDirectoryOption
     ];
 
@@ -248,6 +249,13 @@ public static class CliCommandParser
             return Failure(BootstrapErrorCode.InvalidLogLevel, "The log level is invalid.");
         }
 
+        var logColor = Resolve(optionValues, environment, BootstrapDefaults.LogColorOption,
+            BootstrapDefaults.LogColorEnvironmentVariable) ?? BootstrapDefaults.DefaultLogColor;
+        if (!TryNormalizeLogColor(logColor, out var logColorMode))
+        {
+            return Failure(BootstrapErrorCode.InvalidLogColor, "The log color mode is invalid.");
+        }
+
         var dataDirectoryText = Resolve(
             optionValues,
             environment,
@@ -275,7 +283,8 @@ public static class CliCommandParser
             nodeId,
             normalizedLogLevel,
             includeEfLogs,
-            dataDirectory);
+            dataDirectory,
+            logColorMode);
         var runOptions = new RunOptions(
             flags.Contains("--skip-extensions"),
             flags.Contains("--disable-supervisor"),
@@ -373,6 +382,35 @@ public static class CliCommandParser
             _ => string.Empty
         };
         return normalized.Length > 0;
+    }
+
+    private static bool TryNormalizeLogColor(string? value, out LogColorMode mode)
+    {
+        mode = default;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (value.Trim().Equals("always", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = LogColorMode.Always;
+            return true;
+        }
+
+        if (value.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = LogColorMode.Auto;
+            return true;
+        }
+
+        if (value.Trim().Equals("disabled", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = LogColorMode.Disabled;
+            return true;
+        }
+
+        return false;
     }
     private static bool TryParseBoolean(string? value, out bool result)
     {

@@ -169,6 +169,62 @@ public sealed class ProcessOutputStructuredLoggingTests
             .IsEnabled(LogLevel.Critical));
     }
 
+    [Fact]
+    public void FormatLineWithoutColorEmitsTimestampAndLevelHeaders()
+    {
+        IReadOnlyList<KeyValuePair<string, object?>> state =
+        [
+            new("ServiceId", "service-a")
+        ];
+
+        var line = SafeConsoleLoggerProvider.FormatLine(
+            LogLevel.Warning,
+            new EventId(1008, "SupervisedChildOutput"),
+            state,
+            (_, _) => "Supervised child output. ServiceId: service-a.",
+            useColor: false);
+
+        Assert.Matches(@"^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] \[warn\] HOST_EVENT 1008: ", line);
+        Assert.EndsWith("Supervised child output. ServiceId: service-a.", line);
+        Assert.DoesNotContain("\x1b[", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormatLineWithColorColorsLevelAndStructuredKeysOnly()
+    {
+        IReadOnlyList<KeyValuePair<string, object?>> state =
+        [
+            new("ServiceId", "service-a"),
+            new("{OriginalFormat}", "Supervised child output. ServiceId: {ServiceId}.")
+        ];
+
+        var line = SafeConsoleLoggerProvider.FormatLine(
+            LogLevel.Error,
+            new EventId(1008, "SupervisedChildOutput"),
+            state,
+            (_, _) => "Supervised child output. ServiceId: service-a.",
+            useColor: true);
+
+        Assert.Contains("[\x1b[31merror\x1b[0m]", line, StringComparison.Ordinal);
+        Assert.Contains("\x1b[36mServiceId\x1b[0m: service-a.", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("\x1b[36m{OriginalFormat}", line, StringComparison.Ordinal);
+        Assert.Matches(@"^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] ", line);
+    }
+
+    [Fact]
+    public void FormatLineWithColorLeavesUnstructuredTextUncolored()
+    {
+        var line = SafeConsoleLoggerProvider.FormatLine(
+            LogLevel.Information,
+            new EventId(1003, "HostStartupFailed"),
+            "plain state",
+            (_, _) => "Host startup failed.",
+            useColor: true);
+
+        Assert.EndsWith("HOST_EVENT 1003: Host startup failed.", line);
+        Assert.Equal(2, line.Split("\x1b[").Length - 1);
+    }
+
     private static WebApplication BuildApplication(
         bool disableSupervisor,
         bool includeEfLogs = false,
