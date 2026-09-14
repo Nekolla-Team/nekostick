@@ -349,6 +349,17 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.Equal(OwnerExtensionId, ownerService.OwnerExtensionId);
         Assert.Equal(ForeignExtensionId, foreignRoute.OwnerExtensionId);
         Assert.Equal(ForeignExtensionId, foreignService.OwnerExtensionId);
+
+        var global = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(global.IsSuccess, global.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(global.Value);
+        Assert.Null(global.Value!.Routes.Single(value => value.Id == HostRouteId).OwnerExtensionId);
+        Assert.Equal(
+            OwnerExtensionId,
+            global.Value.Routes.Single(value => value.Id == OwnerRouteId).OwnerExtensionId);
+        Assert.Equal(
+            ForeignExtensionId,
+            global.Value.Routes.Single(value => value.Id == ForeignRouteId).OwnerExtensionId);
     }
 
     [Fact]

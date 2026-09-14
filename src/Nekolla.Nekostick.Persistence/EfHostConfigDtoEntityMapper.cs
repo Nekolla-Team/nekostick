@@ -132,7 +132,8 @@ internal static class EfHostConfigDtoEntityMapper
                 value.ProxyInitialRetryBackoffMilliseconds,
                 value.ProxyMaximumRetryBackoffMilliseconds,
                 value.ProxyRetryOnConnectionFailure,
-                value.ProxyRetryOnUpstreamDisconnect));
+                value.ProxyRetryOnUpstreamDisconnect),
+            value.OwnerExtensionId);
     }
 
     private static void ValidatePersistedTarget(Route value)

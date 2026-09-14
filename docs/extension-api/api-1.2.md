@@ -86,6 +86,7 @@ var write = await host.FullConfiguration.ReplaceAsync(snapshot.Version, changes,
 | `ClientIpRatePolicy` | 可选的按客户端 IP 限流策略；`null` 继承全局。 |
 | `MaxRequestBodyBytes` / `MaxRequestHeaderBytes` / `MaxConcurrentRequests` / `RequestReadTimeout` | 可选的路由级资源限制；`null` 继承全局。 |
 | `ProxyRetries` | 可选的路由级代理重试策略；`null` 继承全局。 |
+| `OwnerExtensionId` | 属主扩展 ID；`null` 表示 Host 自有路由（1.4 起，与服务遥测的 `OwnerExtensionId` 一致）。 |
 
 ### `ServiceConfiguration`
 

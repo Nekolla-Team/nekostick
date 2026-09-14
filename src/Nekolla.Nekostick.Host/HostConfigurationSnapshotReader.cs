@@ -254,7 +254,8 @@ internal static class HostConfigurationSnapshotMapper
                 value.ProxyInitialRetryBackoffMilliseconds,
                 value.ProxyMaximumRetryBackoffMilliseconds,
                 value.ProxyRetryOnConnectionFailure,
-                value.ProxyRetryOnUpstreamDisconnect));
+                value.ProxyRetryOnUpstreamDisconnect),
+            value.OwnerExtensionId);
     }
 
     private static ImmutableArray<string> ReadStringArray(string json)

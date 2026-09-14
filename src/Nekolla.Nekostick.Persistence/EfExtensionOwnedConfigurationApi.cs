@@ -196,7 +196,8 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
             "{}",
             current?.CreatedAt ?? DateTimeOffset.UtcNow,
             current?.UpdatedAt ?? DateTimeOffset.UtcNow,
-            current?.Version ?? 0);
+            current?.Version ?? 0,
+            ownerExtensionId: current?.OwnerExtensionId);
     }
 
     private static ServiceConfiguration ToHostService(

@@ -232,6 +232,7 @@ public sealed record RouteConfiguration
     /// <param name="maxConcurrentRequests">The optional route concurrency limit; <see langword="null"/> inherits the global limit.</param>
     /// <param name="requestReadTimeout">The optional route request read timeout; <see langword="null"/> inherits the global limit.</param>
     /// <param name="proxyRetries">The optional route proxy retry settings; <see langword="null"/> inherits the global settings.</param>
+    /// <param name="ownerExtensionId">The stable owning extension identifier; <see langword="null"/> denotes host ownership.</param>
     public RouteConfiguration(
         Guid id,
         bool enabled,
@@ -250,7 +251,8 @@ public sealed record RouteConfiguration
         long? maxRequestHeaderBytes = null,
         int? maxConcurrentRequests = null,
         TimeSpan? requestReadTimeout = null,
-        ProxyRetryConfiguration? proxyRetries = null)
+        ProxyRetryConfiguration? proxyRetries = null,
+        string? ownerExtensionId = null)
     {
         Id = IdentityValidation.RequireUuidV7(id, nameof(id));
         Enabled = enabled;
@@ -296,6 +298,11 @@ public sealed record RouteConfiguration
         MaxConcurrentRequests = maxConcurrentRequests;
         RequestReadTimeout = requestReadTimeout;
         ProxyRetries = proxyRetries;
+        OwnerExtensionId = ownerExtensionId is null
+            ? null
+            : string.IsNullOrWhiteSpace(ownerExtensionId)
+                ? throw new ArgumentException("An owner extension identifier is required when supplied.", nameof(ownerExtensionId))
+                : ownerExtensionId;
     }
 
     /// <summary>Gets the route identifier.</summary>
@@ -350,4 +357,7 @@ public sealed record RouteConfiguration
     public TimeSpan? RequestReadTimeout { get; }
     /// <summary>Gets the optional route proxy retry settings; null inherits the global settings.</summary>
     public ProxyRetryConfiguration? ProxyRetries { get; }
+
+    /// <summary>Gets the owning extension identifier when the route is extension-owned; null denotes host ownership.</summary>
+    public string? OwnerExtensionId { get; }
 }
