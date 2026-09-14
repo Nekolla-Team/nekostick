@@ -58,6 +58,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     internal async ValueTask<bool> PublishAsync(
         HostConfigurationSnapshot snapshot,
         ImmutableHashSet<string>? forceReloadIds = null,
+        bool scheduleRecovery = true,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -173,6 +174,11 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     ready.FailureCode.ToString(),
                     fallbackPublished);
                 published = fallbackPublished;
+                if (scheduleRecovery)
+                {
+                    ScheduleRecoveryPublication(snapshot);
+                }
+
                 return requestedForceReloadIds.Count == 0 && fallbackPublished;
             }
 
@@ -268,6 +274,28 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
 
     }
+    /// <summary>Queues a single follow-up publication after a commit failure that stopped previous generations.</summary>
+    /// <param name="snapshot">The durable Host configuration snapshot to republish.</param>
+    private void ScheduleRecoveryPublication(HostConfigurationSnapshot snapshot)
+    {
+        // A failed ReadyToPublishAsync handoff may leave previous generations
+        // stopped without replacements. Exactly one recovery pass lets a fresh
+        // candidate start cleanly; the follow-up disables further scheduling so
+        // a deterministically failing extension cannot loop the pipeline.
+        HostLogMessages.ConfigurationRecoveryPublicationScheduled(_logger, snapshot.Version);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await PublishAsync(snapshot, scheduleRecovery: false).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                HostLogMessages.FailureDetails(_logger, exception, "RecoveryPublication");
+            }
+        });
+    }
+
     /// <summary>Publishes a snapshot while forcing one loaded extension through candidate replacement.</summary>
     /// <param name="snapshot">The durable Host configuration snapshot to publish.</param>
     /// <param name="extensionId">The extension identifier that must be reloaded.</param>
@@ -302,7 +330,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         var published = await PublishAsync(
                 latest,
                 EmptyForceReloadIds.Add(extensionId),
-                cancellationToken)
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         return published
             ? new ExtensionReloadPublication(ExtensionReloadPublicationStatus.Published, latest.Version)

@@ -260,6 +260,18 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
 
     internal void ResumeServing() => MarkServing();
 
+    /// <summary>Gets whether the one-way stop pipeline has started; such an instance can never serve again.</summary>
+    internal bool StopStarted
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _stopTask is not null;
+            }
+        }
+    }
+
     internal void MarkStopped()
     {
         lock (_gate)

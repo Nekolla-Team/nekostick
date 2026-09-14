@@ -646,6 +646,14 @@ internal static partial class HostLogMessages
         ILogger logger,
         string nodeId,
         long configurationVersion);
+
+    [LoggerMessage(
+        EventId = 1071,
+        Level = LogLevel.Information,
+        Message = "Recovery publication scheduled after a commit failure stopped previous generations. Version: {Version}.")]
+    internal static partial void ConfigurationRecoveryPublicationScheduled(
+        ILogger logger,
+        long version);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

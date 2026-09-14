@@ -311,7 +311,7 @@ await host.ConfigurationApi.WriteSettingsAsync(settings.Version, settings, cance
 // 提交成功后，Host 会 reload 当前扩展
 ```
 
-reload 的行为（对扩展可见的部分）：新实例先 `StartAsync(Reloading: true)`，旧实例排干进行中的请求后 `StopAsync`，然后新实例收到 `OnPreviousStoppedAsync` 并接管 handler。切换窗口内指向该扩展 handler 的请求返回 `503`。新实例启动失败时旧实例继续运行。
+reload 的行为（对扩展可见的部分）：新实例先 `StartAsync(Reloading: true)`，旧实例排干进行中的请求后 `StopAsync`，然后新实例收到 `OnPreviousStoppedAsync` 并接管 handler。切换窗口内指向该扩展 handler 的请求返回 `503`。新实例启动失败时旧实例继续运行。注意 `OnPreviousStoppedAsync` 运行时旧实例已完全停止，提交已不可逆：该钩子抛错或超时会让 reload 失败、旧实例被如实标记为 `Stopped`（服务不会恢复，Host 会调度一次恢复发布用新实例重新拉起）。因此这个钩子应当 best-effort——出问题时用 `Status.Report` 上报降级状态并继续，而不是让钩子失败。
 
 ## 从 1.0 迁移
 

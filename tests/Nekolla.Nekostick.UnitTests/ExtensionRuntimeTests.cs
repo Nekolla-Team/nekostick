@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -107,7 +108,7 @@ public sealed partial class ExtensionRuntimeTests
     }
 
     [Fact]
-    public async Task OldStopFailureExplicitlyVerifiesRestoredServingState()
+    public async Task OldStopFailureHonestlyMarksTheStoppedGeneration()
     {
         using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         var manifest = Discover(fixture.RootPath);
@@ -124,15 +125,17 @@ public sealed partial class ExtensionRuntimeTests
 
         Assert.False(replacement.Succeeded);
         Assert.Equal(ExtensionFailureCode.StopFailed, replacement.FailureCode);
-        Assert.Equal(ExtensionLoadState.Loaded, manager.GetStatus(manifest.Id)!.State);
-        Assert.Equal("old:started", Body(await manager.HandleAsync(
+        // The stop pipeline already ran; a state flip would resurrect a zombie.
+        Assert.Equal(ExtensionLoadState.Stopped, manager.GetStatus(manifest.Id)!.State);
+        var dispatch = await manager.HandleAsync(
             "fixture.handler",
             new ExtensionHandlerRequest("GET", "/fixture"),
-            TestContext.Current.CancellationToken)));
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Unavailable, dispatch.State);
     }
 
     [Fact]
-    public async Task PreviousStoppedFailurePreservesThePreviousHandler()
+    public async Task PreviousStoppedFailureHonestlyMarksTheStoppedGeneration()
     {
         using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         var manifest = Discover(fixture.RootPath);
@@ -149,11 +152,57 @@ public sealed partial class ExtensionRuntimeTests
 
         Assert.False(replacement.Succeeded);
         Assert.Equal(ExtensionFailureCode.LifecycleFailed, replacement.FailureCode);
-        Assert.Equal(ExtensionLoadState.Loaded, manager.GetStatus(manifest.Id)!.State);
-        Assert.Equal("old:started", Body(await manager.HandleAsync(
+        Assert.Equal(ExtensionLoadState.Stopped, manager.GetStatus(manifest.Id)!.State);
+        var dispatch = await manager.HandleAsync(
             "fixture.handler",
             new ExtensionHandlerRequest("GET", "/fixture"),
-            TestContext.Current.CancellationToken)));
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ExtensionInvocationState.Unavailable, dispatch.State);
+    }
+
+    [Fact]
+    public async Task AbortedStagedCommitHonestlyMarksTheStoppedPreviousGeneration()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var initial = await manager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                manifest,
+                Settings(manifest.Id, label: "old"),
+                [manifest.Id],
+                true)),
+            previous: null,
+            cancellationToken: cancellationToken);
+        Assert.True(initial.Succeeded, initial.FailureCode.ToString());
+        Assert.NotNull(initial.Preparation);
+        var initialReady = await initial.Preparation!.ReadyToPublishAsync(cancellationToken);
+        Assert.True(initialReady.Succeeded, initialReady.FailureCode.ToString());
+        Assert.True(await initial.Preparation.CompletePublicationAsync());
+
+        var replacement = await manager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                manifest,
+                Settings(manifest.Id, label: "candidate", previousStoppedFails: true),
+                [manifest.Id],
+                true)),
+            previous: initialReady.Generation,
+            cancellationToken: cancellationToken);
+        Assert.True(replacement.Succeeded, replacement.FailureCode.ToString());
+        Assert.NotNull(replacement.Preparation);
+
+        var ready = await replacement.Preparation!.ReadyToPublishAsync(cancellationToken);
+
+        Assert.False(ready.Succeeded);
+        Assert.Equal(ExtensionFailureCode.LifecycleFailed, ready.FailureCode);
+        Assert.Equal(ExtensionLoadState.Stopped, manager.GetStatus(manifest.Id)!.State);
+        var dispatch = await manager.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/fixture"),
+            cancellationToken);
+        Assert.Equal(ExtensionInvocationState.Unavailable, dispatch.State);
     }
 
     [Fact]

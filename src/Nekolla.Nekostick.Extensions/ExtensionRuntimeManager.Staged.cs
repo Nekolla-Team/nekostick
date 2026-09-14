@@ -311,8 +311,22 @@ public sealed partial class ExtensionRuntimeManager
         {
             foreach (var previous in preparation.ChangedPrevious)
             {
-                previous.ResumeServing();
-                PublishExtensionState(previous, ExtensionLoadState.Loaded);
+                if (previous.StopStarted)
+                {
+                    // The generation went through the one-way stop pipeline
+                    // (drain, StopAsync, task/event teardown); flipping its
+                    // state back would resurrect a zombie that admits requests
+                    // it cannot serve. Report the stop honestly; the publisher
+                    // schedules a recovery publication to start a fresh
+                    // candidate.
+                    previous.MarkStopped();
+                    PublishExtensionState(previous, ExtensionLoadState.Stopped);
+                }
+                else
+                {
+                    previous.ResumeServing();
+                    PublishExtensionState(previous, ExtensionLoadState.Loaded);
+                }
             }
         }
 

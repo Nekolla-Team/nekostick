@@ -467,6 +467,12 @@ public interface IExtensionEntrypoint
     ValueTask StopAsync(CancellationToken cancellationToken);
 
     /// <summary>Notifies a replacement after the previous instance has stopped.</summary>
+    /// <remarks>
+    /// The previous instance is fully stopped when this hook runs; the commit has passed the point of
+    /// no return. If this hook throws or times out, the reload fails and the previous instance is
+    /// reported as stopped — service is NOT restored. Implementations should be best-effort: report
+    /// degraded state through the status sink and continue instead of failing the hook.
+    /// </remarks>
     ValueTask OnPreviousStoppedAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 }
 /// <summary>Provides the concise stable name for the extension lifecycle entrypoint.</summary>

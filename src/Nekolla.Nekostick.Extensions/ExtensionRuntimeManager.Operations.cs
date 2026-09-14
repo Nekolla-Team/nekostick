@@ -184,8 +184,11 @@ public sealed partial class ExtensionRuntimeManager
             var oldStopped = await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
             if (!oldStopped)
             {
-                previous.ResumeServing();
-                PublishExtensionState(previous, ExtensionLoadState.Loaded);
+                // The stop pipeline already ran (tasks/events torn down), so
+                // the instance cannot serve again; report the stop honestly
+                // instead of resurrecting a zombie.
+                previous.MarkStopped();
+                PublishExtensionState(previous, ExtensionLoadState.Stopped);
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                 return ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.StopFailed,
@@ -194,8 +197,11 @@ public sealed partial class ExtensionRuntimeManager
 
             if (!await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
             {
-                previous.ResumeServing();
-                PublishExtensionState(previous, ExtensionLoadState.Loaded);
+                // The previous generation is fully stopped and cannot be
+                // resumed; report the stop honestly instead of resurrecting a
+                // zombie.
+                previous.MarkStopped();
+                PublishExtensionState(previous, ExtensionLoadState.Stopped);
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                 return ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.LifecycleFailed,
@@ -215,8 +221,10 @@ public sealed partial class ExtensionRuntimeManager
                 }
                 else
                 {
-                    previous.ResumeServing();
-                    PublishExtensionState(previous, ExtensionLoadState.Loaded);
+                    // The previous generation is fully stopped; a conflict
+                    // cannot restore service, only report it honestly.
+                    previous.MarkStopped();
+                    PublishExtensionState(previous, ExtensionLoadState.Stopped);
                 }
             }
 
