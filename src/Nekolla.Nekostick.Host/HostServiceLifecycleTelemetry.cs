@@ -106,7 +106,7 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
             }
         }
 
-        return builder.MoveToImmutable();
+        return builder.ToImmutable();
     }
 
     /// <inheritdoc />

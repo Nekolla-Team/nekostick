@@ -42,6 +42,27 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.False(publisher.Current.ContainsKey(LazyServiceId));
         Assert.False(publisher.Current.ContainsKey(DisabledServiceId));
     }
+
+    [Fact]
+    public async Task ReadCurrentReturnsSnapshotsForAnyActiveServiceCount()
+    {
+        var eager = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(eager);
+        var manager = CreateManager(
+            snapshot,
+            new RecordingExecutor(),
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        await manager.ReconcileAsync(snapshot, CancellationToken.None);
+
+        // A single active service leaves Count != Capacity in the builder;
+        // MoveToImmutable would throw here.
+        var current = manager.ReadCurrent();
+        var entry = Assert.Single(current);
+        Assert.Equal(EagerServiceId, entry.ServiceId);
+    }
     [Fact]
     public async Task DisabledOwnerServicesStayOutOfReconcileUntilTheOwnerIsEnabled()
     {
