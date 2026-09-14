@@ -171,6 +171,10 @@ internal static class Program
             });
             var terminationState = app.Services.GetRequiredService<HostTerminationState>();
             await app.RunAsync(cancellationToken);
+            // Stop extensions before the service provider is disposed: StopAsync
+            // callbacks may still need scoped host services (for example the
+            // configuration API), which fail once the container is torn down.
+            await publisher.DisposeAsync().ConfigureAwait(false);
             return terminationState.ExitCode;
         }
 
