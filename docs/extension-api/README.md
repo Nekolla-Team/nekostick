@@ -14,7 +14,7 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
 | [api-1.3.md](api-1.3.md) | 1.3.1 / 1.3.2 / 1.3.3 patch | 服务运行遥测、路由观测与动作钩子、自定义日志文本、跨扩展管理与目录刷新；1.3.2 追加设置内容变更事件、Host 数据目录、流式请求/响应处理器；1.3.3 追加节点本地 Resume/Restart、HostInfo、Waiting 状态与内容摘要 |
 | [api-1.4.md](api-1.4.md) | 1.4.0 | 完善扩展能力与全局管控 |
 
-当前 Contracts 包版本为 **1.4.0-preview.1**（`HostApiVersion.Current` 为 `1.4.0`）。
+当前 Contracts 包版本为 **1.4.0-preview.2**（`HostApiVersion.Current` 为 `1.4.0`）。
 
 ## 快速开始
 

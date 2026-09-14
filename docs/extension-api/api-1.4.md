@@ -2,7 +2,7 @@
 
 1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。全部是追加式演进，不改变既有桥契约；要求 Host API 1.3 的既有扩展 manifest 仍然有效。
 
-当前 Contracts 包版本为 **1.4.0-preview.1**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
+当前 Contracts 包版本为 **1.4.0-preview.2**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
 
 ```csharp
 var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersion);
