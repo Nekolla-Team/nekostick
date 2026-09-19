@@ -9,7 +9,8 @@
     <SelfContained>false</SelfContained>
     <NativeHelperProject>$(MSBuildProjectDirectory)/../Nekolla.Nekostick.NativeHelper/Nekolla.Nekostick.NativeHelper.csproj</NativeHelperProject>
     <NativeHelperRuntimeIdentifier Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</NativeHelperRuntimeIdentifier>
-    <NativeHelperRuntimeIdentifier Condition="'$(NativeHelperRuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</NativeHelperRuntimeIdentifier>
+    <!-- Distro-packaged SDKs report a custom NETCoreSdkRuntimeIdentifier (e.g. arch-x64) with no published runtime packs; the portable RID always resolves to downloadable packs. -->
+    <NativeHelperRuntimeIdentifier Condition="'$(NativeHelperRuntimeIdentifier)' == ''">$(NETCoreSdkPortableRuntimeIdentifier)</NativeHelperRuntimeIdentifier>
     <NativeHelperPublishDirectory>$(MSBuildProjectDirectory)/.nativehelper/$(Configuration)/$(NativeHelperRuntimeIdentifier)</NativeHelperPublishDirectory>
     <NativeHelperBinaryPath>$(NativeHelperPublishDirectory)/Nekolla.Nekostick.NativeHelper</NativeHelperBinaryPath>
     <NativeHelperResourceName>Nekolla.Nekostick.Host.Resources.Nekolla.Nekostick.NativeHelper</NativeHelperResourceName>
