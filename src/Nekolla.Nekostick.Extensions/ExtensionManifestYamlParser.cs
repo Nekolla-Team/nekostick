@@ -85,14 +85,14 @@ internal static class YamlManifestParser
                     return Failure(dependencyFailure);
                 }
 
-                if (dependencyFields.Count != ManifestSchema.DependencyFields.Count ||
-                    !TryReadScalar(dependencyFields, "id", out var dependencyId) ||
-                    !TryReadScalar(dependencyFields, "versionRange", out var dependencyRange))
+                if (!TryReadScalar(dependencyFields, "id", out var dependencyId) ||
+                    !TryReadScalar(dependencyFields, "versionRange", out var dependencyRange) ||
+                    !TryReadOptionalBool(dependencyFields, "optional", out var dependencyOptional))
                 {
                     return Failure(ExtensionFailureCode.ManifestSchemaInvalid);
                 }
 
-                dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange));
+                dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange, dependencyOptional));
             }
 
             var exportsValid = TryReadExports(fields, out var exports, out var exportFailure);
@@ -366,6 +366,31 @@ internal static class YamlManifestParser
         value = parsed;
         return true;
     }
+    private static bool TryReadOptionalBool(
+        Dictionary<string, YamlNode> fields,
+        string name,
+        out bool value)
+    {
+        value = false;
+        if (!fields.TryGetValue(name, out var node))
+        {
+            return true;
+        }
+
+        if (node is not YamlScalarNode scalar)
+        {
+            return false;
+        }
+
+        if (string.Equals(scalar.Value, "true", StringComparison.Ordinal))
+        {
+            value = true;
+            return true;
+        }
+
+        return string.Equals(scalar.Value, "false", StringComparison.Ordinal);
+    }
+
     private static bool TryReadExports(
         Dictionary<string, YamlNode> fields,
         out List<ManifestContractExportValues> exports,
@@ -440,17 +465,17 @@ internal static class YamlManifestParser
                 return false;
             }
 
-            if (declaration.Count != ManifestSchema.ImportFields.Count ||
-                !TryReadScalar(declaration, "contractId", out var id) ||
+            if (!TryReadScalar(declaration, "contractId", out var id) ||
                 !TryReadScalar(declaration, "versionRange", out var versionRange) ||
                 !TryReadScalar(declaration, "assemblyIdentity", out var assemblyIdentity) ||
-                !TryReadScalar(declaration, "typeIdentity", out var typeIdentity))
+                !TryReadScalar(declaration, "typeIdentity", out var typeIdentity) ||
+                !TryReadOptionalBool(declaration, "optional", out var importOptional))
             {
                 failure = ExtensionFailureCode.ManifestSchemaInvalid;
                 return false;
             }
 
-            imports.Add(new ManifestContractImportValues(id, versionRange, assemblyIdentity, typeIdentity));
+            imports.Add(new ManifestContractImportValues(id, versionRange, assemblyIdentity, typeIdentity, importOptional));
         }
 
         return true;

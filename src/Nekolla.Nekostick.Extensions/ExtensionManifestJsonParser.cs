@@ -84,14 +84,15 @@ internal static class JsonManifestParser
                     return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.UnknownManifestField);
                 }
 
-                if (!dependencyFields.SetEquals(ManifestSchema.DependencyFields) ||
+                if (!dependencyFields.IsSupersetOf(ManifestSchema.DependencyRequiredFields) ||
                     !TryGetString(dependencyElement, "id", out var dependencyId) ||
-                    !TryGetString(dependencyElement, "versionRange", out var dependencyRange))
+                    !TryGetString(dependencyElement, "versionRange", out var dependencyRange) ||
+                    !TryGetOptionalBool(dependencyElement, "optional", out var dependencyOptional))
                 {
                     return ManifestParserCore.Failure(ManifestSourceFormat.Json, ExtensionFailureCode.ManifestSchemaInvalid);
                 }
 
-                dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange));
+                dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange, dependencyOptional));
             }
 
             var exportsValid = TryGetExports(rootElement, out var exports, out var exportFailure);
@@ -213,11 +214,13 @@ internal static class JsonManifestParser
                 return false;
             }
 
-            if (!names.SetEquals(ManifestSchema.ImportFields) ||
+            if (!names.IsSubsetOf(ManifestSchema.ImportFields) ||
+                !names.IsSupersetOf(ManifestSchema.ImportRequiredFields) ||
                 !TryGetString(declaration, "contractId", out var id) ||
                 !TryGetString(declaration, "versionRange", out var versionRange) ||
                 !TryGetString(declaration, "assemblyIdentity", out var assemblyIdentity) ||
-                !TryGetString(declaration, "typeIdentity", out var typeIdentity))
+                !TryGetString(declaration, "typeIdentity", out var typeIdentity) ||
+                !TryGetOptionalBool(declaration, "optional", out var importOptional))
             {
                 failure = names.IsSubsetOf(ManifestSchema.ImportFields)
                     ? ExtensionFailureCode.ManifestSchemaInvalid
@@ -225,7 +228,7 @@ internal static class JsonManifestParser
                 return false;
             }
 
-            imports.Add(new ManifestContractImportValues(id, versionRange, assemblyIdentity, typeIdentity));
+            imports.Add(new ManifestContractImportValues(id, versionRange, assemblyIdentity, typeIdentity, importOptional));
         }
 
         return true;
@@ -246,6 +249,23 @@ internal static class JsonManifestParser
             property.ValueKind == JsonValueKind.Number &&
             property.TryGetInt32(out var parsed) &&
             (value = parsed) is not null;
+    }
+
+    private static bool TryGetOptionalBool(JsonElement root, string name, out bool value)
+    {
+        value = false;
+        if (!root.TryGetProperty(name, out var property))
+        {
+            return true;
+        }
+
+        if (property.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return false;
+        }
+
+        value = property.GetBoolean();
+        return true;
     }
 }
 
@@ -277,6 +297,12 @@ internal static class ManifestSchema
     internal static readonly IReadOnlySet<string> DependencyFields = new HashSet<string>(StringComparer.Ordinal)
     {
         "id",
+        "versionRange",
+        "optional"
+    };
+    internal static readonly IReadOnlySet<string> DependencyRequiredFields = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "id",
         "versionRange"
     };
     internal static readonly IReadOnlySet<string> ExportFields = new HashSet<string>(StringComparer.Ordinal)
@@ -288,6 +314,15 @@ internal static class ManifestSchema
     };
 
     internal static readonly IReadOnlySet<string> ImportFields = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "contractId",
+        "versionRange",
+        "assemblyIdentity",
+        "typeIdentity",
+        "optional"
+    };
+
+    internal static readonly IReadOnlySet<string> ImportRequiredFields = new HashSet<string>(StringComparer.Ordinal)
     {
         "contractId",
         "versionRange",

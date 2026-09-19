@@ -165,7 +165,8 @@ public sealed record ExtensionDependency
     /// <summary>Creates a dependency declaration.</summary>
     /// <param name="id">The required extension identifier.</param>
     /// <param name="versionRange">The required version range.</param>
-    public ExtensionDependency(string id, SemVersionRange versionRange)
+    /// <param name="optional">Whether a missing or version-incompatible dependency is skipped instead of failing.</param>
+    public ExtensionDependency(string id, SemVersionRange versionRange, bool optional = false)
     {
         if (!ExtensionIdentifierSyntax.IsValid(id))
         {
@@ -174,6 +175,7 @@ public sealed record ExtensionDependency
 
         Id = id;
         VersionRange = versionRange ?? throw new ArgumentNullException(nameof(versionRange));
+        Optional = optional;
     }
 
     /// <summary>Gets the required extension identifier.</summary>
@@ -181,6 +183,9 @@ public sealed record ExtensionDependency
 
     /// <summary>Gets the required version range.</summary>
     public SemVersionRange VersionRange { get; }
+
+    /// <summary>Gets whether the dependency is optional and skipped when absent or version-incompatible.</summary>
+    public bool Optional { get; }
 }
 
 /// <summary>Declares one shared contract exported by an extension.</summary>
@@ -235,17 +240,24 @@ public sealed record ExtensionContractExport
 public sealed record ExtensionContractImport
 {
     /// <summary>Creates an import declaration.</summary>
+    /// <param name="contractId">The stable contract ID.</param>
+    /// <param name="versionRange">The accepted semantic version range.</param>
+    /// <param name="assemblyIdentity">The exact shared assembly identity.</param>
+    /// <param name="typeIdentity">The exact shared contract type identity.</param>
+    /// <param name="optional">Whether a missing or version-incompatible provider is skipped instead of failing.</param>
     public ExtensionContractImport(
         string contractId,
         SemVersionRange versionRange,
         string assemblyIdentity,
-        string typeIdentity)
+        string typeIdentity,
+        bool optional = false)
     {
         ExtensionContractExport.ValidateIdentity(contractId, assemblyIdentity, typeIdentity);
         ContractId = contractId;
         VersionRange = versionRange ?? throw new ArgumentNullException(nameof(versionRange));
         AssemblyIdentity = assemblyIdentity;
         TypeIdentity = typeIdentity;
+        Optional = optional;
     }
 
     /// <summary>Gets the stable contract ID.</summary>
@@ -259,6 +271,9 @@ public sealed record ExtensionContractImport
 
     /// <summary>Gets the exact shared contract type identity.</summary>
     public string TypeIdentity { get; }
+
+    /// <summary>Gets whether the import is optional and skipped when no compatible provider is present.</summary>
+    public bool Optional { get; }
 }
 
 /// <summary>Contains the validated immutable extension manifest.</summary>

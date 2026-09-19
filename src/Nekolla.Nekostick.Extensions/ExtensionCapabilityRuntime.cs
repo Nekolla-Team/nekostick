@@ -9,6 +9,7 @@ internal static class ExtensionApiCapabilityGate
     private static readonly HostApiVersion Api12Version = new(1, 2, 0);
     private static readonly HostApiVersion Api13Version = new(1, 3, 2);
     private static readonly HostApiVersion Api133Version = new(1, 3, 3);
+    private static readonly HostApiVersion Api14Version = new(1, 4, 0);
 
     internal static bool IsApi11Supported(HostApiVersion host) =>
         host.Major == Api11Version.Major && host >= Api11Version;
@@ -21,6 +22,9 @@ internal static class ExtensionApiCapabilityGate
 
     internal static bool IsApi133Supported(HostApiVersion host) =>
         host.Major == Api133Version.Major && host >= Api133Version;
+
+    internal static bool IsApi14Supported(HostApiVersion host) =>
+        host.Major == Api14Version.Major && host >= Api14Version;
 }
 
 internal enum ExtensionCallbackKind
@@ -139,6 +143,8 @@ internal static class UnsupportedExtensionCapabilities
 
     internal static IExtensionLogWriter CreateLogWriter() => new UnsupportedLogWriter();
     internal static IExtensionLifecycleApi CreateLifecycle() => new UnsupportedLifecycleApi();
+    internal static IExtensionDependencyApi CreateDependencyApi() => new UnsupportedDependencyApi();
+
 
     private sealed class UnsupportedConfigurationApi : IExtensionConfigurationApi
     {
@@ -184,6 +190,21 @@ internal static class UnsupportedExtensionCapabilities
         public ValueTask<ConfigurationWriteResult> RemoveAsync(long expectedVersion, Guid routeId, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
     }
+    private sealed class UnsupportedDependencyApi : IExtensionDependencyApi
+    {
+        public IExtensionDependencyContext GetDependencyContext(string extensionId)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(extensionId);
+            return new ExtensionDependencyContext(
+                extensionId,
+                ExtensionDependencyState.Unavailable,
+                optional: false,
+                versionRange: string.Empty,
+                installedVersion: null,
+                contracts: null);
+        }
+    }
+
 
     private sealed class UnsupportedServiceApi : IExtensionServiceApi
     {

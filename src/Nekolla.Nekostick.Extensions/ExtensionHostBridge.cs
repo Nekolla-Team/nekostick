@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
 
-internal sealed class ExtensionHostBridge : IExtensionHostBridge13
+internal sealed class ExtensionHostBridge : IExtensionHostBridge14
 {
     private readonly Func<ExtensionHostInfoSnapshot>? _hostInfo;
     private readonly ILogger? _logger;
@@ -16,6 +16,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         ExtensionContractRegistry contracts,
         ExtensionCapabilitySet capabilities,
         IExtensionLifecycleApi lifecycle,
+        IExtensionDependencyApi dependencies,
         Action<ExtensionStatus> reportStatus,
         Action<ExtensionLogLevel, string> reportLog,
         string? dataDirectory = null,
@@ -54,6 +55,9 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
         Management = api13Supported
             ? capabilities.ExtensionManagement ?? UnsupportedExtensionCapabilities.CreateManagement(apiVersion)
             : UnsupportedExtensionCapabilities.CreateManagement(apiVersion);
+        Dependencies = ExtensionApiCapabilityGate.IsApi14Supported(apiVersion)
+            ? dependencies
+            : UnsupportedExtensionCapabilities.CreateDependencyApi();
 
         _hostInfo = ExtensionApiCapabilityGate.IsApi133Supported(apiVersion)
             ? capabilities.HostInfo
@@ -87,6 +91,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge13
 
     public IExtensionLogWriter LogWriter { get; }
     public IExtensionManagementApi Management { get; }
+    public IExtensionDependencyApi Dependencies { get; }
 
     public ExtensionHostInfoSnapshot HostInfo
     {

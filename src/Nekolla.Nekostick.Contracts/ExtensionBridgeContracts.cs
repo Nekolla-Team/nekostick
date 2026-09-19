@@ -102,3 +102,16 @@ public interface IExtensionHostBridge13 : IExtensionHostBridge
     string DataDirectory => string.Empty;
 }
 
+/// <summary>Exposes additive API 1.4 capabilities without changing the 1.3 bridge contract.</summary>
+/// <remarks>
+/// An extension opts into this sibling by testing whether its <see cref="IExtensionHostBridge" /> is also an
+/// <see cref="IExtensionHostBridge14" /> and by checking <see cref="IExtensionHostBridge.ApiVersion" />.
+/// Existing external 1.3 bridge implementers need not implement this interface. The built-in bridge may expose
+/// the sibling for an older negotiated version, but returns unsupported behavior rather than a partial capability.
+/// </remarks>
+public interface IExtensionHostBridge14 : IExtensionHostBridge13
+{
+    /// <summary>Gets the dependency resolution information for the calling extension.</summary>
+    IExtensionDependencyApi Dependencies { get; }
+}
+

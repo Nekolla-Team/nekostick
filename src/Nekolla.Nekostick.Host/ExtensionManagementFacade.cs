@@ -169,7 +169,12 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
 
         foreach (var dependency in manifest.Dependencies)
         {
-            // Enabling requires every declared dependency to be loaded and version-satisfied.
+            // Enabling requires every declared non-optional dependency to be loaded and version-satisfied.
+            if (dependency.Optional)
+            {
+                continue;
+            }
+
             var dependencyRecord = snapshot.ExtensionRecords.FirstOrDefault(value =>
                 string.Equals(value.ExtensionId, dependency.Id, StringComparison.Ordinal));
             if (dependencyRecord is null ||
@@ -747,6 +752,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 !string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal))
             .Any(value => scan.Manifests.TryGetValue(value.ExtensionId, out var dependentManifest) &&
                 dependentManifest.Dependencies.Any(dependency =>
+                    !dependency.Optional &&
                     string.Equals(dependency.Id, extensionId, StringComparison.Ordinal)));
 
     private async ValueTask CompletePublishTriggerAsync(CancellationToken cancellationToken)

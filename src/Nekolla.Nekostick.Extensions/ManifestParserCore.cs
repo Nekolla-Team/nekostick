@@ -2,7 +2,7 @@ using System.Collections.Immutable;
 
 namespace Nekolla.Nekostick.Extensions;
 
-internal sealed record ManifestDependencyValues(string? Id, string? VersionRange);
+internal sealed record ManifestDependencyValues(string? Id, string? VersionRange, bool Optional);
 
 internal sealed record ManifestContractExportValues(
     string? ContractId,
@@ -14,7 +14,8 @@ internal sealed record ManifestContractImportValues(
     string? ContractId,
     string? VersionRange,
     string? AssemblyIdentity,
-    string? TypeIdentity);
+    string? TypeIdentity,
+    bool Optional);
 
 internal sealed record ManifestDocumentValues(
     int? SchemaVersion,
@@ -95,7 +96,7 @@ internal static class ManifestParserCore
                 return Failure(format, ExtensionFailureCode.InvalidVersionRange);
             }
 
-            dependencies.Add(new ExtensionDependency(dependency.Id!, dependencyRange));
+            dependencies.Add(new ExtensionDependency(dependency.Id!, dependencyRange, dependency.Optional));
         }
         var exports = ImmutableArray.CreateBuilder<ExtensionContractExport>(values.Exports.Count);
         var exportIds = new HashSet<string>(StringComparer.Ordinal);
@@ -158,7 +159,8 @@ internal static class ManifestParserCore
                 import.ContractId!,
                 importRange,
                 import.AssemblyIdentity!,
-                import.TypeIdentity!));
+                import.TypeIdentity!,
+                import.Optional));
         }
 
         return ManifestDiscoveryResult.Success(

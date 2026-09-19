@@ -366,6 +366,15 @@ public ValueTask StartAsync(IExtensionStartContext context, CancellationToken ca
 - 交换只在启动期进行；提供方更新后，使用方在自己下次启动（reload）时才会拿到新实例。
 - 契约版本不兼容（导出版本不满足导入范围）时加载直接失败。
 
+### 契约程序集的版本约束与发行
+
+`assemblyIdentity` 在 Host 内逐字符精确匹配（Ordinal 比较），包含其中的 `Version=` 部分；运行时加载程序集时还会比对实际程序集的 Name、Version、Culture、PublicKeyToken 四项。因此契约程序集的 `AssemblyVersion` 一旦发布就必须冻结，任何时候都不能修改——提供方与使用方清单里的 `assemblyIdentity` 只要有一个字符不同，加载即失败（`ContractIdentityMismatch`）。
+
+- 契约的兼容性演进只通过清单的 `version`（提供方）与 `versionRange`（使用方）字段以 SemVer 协商；程序集层面固定 `AssemblyVersion`，需要标记构建信息时只递增 `AssemblyFileVersion` / `AssemblyInformationalVersion`。
+- 契约接口只能追加式演进（新增类型、新增接口）；给既有接口添加成员会破坏旧的实现方。破坏性变更应使用新的 `typeIdentity`（如 `IGeoLookup2`）或新的 `contractId`，提供方可同时导出新旧两份契约，让使用方逐步迁移。
+- 契约程序集推荐以独立 NuGet 包发行：只含接口与 DTO，不含实现。NuGet 包版本不受精确匹配约束——包版本可随契约语义版本递增（如 `2.1.0`），只要包内程序集的 `AssemblyVersion` 保持冻结（如 `2.0.0.0`）即可。引用方升级 NuGet 包后无需修改清单中的 `assemblyIdentity`。
+- 运行时实际加载的始终是 Host 契约目录（`ExtensionContractCatalog`）批准的副本：扩展安装目录内的同名程序集不会被当作契约程序集加载，即使扩展打包时自带了契约 DLL 也会被重定向到批准副本。扩展引用 NuGet 包只为获得编译期类型，不要试图通过自带 DLL 改变运行时身份。
+
 ## 从 1.0 升级
 
 - 1.0 是唯一基线，无前置版本。

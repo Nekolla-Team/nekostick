@@ -9,7 +9,7 @@ internal sealed class ExtensionContractRegistry : IExtensionContractRegistry, ID
     private readonly object _gate = new();
     private readonly ImmutableDictionary<string, ExtensionContractExport> _exports;
     private readonly ImmutableDictionary<string, ExtensionContractImport> _imports;
-    private readonly Func<string, Type, object?> _resolveProvider;
+    private readonly Func<string, Type, SemVersionRange, object?> _resolveProvider;
     private readonly Dictionary<string, object> _values = new(StringComparer.Ordinal);
     private bool _startupOpen = true;
     private bool _disposed;
@@ -17,7 +17,7 @@ internal sealed class ExtensionContractRegistry : IExtensionContractRegistry, ID
     internal ExtensionContractRegistry(
         ImmutableArray<ExtensionContractExport> exports,
         ImmutableArray<ExtensionContractImport> imports,
-        Func<string, Type, object?> resolveProvider)
+        Func<string, Type, SemVersionRange, object?> resolveProvider)
     {
         _exports = exports.ToImmutableDictionary(static declaration => declaration.ContractId, StringComparer.Ordinal);
         _imports = imports.ToImmutableDictionary(static declaration => declaration.ContractId, StringComparer.Ordinal);
@@ -56,11 +56,22 @@ internal sealed class ExtensionContractRegistry : IExtensionContractRegistry, ID
             return false;
         }
 
+        // The provider resolution enters the runtime manager and provider registries; the registry
+        // gate MUST NOT wrap that call (registry locks never wrap manager calls).
+        ExtensionContractImport? declaration;
         lock (_gate)
         {
             if (!_startupOpen || _disposed ||
-                !_imports.TryGetValue(contractId, out var declaration) ||
+                !_imports.TryGetValue(contractId, out declaration) ||
                 !TypeMatches<TContract>(declaration.TypeIdentity))
+            {
+                return false;
+            }
+
+            // An import whose provider does not satisfy the declared range is unsatisfied even when
+            // validation skipped it as optional; never hand out a contract outside the declared range.
+            if (_exports.TryGetValue(contractId, out var ownExport) &&
+                !declaration.VersionRange.IsSatisfiedBy(ownExport.Version))
             {
                 return false;
             }
@@ -72,7 +83,7 @@ internal sealed class ExtensionContractRegistry : IExtensionContractRegistry, ID
             }
         }
 
-        var resolved = _resolveProvider(contractId, typeof(TContract));
+        var resolved = _resolveProvider(contractId, typeof(TContract), declaration.VersionRange);
         if (resolved is not TContract typed)
         {
             return false;

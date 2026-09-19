@@ -491,7 +491,7 @@ public sealed partial class HostConfigurationPublisher
             case ExtensionFailureCode.MissingDependency:
                 foreach (var manifest in items.Values)
                 {
-                    if (manifest.Dependencies.Any(dependency => !items.ContainsKey(dependency.Id)))
+                    if (manifest.Dependencies.Any(dependency => !dependency.Optional && !items.ContainsKey(dependency.Id)))
                     {
                         affected.Add(manifest.Id);
                     }
@@ -502,6 +502,7 @@ public sealed partial class HostConfigurationPublisher
                 foreach (var manifest in items.Values)
                 {
                     if (manifest.Dependencies.Any(dependency =>
+                        !dependency.Optional &&
                         items.TryGetValue(dependency.Id, out var target) &&
                         !dependency.VersionRange.IsSatisfiedBy(target.Version)))
                     {
@@ -541,7 +542,7 @@ public sealed partial class HostConfigurationPublisher
                     .ToDictionary(static group => group.Key, static group => group.First().Id, StringComparer.Ordinal);
                 foreach (var manifest in items.Values)
                 {
-                    if (manifest.Imports.Any(import => !providers.ContainsKey(import.ContractId)))
+                    if (manifest.Imports.Any(import => !import.Optional && !providers.ContainsKey(import.ContractId)))
                     {
                         affected.Add(manifest.Id);
                     }
@@ -564,7 +565,7 @@ public sealed partial class HostConfigurationPublisher
                         }
 
                         var incompatible = failureCode == ExtensionFailureCode.ContractVersionIncompatible
-                            ? !import.VersionRange.IsSatisfiedBy(provider.Export.Version)
+                            ? !import.Optional && !import.VersionRange.IsSatisfiedBy(provider.Export.Version)
                             : !string.Equals(import.AssemblyIdentity, provider.Export.AssemblyIdentity, StringComparison.Ordinal) ||
                               !string.Equals(import.TypeIdentity, provider.Export.TypeIdentity, StringComparison.Ordinal);
                         if (incompatible)
@@ -598,7 +599,7 @@ public sealed partial class HostConfigurationPublisher
         {
             foreach (var dependency in manifest.Dependencies)
             {
-                if (manifests.ContainsKey(dependency.Id))
+                if (!dependency.Optional && manifests.ContainsKey(dependency.Id))
                 {
                     edges[manifest.Id].Add(dependency.Id);
                 }
@@ -606,7 +607,8 @@ public sealed partial class HostConfigurationPublisher
 
             foreach (var import in manifest.Imports)
             {
-                if (providers.TryGetValue(import.ContractId, out var provider) &&
+                if (!import.Optional &&
+                    providers.TryGetValue(import.ContractId, out var provider) &&
                     !string.Equals(provider, manifest.Id, StringComparison.Ordinal))
                 {
                     edges[manifest.Id].Add(provider);

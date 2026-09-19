@@ -60,18 +60,17 @@ public static class ExtensionManifestGraph
             }
         }
         var contractProviders = new Dictionary<string, string>(StringComparer.Ordinal);
-        var contractFailure = ValidateContracts(items, contractCatalog, contractProviders);
+        var contractExports = new Dictionary<string, ExtensionContractExport>(StringComparer.Ordinal);
+        var contractFailure = ValidateContracts(items, contractCatalog, contractProviders, contractExports);
         if (contractFailure != ExtensionFailureCode.None)
         {
             return ExtensionGraphResult.Failure(contractFailure);
         }
 
-        var indegrees = new Dictionary<string, int>(StringComparer.Ordinal);
-        var dependents = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var edges = new List<(string From, string To, bool Optional)>();
         foreach (var manifest in items)
         {
-            var edgeTargets = new HashSet<string>(StringComparer.Ordinal);
-            indegrees[manifest.Id] = 0;
+            var edgeTargets = new Dictionary<string, bool>(StringComparer.Ordinal);
 
             var dependencies = manifest.Dependencies;
             var uniqueDependencies = new HashSet<string>(StringComparer.Ordinal);
@@ -84,47 +83,87 @@ public static class ExtensionManifestGraph
 
                 if (!byId.TryGetValue(dependency.Id, out var dependencyManifest))
                 {
+                    if (dependency.Optional)
+                    {
+                        continue;
+                    }
+
                     return ExtensionGraphResult.Failure(ExtensionFailureCode.MissingDependency);
                 }
 
                 if (!dependency.VersionRange.IsSatisfiedBy(dependencyManifest.Version))
                 {
+                    if (dependency.Optional)
+                    {
+                        continue;
+                    }
+
                     return ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyVersionIncompatible);
                 }
 
-                if (!edgeTargets.Add(dependency.Id))
-                {
-                    continue;
-                }
-
-                indegrees[manifest.Id]++;
-                if (!dependents.TryGetValue(dependency.Id, out var dependentList))
-                {
-                    dependentList = new List<string>();
-                    dependents.Add(dependency.Id, dependentList);
-                }
-
-                dependentList.Add(manifest.Id);
+                AddEdge(edgeTargets, dependency.Id, dependency.Optional);
             }
 
             foreach (var import in manifest.Imports)
             {
-                var providerId = contractProviders[import.ContractId];
-                if (string.Equals(providerId, manifest.Id, StringComparison.Ordinal) ||
-                    !edgeTargets.Add(providerId))
+                // Edges exist only for satisfied imports; an unsatisfied optional import contributes nothing.
+                if (!contractProviders.TryGetValue(import.ContractId, out var providerId) ||
+                    string.Equals(providerId, manifest.Id, StringComparison.Ordinal) ||
+                    !import.VersionRange.IsSatisfiedBy(contractExports[import.ContractId].Version))
                 {
                     continue;
                 }
 
-                indegrees[manifest.Id]++;
-                if (!dependents.TryGetValue(providerId, out var dependentList))
-                {
-                    dependentList = new List<string>();
-                    dependents.Add(providerId, dependentList);
-                }
-
-                dependentList.Add(manifest.Id);
+                AddEdge(edgeTargets, providerId, import.Optional);
             }
+
+            foreach (var edge in edgeTargets)
+            {
+                edges.Add((edge.Key, manifest.Id, edge.Value));
+            }
+        }
+
+        var ordered = Order(items, byId, edges, includeOptionalEdges: true);
+        if (ordered is null && edges.Any(static edge => edge.Optional))
+        {
+            // Optional relationships never block loading: drop them to break cycles they participate in.
+            ordered = Order(items, byId, edges, includeOptionalEdges: false);
+        }
+
+        return ordered is { } result
+            ? ExtensionGraphResult.Success(result)
+            : ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyCycle);
+    }
+
+    private static void AddEdge(Dictionary<string, bool> edgeTargets, string target, bool optional)
+    {
+        // A relationship declared both required (dependency/import) and optional stays required.
+        edgeTargets[target] = edgeTargets.TryGetValue(target, out var existing) ? existing && optional : optional;
+    }
+
+    private static ImmutableArray<ExtensionManifest>? Order(
+        ImmutableArray<ExtensionManifest> items,
+        Dictionary<string, ExtensionManifest> byId,
+        List<(string From, string To, bool Optional)> edges,
+        bool includeOptionalEdges)
+    {
+        var indegrees = items.ToDictionary(static manifest => manifest.Id, static _ => 0, StringComparer.Ordinal);
+        var dependents = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var (from, to, optional) in edges)
+        {
+            if (optional && !includeOptionalEdges)
+            {
+                continue;
+            }
+
+            indegrees[to]++;
+            if (!dependents.TryGetValue(from, out var dependentList))
+            {
+                dependentList = new List<string>();
+                dependents.Add(from, dependentList);
+            }
+
+            dependentList.Add(to);
         }
 
         var ready = new SortedSet<string>(StringComparer.Ordinal);
@@ -164,22 +203,20 @@ public static class ExtensionManifestGraph
             }
         }
 
-        return ordered.Count == items.Length
-            ? ExtensionGraphResult.Success(ordered.ToImmutable())
-            : ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyCycle);
+        return ordered.Count == items.Length ? ordered.ToImmutable() : null;
     }
     private static ExtensionFailureCode ValidateContracts(
         ImmutableArray<ExtensionManifest> manifests,
         ExtensionContractCatalog? contractCatalog,
-        Dictionary<string, string> providerIds)
+        Dictionary<string, string> providerIds,
+        Dictionary<string, ExtensionContractExport> providerExports)
     {
-        var providers = new Dictionary<string, ExtensionContractExport>(StringComparer.Ordinal);
         foreach (var manifest in manifests)
         {
             var exportIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var export in manifest.Exports)
             {
-                if (!exportIds.Add(export.ContractId) || !providers.TryAdd(export.ContractId, export))
+                if (!exportIds.Add(export.ContractId) || !providerExports.TryAdd(export.ContractId, export))
                 {
                     return ExtensionFailureCode.DuplicateContractDeclaration;
                 }
@@ -218,13 +255,23 @@ public static class ExtensionManifestGraph
         {
             foreach (var import in manifest.Imports)
             {
-                if (!providers.TryGetValue(import.ContractId, out var provider))
+                if (!providerExports.TryGetValue(import.ContractId, out var provider))
                 {
+                    if (import.Optional)
+                    {
+                        continue;
+                    }
+
                     return ExtensionFailureCode.MissingContractProvider;
                 }
 
                 if (!import.VersionRange.IsSatisfiedBy(provider.Version))
                 {
+                    if (import.Optional)
+                    {
+                        continue;
+                    }
+
                     return ExtensionFailureCode.ContractVersionIncompatible;
                 }
 

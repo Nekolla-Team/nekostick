@@ -105,6 +105,10 @@ public sealed partial class ExtensionRuntimeManager
             {
                 return ExtensionGenerationPreparationResult.Failure(graph.FailureCode);
             }
+            var availableDependencyVersions = graphManifests.ToDictionary(
+                static manifest => manifest.Id,
+                static manifest => manifest.Version,
+                StringComparer.Ordinal);
             if (graph.OrderedManifests.Length == descriptors.Length)
             {
                 var descriptorsById = descriptors.ToDictionary(
@@ -191,7 +195,8 @@ public sealed partial class ExtensionRuntimeManager
                             reloading: true,
                             operationToken,
                             descriptor.RouteIds,
-                            descriptor.ContentHash)
+                            descriptor.ContentHash,
+                            availableDependencyVersions)
                         .ConfigureAwait(false);
                     if (candidateResult.Succeeded && candidateResult.Instance is { } started)
                     {

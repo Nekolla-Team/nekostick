@@ -59,7 +59,7 @@ Nekostick 扩展是运行在 Host 进程内的可信 .NET 程序集。扩展通�
 | `version` | 是 | 扩展自身的 SemVer 版本。 |
 | `entryAssembly` | 是 | 入口程序集，相对扩展目录的 `.dll` 路径，不能越出目录。 |
 | `entryType` | 是 | 入口类型的全限定名，须实现 `IExtensionEntrypoint` 或 `IExtensionEntry`。 |
-| `dependencies` | 是 | 依赖的其他扩展，`[]` 表示无依赖。每项为 `{ "id": ..., "versionRange": ... }`。 |
+| `dependencies` | 是 | 依赖的其他扩展，`[]` 表示无依赖。每项为 `{ "id": ..., "versionRange": ... }`，可加 `"optional": true` 声明可选依赖（1.4 起，见 [api-1.4.md](api-1.4.md#可选依赖与依赖上下文)）。 |
 | `requiredHostApiVersion` | 是 | 可接受的 Host API 版本范围，见下文「版本协商」。 |
 | `exports` | 否 | 共享契约导出声明，见 [api-1.0.md](api-1.0.md#共享契约)。 |
 | `imports` | 否 | 共享契约导入声明，见 [api-1.0.md](api-1.0.md#共享契约)。 |

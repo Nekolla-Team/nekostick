@@ -16,7 +16,7 @@ public sealed class HostDataDirectoryTests
         using var contracts = new ExtensionContractRegistry(
             ImmutableArray<ExtensionContractExport>.Empty,
             ImmutableArray<ExtensionContractImport>.Empty,
-            static (_, _) => null);
+            static (_, _, _) => null);
 
         var bridge = new ExtensionHostBridge(
             HostApiVersion.Current,
@@ -26,6 +26,7 @@ public sealed class HostDataDirectoryTests
             contracts,
             UnsupportedExtensionCapabilities.Create(),
             UnsupportedExtensionCapabilities.CreateLifecycle(),
+            UnsupportedExtensionCapabilities.CreateDependencyApi(),
             reportStatus: _ => { },
             reportLog: (_, _) => { },
             dataDirectory: configuredDirectory);
