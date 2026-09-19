@@ -178,6 +178,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
     private readonly ImmutableArray<ExtensionGenerationBindingStatus> _bindings;
     private readonly ILogger? _logger;
     private readonly ExtensionLogThrottle _requestLogThrottle = new();
+    private readonly Func<ExtensionInstance, CancellationToken, ValueTask<ExtensionInstance?>> _enterDispatch;
+    private readonly Func<ExtensionDispatchGeneration?> _currentGeneration;
     private TaskCompletionSource<bool> _leasesDrained =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _releaseTask;
@@ -193,7 +195,9 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         ImmutableArray<ExtensionGenerationBindingStatus> bindings,
         object owner,
         ImmutableDictionary<string, ImmutableArray<Guid>>? routeIdsByExtension = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        Func<ExtensionInstance, CancellationToken, ValueTask<ExtensionInstance?>>? enterDispatch = null,
+        Func<ExtensionDispatchGeneration?>? currentGeneration = null)
     {
         GenerationId = generationId;
         _handlers = handlers;
@@ -202,6 +206,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         _bindings = bindings;
         Owner = owner;
         _logger = logger;
+        _enterDispatch = enterDispatch ?? EnterDirect;
+        _currentGeneration = currentGeneration ?? (static () => null);
         RouteIdsByExtension = routeIdsByExtension ?? ImmutableDictionary<string, ImmutableArray<Guid>>.Empty;
         InitializeRouteDispatch();
         if (_activeLeases == 0)
@@ -209,6 +215,11 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             _leasesDrained.TrySetResult(true);
         }
     }
+
+    private static ValueTask<ExtensionInstance?> EnterDirect(
+        ExtensionInstance instance,
+        CancellationToken cancellationToken) =>
+        new(instance.TryEnterRequest() ? instance : null);
 
     /// <summary>Gets the monotonically increasing manager-local generation ID.</summary>
     public long GenerationId { get; }
@@ -327,16 +338,61 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         ExtensionHandlerRequest? request,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(handlerId) || request is null ||
-            !_handlers.TryGetValue(handlerId, out var binding) ||
-            binding.StreamingHandler is not null ||
-            binding.Handler is not { } handler ||
-            !binding.Context.Instance.IsHandlerOwned(handlerId) ||
-            !binding.Context.Instance.TryEnterRequest())
+        if (string.IsNullOrWhiteSpace(handlerId) || request is null)
         {
             return ExtensionInvocationResult.Unavailable;
         }
 
+        var generation = this;
+        ExtensionDispatchGeneration? triedGeneration = null;
+        ExtensionDispatchBinding? binding;
+        while (true)
+        {
+            if (!generation._handlers.TryGetValue(handlerId, out binding) ||
+                binding.StreamingHandler is not null ||
+                binding.Handler is null ||
+                !binding.Context.Instance.IsHandlerOwned(handlerId))
+            {
+                return ExtensionInvocationResult.Unavailable;
+            }
+
+            try
+            {
+                var entered = await generation._enterDispatch(binding.Context.Instance, cancellationToken)
+                    .ConfigureAwait(false);
+                if (entered is not null)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return ExtensionInvocationResult.Unavailable;
+            }
+
+            // The binding's instance is gone; re-resolve against the manager's published
+            // generation so requests suspended across a reload bind the replacement. Rapid
+            // successive publications can walk a short chain (G1 -> G2 -> G3); each hop is
+            // bounded by the entry timeout, monotonic in generation id, and ultimately bounded
+            // by the caller's cancellation token. A rebound call enters the new generation's
+            // instance WITHOUT holding a lease on that generation: a mid-call retirement is
+            // still covered by the instance drain grace (LifecycleTimeout) before any stop.
+            if (ReferenceEquals(generation, triedGeneration))
+            {
+                return ExtensionInvocationResult.Unavailable;
+            }
+
+            triedGeneration = generation;
+            var current = generation._currentGeneration();
+            if (current is null || ReferenceEquals(current, generation))
+            {
+                return ExtensionInvocationResult.Unavailable;
+            }
+
+            generation = current;
+        }
+
+        var handler = binding.Handler;
         using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
         try
         {
@@ -385,16 +441,60 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         ExtensionStreamingRequest? request,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(handlerId) || request is null ||
-            !_handlers.TryGetValue(handlerId, out var binding) ||
-            binding.StreamingHandler is not { } handler ||
-            !binding.Context.Instance.IsStreamingHandler(handlerId) ||
-            !binding.Context.Instance.TryEnterRequest())
+        if (string.IsNullOrWhiteSpace(handlerId) || request is null)
         {
             request?.BodyStream.Dispose();
             return ExtensionStreamingInvocationResult.Unavailable;
         }
 
+        var generation = this;
+        ExtensionDispatchGeneration? triedGeneration = null;
+        ExtensionDispatchBinding? binding;
+        while (true)
+        {
+            if (!generation._handlers.TryGetValue(handlerId, out binding) ||
+                binding.StreamingHandler is null ||
+                !binding.Context.Instance.IsStreamingHandler(handlerId))
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            try
+            {
+                var entered = await generation._enterDispatch(binding.Context.Instance, cancellationToken)
+                    .ConfigureAwait(false);
+                if (entered is not null)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            // The binding's instance is gone; retry once against the manager's published
+            // generation so requests suspended across a reload bind the replacement.
+            if (ReferenceEquals(generation, triedGeneration))
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            triedGeneration = generation;
+            var current = generation._currentGeneration();
+            if (current is null || ReferenceEquals(current, generation))
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            generation = current;
+        }
+
+        var handler = binding.StreamingHandler;
         var holdRequestLease = false;
         try
         {
@@ -507,14 +607,50 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             return ExtensionInvocationResult.NotHandled;
         }
 
-        var fallbackBinding = _fallback;
-        if (fallbackBinding is null || fallbackBinding.Fallback is not { } fallback ||
-            !fallbackBinding.Context.Instance.IsFallbackOwned ||
-            !fallbackBinding.Context.Instance.TryEnterRequest())
+        var generation = this;
+        ExtensionDispatchGeneration? triedGeneration = null;
+        ExtensionDispatchBinding? fallbackBinding;
+        while (true)
         {
-            return ExtensionInvocationResult.NotHandled;
+            fallbackBinding = generation._fallback;
+            if (fallbackBinding is null || fallbackBinding.Fallback is null ||
+                !fallbackBinding.Context.Instance.IsFallbackOwned)
+            {
+                return ExtensionInvocationResult.NotHandled;
+            }
+
+            try
+            {
+                var entered = await generation._enterDispatch(fallbackBinding.Context.Instance, cancellationToken)
+                    .ConfigureAwait(false);
+                if (entered is not null)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return ExtensionInvocationResult.NotHandled;
+            }
+
+            // The binding's instance is gone; retry once against the manager's published
+            // generation so requests suspended across a reload bind the replacement.
+            if (ReferenceEquals(generation, triedGeneration))
+            {
+                return ExtensionInvocationResult.NotHandled;
+            }
+
+            triedGeneration = generation;
+            var current = generation._currentGeneration();
+            if (current is null || ReferenceEquals(current, generation))
+            {
+                return ExtensionInvocationResult.NotHandled;
+            }
+
+            generation = current;
         }
 
+        var fallback = fallbackBinding.Fallback;
         using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
         try
         {

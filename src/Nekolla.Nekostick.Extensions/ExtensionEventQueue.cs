@@ -35,6 +35,9 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
 
     internal long DroppedCount => Interlocked.Read(ref _dropped);
 
+    /// <summary>Counts one event that could not run because the owning extension is draining or stopped.</summary>
+    internal void RecordSkipped() => Interlocked.Increment(ref _dropped);
+
     public bool TryPublish(ExtensionEvent @event)
     {
         if (@event is null)

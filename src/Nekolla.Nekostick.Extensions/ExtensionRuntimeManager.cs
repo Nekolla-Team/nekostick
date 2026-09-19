@@ -164,6 +164,7 @@ public sealed partial class ExtensionRuntimeManager : IAsyncDisposable
     private readonly ExtensionLogThrottle _requestLogThrottle = new();
     private readonly string _dataDirectory;
     private readonly Dictionary<string, ExtensionInstance> _instances = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ExtensionDispatchTurnstile> _turnstiles = new(StringComparer.Ordinal);
     private readonly Dictionary<string, HandlerBinding> _handlers = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _dispatchLifetime = new();
     private HandlerBinding? _fallback;

@@ -345,26 +345,73 @@ public sealed partial class ExtensionRuntimeManager
         Type contractType,
         SemVersionRange requiredRange)
     {
+        if (ResolveContractTarget(consumer.Manifest.Id, contractId, contractType, requiredRange) is not { } resolved)
+        {
+            return null;
+        }
+
+        // Wrap outside _gate: first-use DispatchProxy codegen must not stall manager operations.
+        return resolved.Provider.GetOrCreateContractProxy(
+            contractId,
+            consumer.Manifest.Id,
+            contractType,
+            resolved.Target,
+            GetTurnstile(resolved.Provider.Manifest.Id),
+            () => ResolveContractTarget(consumer.Manifest.Id, contractId, contractType, requiredRange) is { } next
+                ? (next.Provider, next.Target, GetTurnstile(next.Provider.Manifest.Id))
+                : null);
+    }
+
+    /// <summary>Finds the current provider instance and contract object for one import and records the consumer on it.</summary>
+    /// <param name="consumerId">The importing extension identifier recorded on the provider.</param>
+    /// <param name="contractId">The contract identifier to resolve.</param>
+    /// <param name="contractType">The shared contract interface type.</param>
+    /// <param name="requiredRange">The declared provider version range.</param>
+    /// <returns>The provider instance and its contract object, or null when none is available.</returns>
+    private (ExtensionInstance Provider, object Target)? ResolveContractTarget(
+        string consumerId,
+        string contractId,
+        Type contractType,
+        SemVersionRange requiredRange)
+    {
+        ExtensionInstance? provider = null;
+        object? target = null;
         lock (_gate)
         {
             // Candidates first: a consumer candidate starting during generation preparation must
             // bind the incoming provider, never the live instance being replaced (which would
-            // leave a stale binding and record the consumer on the dying instance's table).
-            foreach (var instance in _dispatchCandidates.Concat(_instances.Values))
+            // leave a stale binding and record the consumer on the dying instance's table). The
+            // published generation follows so proxies rebind across generation swaps, where the
+            // serving instances never appear in the legacy _instances table.
+            var published = _publishedDispatchGeneration;
+            foreach (var instance in _dispatchCandidates
+                .Concat(published is null
+                    ? Enumerable.Empty<ExtensionInstance>()
+                    : published.Contexts.Select(static context => context.Instance))
+                .Concat(_instances.Values)
+                .Distinct())
             {
                 var export = instance.Manifest.Exports.FirstOrDefault(export =>
                     string.Equals(export.ContractId, contractId, StringComparison.Ordinal));
                 if (export is not null &&
                     requiredRange.IsSatisfiedBy(export.Version) &&
-                    instance.TryResolveContract(contractId, contractType, out var value))
+                    instance.TryResolveContract(contractId, contractType, out var value) &&
+                    value is not null)
                 {
-                    instance.TrackContractConsumer(consumer.Manifest.Id);
-                    return value;
+                    provider = instance;
+                    target = value;
+                    break;
                 }
             }
         }
 
-        return null;
+        if (provider is null || target is null)
+        {
+            return null;
+        }
+
+        provider.TrackContractConsumer(consumerId);
+        return (provider, target);
     }
 
     /// <summary>Computes the transitive closure of extensions that imported contracts from the given extension, based on the per-run records of the currently live instances.</summary>
@@ -445,9 +492,28 @@ public sealed partial class ExtensionRuntimeManager
         return accepted;
     }
 
+    /// <summary>Gets or creates the dispatch turnstile for one extension identifier.</summary>
+    /// <param name="extensionId">The extension identifier.</param>
+    /// <returns>The shared turnstile surviving instance replacement.</returns>
+    private ExtensionDispatchTurnstile GetTurnstile(string extensionId)
+    {
+        // _gate is re-entrant; callers already holding it are unaffected.
+        lock (_gate)
+        {
+            if (!_turnstiles.TryGetValue(extensionId, out var turnstile))
+            {
+                turnstile = new ExtensionDispatchTurnstile();
+                _turnstiles[extensionId] = turnstile;
+            }
+
+            return turnstile;
+        }
+    }
+
     private void CommitInstance(ExtensionInstance instance)
     {
         _instances[instance.Manifest.Id] = instance;
+        GetTurnstile(instance.Manifest.Id).SetCurrent(instance);
         foreach (var pair in instance.Handlers)
         {
             _handlers[pair.Key] = new HandlerBinding(instance, pair.Value, null, null);
@@ -592,6 +658,7 @@ public sealed partial class ExtensionRuntimeManager
                     {
                         RemoveInstanceRegistrations(instance);
                         _instances.Remove(instance.Manifest.Id);
+                        GetTurnstile(instance.Manifest.Id).SetCurrent(null);
                     }
 
                     shouldStop = true;

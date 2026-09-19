@@ -19,6 +19,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     private readonly ExtensionEventQueue _events;
     private readonly ExtensionContractRegistry _contracts;
     private readonly HashSet<string> _contractConsumers = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string ContractId, string ConsumerId), object> _contractProxies = new();
     private readonly ExtensionFailureTracker _failures = new();
     private readonly ExtensionHandlerRegistry _registry = new();
     private readonly ExtensionRouteRegistrationSet _routeRegistrations;
@@ -46,7 +47,27 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         _routeRegistrations = new ExtensionRouteRegistrationSet(
             manifest.Id,
             routeIds,
-            callback => _events.TrySubscribe(callback));
+            // Event callbacks run on the queue consumer thread; track each as an active request
+            // so the drain waits for in-flight event handlers before the stop pipeline proceeds.
+            callback => _events.TrySubscribe(async (@event, cancellationToken) =>
+            {
+                if (!TryEnterRequest())
+                {
+                    // Draining or stopped: the callback cannot run; count the skip without
+                    // stamping a queue-full failure on a cleanly reloading extension.
+                    _events.RecordSkipped();
+                    return;
+                }
+
+                try
+                {
+                    await callback(@event, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    LeaveRequest();
+                }
+            }));
         _tasks = new ExtensionTaskTracker(NotifyFailureAsync, logger);
         _contracts = new ExtensionContractRegistry(
             manifest.Exports,
@@ -405,6 +426,34 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         lock (_gate)
         {
             return [.. _contractConsumers];
+        }
+    }
+
+    /// <summary>Gets or creates the turnstile-isolated proxy handed out for one exported contract and consumer pair.</summary>
+    /// <param name="contractId">The exported contract identifier.</param>
+    /// <param name="consumerId">The importing extension identifier; each consumer gets its own proxy so provider-replacement rebinds re-record the right consumer.</param>
+    /// <param name="contractType">The shared contract interface type.</param>
+    /// <param name="target">This instance's contract implementation.</param>
+    /// <param name="turnstile">This extension's dispatch turnstile.</param>
+    /// <param name="resolver">Re-resolves the import after this instance is replaced.</param>
+    /// <returns>The cached isolated contract reference.</returns>
+    internal object GetOrCreateContractProxy(
+        string contractId,
+        string consumerId,
+        Type contractType,
+        object target,
+        ExtensionDispatchTurnstile turnstile,
+        Func<(ExtensionInstance Provider, object Target, ExtensionDispatchTurnstile Turnstile)?> resolver)
+    {
+        lock (_gate)
+        {
+            if (!_contractProxies.TryGetValue((contractId, consumerId), out var proxy))
+            {
+                proxy = ExtensionContractProxyFactory.Wrap(contractType, target, turnstile, Manifest.Id, this, resolver);
+                _contractProxies[(contractId, consumerId)] = proxy;
+            }
+
+            return proxy;
         }
     }
 

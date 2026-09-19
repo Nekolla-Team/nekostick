@@ -16,6 +16,8 @@ public sealed partial class ExtensionRuntimeManager
         ExtensionGenerationPreparation preparation,
         CancellationToken cancellationToken)
     {
+        string[]? suspendedIds = null;
+        var keepSuspended = false;
         await preparation.EnterOperationAsync().ConfigureAwait(false);
         try
         {
@@ -47,6 +49,19 @@ public sealed partial class ExtensionRuntimeManager
                     {
                         throw new InvalidOperationException("The prepared generation is stale.");
                     }
+                }
+
+                // Suspend dispatch for every replaced and removed extension before draining so
+                // new requests wait for the replacement instead of failing against a draining
+                // instance. CompletePublicationCoreAsync resumes them with the new instances.
+                suspendedIds = preparation.ChangedPrevious
+                    .Select(static previous => previous.Manifest.Id)
+                    .Concat(preparation.DetachedPrevious.Select(static detached => detached.Manifest.Id))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                foreach (var suspendedId in suspendedIds)
+                {
+                    GetTurnstile(suspendedId).Suspend();
                 }
 
                 foreach (var previous in preparation.ChangedPrevious)
@@ -90,6 +105,9 @@ public sealed partial class ExtensionRuntimeManager
                     candidate.MarkServing();
                 }
 
+                // The suspension outlives this method on purpose: it spans the Host handoff
+                // window and is lifted by CompletePublicationCoreAsync with the new instances.
+                keepSuspended = true;
                 return ExtensionGenerationCommitResult.Success(preparation.Generation, preparation.Previous);
             }
             catch (OperationCanceledException)
@@ -122,6 +140,13 @@ public sealed partial class ExtensionRuntimeManager
         }
         finally
         {
+            if (!keepSuspended && suspendedIds is not null)
+            {
+                // Failure and cancellation exits resume waiters against the honestly-reported
+                // current state (the abort path decides serving vs stopped per instance).
+                ResumeTurnstilesToCurrent(suspendedIds);
+            }
+
             preparation.ExitOperation();
         }
     }
@@ -189,6 +214,25 @@ public sealed partial class ExtensionRuntimeManager
             preparation.TryTransition(1, 2);
             _activePreparation = null;
 
+            // Lift the ReadyToPublishAsync suspension: waiters re-resolve against the
+            // committed generation. Removed extensions resume to null (permanently
+            // unavailable); unchanged members were never suspended, so resuming them only
+            // refreshes the current-instance pointer.
+            var generationIds = preparation.Generation.Contexts
+                .Select(static context => context.Instance.Manifest.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (var context in preparation.Generation.Contexts)
+            {
+                GetTurnstile(context.Instance.Manifest.Id).Resume(context.Instance);
+            }
+
+            foreach (var detached in preparation.DetachedPrevious)
+            {
+                if (!generationIds.Contains(detached.Manifest.Id))
+                {
+                    GetTurnstile(detached.Manifest.Id).Resume(null);
+                }
+            }
         }
 
         // Detached registrations are no longer part of the manager's coherent
@@ -330,6 +374,13 @@ public sealed partial class ExtensionRuntimeManager
             }
         }
 
+        // Release any turnstiles suspended by ReadyToPublishAsync; waiters observe the
+        // honestly-reported state (resumed old instance, stopped old instance, or none).
+        ResumeTurnstilesToCurrent(preparation.ChangedPrevious
+            .Select(static previous => previous.Manifest.Id)
+            .Concat(preparation.DetachedPrevious.Select(static detached => detached.Manifest.Id))
+            .Distinct(StringComparer.Ordinal));
+
         try
         {
             if (_logger is { } abortLogger)
@@ -393,6 +444,41 @@ public sealed partial class ExtensionRuntimeManager
         }
     }
 
+
+    /// <summary>Enters dispatch for one generation-bound instance through its extension's turnstile.</summary>
+    /// <param name="instance">The generation-bound instance to enter.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns>The entered instance, or null when unavailable or replaced.</returns>
+    private ValueTask<ExtensionInstance?> EnterGenerationDispatchAsync(
+        ExtensionInstance instance,
+        CancellationToken cancellationToken) =>
+        GetTurnstile(instance.Manifest.Id).EnterAsync(instance, cancellationToken);
+
+    /// <summary>Gets the currently published dispatch generation for rebind retries.</summary>
+    /// <returns>The published generation, or null when none is active.</returns>
+    private ExtensionDispatchGeneration? GetPublishedGeneration()
+    {
+        lock (_gate)
+        {
+            return _publishedDispatchGeneration;
+        }
+    }
+
+    /// <summary>Resumes each extension's turnstile to the instance currently registered for it (or null when none is).</summary>
+    /// <param name="extensionIds">The extension identifiers to resume.</param>
+    private void ResumeTurnstilesToCurrent(IEnumerable<string> extensionIds)
+    {
+        foreach (var extensionId in extensionIds)
+        {
+            ExtensionInstance? current;
+            lock (_gate)
+            {
+                _instances.TryGetValue(extensionId, out current);
+            }
+
+            GetTurnstile(extensionId).Resume(current);
+        }
+    }
 
     private void SynchronizeLegacyRegistrationsLocked(ExtensionDispatchGeneration generation)
     {

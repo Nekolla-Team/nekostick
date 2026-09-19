@@ -100,19 +100,61 @@ public sealed partial class ExtensionRuntimeManager
         CancellationToken cancellationToken = default)
     {
         var visited = new HashSet<string>(StringComparer.Ordinal);
-        var (result, previous) = await ReloadSingleAsync(replacement, settings, cancellationToken)
-            .ConfigureAwait(false);
-        if (result.Succeeded && previous is not null)
+        lock (_gate)
         {
-            visited.Add(previous.Manifest.Id);
-            await CascadeReloadDependentsAsync(
-                    previous.SnapshotContractConsumers(),
-                    visited,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            // Fail fast before touching turnstiles: pre-suspending dependents and then losing
+            // the dispatch-gate race against a generation handoff would let this operation's
+            // finally resume suspensions the handoff owns.
+            if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+            {
+                return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+            }
         }
 
-        return result;
+        var preSuspended = replacement is not null && !string.IsNullOrWhiteSpace(replacement.Id)
+            ? GetCascadeReloadSet(replacement.Id)
+            : ImmutableHashSet<string>.Empty;
+        foreach (var dependentId in preSuspended)
+        {
+            GetTurnstile(dependentId).Suspend();
+        }
+
+        try
+        {
+            var (result, previous) = await ReloadSingleAsync(replacement, settings, cancellationToken)
+                .ConfigureAwait(false);
+            if (result.Succeeded && previous is not null)
+            {
+                visited.Add(previous.Manifest.Id);
+                await CascadeReloadDependentsAsync(
+                        previous.SnapshotContractConsumers(),
+                        visited,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return result;
+        }
+        finally
+        {
+            // Dependents the cascade never reached (skipped or not loaded) must not stay
+            // suspended; dependents it reloaded already resumed their own turnstiles.
+            foreach (var dependentId in preSuspended)
+            {
+                if (visited.Contains(dependentId))
+                {
+                    continue;
+                }
+
+                ExtensionInstance? current;
+                lock (_gate)
+                {
+                    _instances.TryGetValue(dependentId, out current);
+                }
+
+                GetTurnstile(dependentId).Resume(current);
+            }
+        }
     }
 
     /// <summary>Restarts the recorded contract consumers of a replaced instance in dependency order, transitively, each with the same start-before-switch guarantees.</summary>
@@ -126,7 +168,7 @@ public sealed partial class ExtensionRuntimeManager
     {
         foreach (var dependentId in OrderDependentsByDependency(dependentIds))
         {
-            if (cancellationToken.IsCancellationRequested || !visited.Add(dependentId))
+            if (cancellationToken.IsCancellationRequested || visited.Contains(dependentId))
             {
                 continue;
             }
@@ -136,9 +178,12 @@ public sealed partial class ExtensionRuntimeManager
             {
                 if (_disposed || !_instances.TryGetValue(dependentId, out current))
                 {
+                    // Not visited: the caller's finally still owes this id a resume.
                     continue;
                 }
             }
+
+            visited.Add(dependentId);
 
             var (result, previous) = await ReloadSingleAsync(
                     current.Manifest,
@@ -251,137 +296,176 @@ public sealed partial class ExtensionRuntimeManager
             return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
         }
 
+        // Suspend only after the dispatch gate is held, and resume only when this operation
+        // actually suspended: a cancelled gate wait must not lift a suspension the
+        // generation handoff owns.
+        var turnstile = GetTurnstile(replacement.Id);
+        var suspended = false;
         try
         {
-            await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            if (_logger is { } logger)
+            try
             {
-                ExtensionLogMessages.ExtensionOperationCancelled(logger, replacement.Id, nameof(ReloadAsync));
+                await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-
-            return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
-        }
-
-        try
-        {
-            ExtensionInstance? previous;
-            lock (_gate)
+            catch (OperationCanceledException)
             {
-                if (_disposed)
+                if (_logger is { } logger)
                 {
-                    return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped), null);
+                    ExtensionLogMessages.ExtensionOperationCancelled(logger, replacement.Id, nameof(ReloadAsync));
                 }
 
-                if (_publishedDispatchGeneration is not null)
+                return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
+            }
+
+            try
+            {
+                ExtensionInstance? previous;
+                lock (_gate)
                 {
-                    return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable), null);
+                    if (_disposed)
+                    {
+                        return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped), null);
+                    }
+
+                    if (_publishedDispatchGeneration is not null)
+                    {
+                        return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable), null);
+                    }
+
+                    if (!_instances.TryGetValue(replacement.Id, out previous) || previous is null)
+                    {
+                        return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded), null);
+                    }
                 }
 
-                if (!_instances.TryGetValue(replacement.Id, out previous) || previous is null)
+                turnstile.Suspend();
+                suspended = true;
+
+                var candidateResult = await StartCandidateAsync(
+                        replacement,
+                        settings,
+                        reloading: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!candidateResult.Succeeded || candidateResult.Instance is not { } candidate)
                 {
-                    return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded), null);
+                    return (ExtensionRuntimeOperationResult.Failure(
+                        candidateResult.FailureCode == ExtensionFailureCode.None
+                            ? ExtensionFailureCode.ReplacementPreserved
+                            : candidateResult.FailureCode,
+                        previous.GetStatus()), null);
                 }
-            }
 
-            var candidateResult = await StartCandidateAsync(
-                    replacement,
-                    settings,
-                    reloading: true,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (!candidateResult.Succeeded || candidateResult.Instance is not { } candidate)
-            {
-                return (ExtensionRuntimeOperationResult.Failure(
-                    candidateResult.FailureCode == ExtensionFailureCode.None
-                        ? ExtensionFailureCode.ReplacementPreserved
-                        : candidateResult.FailureCode,
-                    previous.GetStatus()), null);
-            }
-
-            var candidateIsStale = false;
-            lock (_gate)
-            {
-                if (!_instances.TryGetValue(replacement.Id, out var current) || !ReferenceEquals(current, previous))
+                var candidateIsStale = false;
+                lock (_gate)
                 {
-                    candidateIsStale = true;
+                    if (!_instances.TryGetValue(replacement.Id, out var current) || !ReferenceEquals(current, previous))
+                    {
+                        candidateIsStale = true;
+                    }
+                    else
+                    {
+                        previous.MarkDraining();
+                        PublishExtensionState(previous, ExtensionLoadState.Unloading);
+                    }
                 }
-                else
+
+                if (candidateIsStale)
                 {
-                    previous.MarkDraining();
-                    PublishExtensionState(previous, ExtensionLoadState.Unloading);
+                    await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                    return (ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.ReplacementPreserved,
+                        previous.GetStatus()), null);
                 }
-            }
 
-            if (candidateIsStale)
-            {
-                await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return (ExtensionRuntimeOperationResult.Failure(
-                    ExtensionFailureCode.ReplacementPreserved,
-                    previous.GetStatus()), null);
-            }
-
-            var oldStopped = await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
-            if (!oldStopped)
-            {
-                // The stop pipeline already ran (tasks/events torn down), so
-                // the instance cannot serve again; report the stop honestly
-                // instead of resurrecting a zombie.
-                previous.MarkStopped();
-                PublishExtensionState(previous, ExtensionLoadState.Stopped);
-                await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return (ExtensionRuntimeOperationResult.Failure(
-                    ExtensionFailureCode.StopFailed,
-                    previous.GetStatus()), null);
-            }
-
-            if (!await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
-            {
-                // The previous generation is fully stopped and cannot be
-                // resumed; report the stop honestly instead of resurrecting a
-                // zombie.
-                previous.MarkStopped();
-                PublishExtensionState(previous, ExtensionLoadState.Stopped);
-                await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return (ExtensionRuntimeOperationResult.Failure(
-                    ExtensionFailureCode.LifecycleFailed,
-                    previous.GetStatus()), null);
-            }
-
-            var conflict = ExtensionFailureCode.None;
-            lock (_gate)
-            {
-                conflict = GetRegistrationConflict(candidate, previous);
-                if (conflict == ExtensionFailureCode.None)
+                var oldStopped = await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
+                if (!oldStopped)
                 {
-                    RemoveInstanceRegistrations(previous);
-                    CommitInstance(candidate);
+                    // The stop pipeline already ran (tasks/events torn down), so
+                    // the instance cannot serve again; report the stop honestly
+                    // instead of resurrecting a zombie. Strip its registrations
+                    // so dispatch stops resolving the dead instance.
+                    lock (_gate)
+                    {
+                        RemoveInstanceRegistrations(previous);
+                    }
+
                     previous.MarkStopped();
                     PublishExtensionState(previous, ExtensionLoadState.Stopped);
+                    await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                    return (ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.StopFailed,
+                        previous.GetStatus()), null);
                 }
-                else
+
+                if (!await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
                 {
-                    // The previous generation is fully stopped; a conflict
-                    // cannot restore service, only report it honestly.
+                    // The previous generation is fully stopped and cannot be
+                    // resumed; report the stop honestly instead of resurrecting a
+                    // zombie. Strip its registrations so dispatch stops resolving
+                    // the dead instance.
+                    lock (_gate)
+                    {
+                        RemoveInstanceRegistrations(previous);
+                    }
+
                     previous.MarkStopped();
                     PublishExtensionState(previous, ExtensionLoadState.Stopped);
+                    await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                    return (ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.LifecycleFailed,
+                        previous.GetStatus()), null);
                 }
-            }
 
-            if (conflict != ExtensionFailureCode.None)
+                var conflict = ExtensionFailureCode.None;
+                lock (_gate)
+                {
+                    conflict = GetRegistrationConflict(candidate, previous);
+                    if (conflict == ExtensionFailureCode.None)
+                    {
+                        RemoveInstanceRegistrations(previous);
+                        CommitInstance(candidate);
+                        previous.MarkStopped();
+                        PublishExtensionState(previous, ExtensionLoadState.Stopped);
+                    }
+                    else
+                    {
+                        // The previous generation is fully stopped; a conflict
+                        // cannot restore service, only report it honestly. Strip
+                        // its registrations so dispatch stops resolving the dead
+                        // instance.
+                        RemoveInstanceRegistrations(previous);
+                        previous.MarkStopped();
+                        PublishExtensionState(previous, ExtensionLoadState.Stopped);
+                    }
+                }
+
+                if (conflict != ExtensionFailureCode.None)
+                {
+                    await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                    return (ExtensionRuntimeOperationResult.Failure(conflict, previous.GetStatus()), null);
+                }
+
+                await previous.ReleaseAsync().ConfigureAwait(false);
+                return (ExtensionRuntimeOperationResult.Success(candidate.GetStatus()), previous);
+            }
+            finally
             {
-                await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return (ExtensionRuntimeOperationResult.Failure(conflict, previous.GetStatus()), null);
+                _dispatchGate.Release();
             }
-
-            await previous.ReleaseAsync().ConfigureAwait(false);
-            return (ExtensionRuntimeOperationResult.Success(candidate.GetStatus()), previous);
         }
         finally
         {
-            _dispatchGate.Release();
+            if (suspended)
+            {
+                ExtensionInstance? current;
+                lock (_gate)
+                {
+                    _instances.TryGetValue(replacement.Id, out current);
+                }
+
+                turnstile.Resume(current);
+            }
         }
     }
 
@@ -403,66 +487,89 @@ public sealed partial class ExtensionRuntimeManager
             return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
         }
 
+        // Suspend only after the dispatch gate is held, and resume only when this operation
+        // actually suspended (see ReloadSingleAsync for the rationale).
+        var turnstile = GetTurnstile(extensionId);
+        var suspended = false;
         try
         {
-            await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            if (_logger is { } logger)
+            try
             {
-                ExtensionLogMessages.ExtensionOperationCancelled(logger, extensionId, nameof(UnloadAsync));
+                await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
-        }
-
-        try
-        {
-            ExtensionInstance? instance;
-            lock (_gate)
+            catch (OperationCanceledException)
             {
-                if (_disposed)
+                if (_logger is { } logger)
                 {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped);
+                    ExtensionLogMessages.ExtensionOperationCancelled(logger, extensionId, nameof(UnloadAsync));
                 }
 
-                if (_publishedDispatchGeneration is not null)
-                {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
-                }
-
-                if (!_instances.TryGetValue(extensionId, out instance) || instance is null)
-                {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded);
-                }
-
-                RemoveInstanceRegistrations(instance);
-                instance.MarkDraining();
-                PublishExtensionState(instance, ExtensionLoadState.Unloading);
-                _instances.Remove(extensionId);
+                return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
             }
 
-            var stopped = await instance.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
-            await instance.ReleaseAsync().ConfigureAwait(false);
-            instance.MarkStopped();
-            PublishExtensionState(instance, ExtensionLoadState.Stopped);
-            if (_logger is { } unloadedLogger)
+            try
             {
-                var version = instance.Manifest.Version.ToString();
-                ExtensionLogMessages.ExtensionUnloaded(
-                    unloadedLogger,
-                    instance.Manifest.Id,
-                    version);
-            }
+                turnstile.Suspend();
+                suspended = true;
 
-            return stopped
-                ? ExtensionRuntimeOperationResult.Success(instance.GetStatus())
-                : ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.StopFailed, instance.GetStatus());
+                ExtensionInstance? instance;
+                lock (_gate)
+                {
+                    if (_disposed)
+                    {
+                        return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped);
+                    }
+
+                    if (_publishedDispatchGeneration is not null)
+                    {
+                        return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+                    }
+
+                    if (!_instances.TryGetValue(extensionId, out instance) || instance is null)
+                    {
+                        return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded);
+                    }
+
+                    RemoveInstanceRegistrations(instance);
+                    instance.MarkDraining();
+                    PublishExtensionState(instance, ExtensionLoadState.Unloading);
+                    _instances.Remove(extensionId);
+                }
+
+                var stopped = await instance.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
+                await instance.ReleaseAsync().ConfigureAwait(false);
+                instance.MarkStopped();
+                PublishExtensionState(instance, ExtensionLoadState.Stopped);
+                if (_logger is { } unloadedLogger)
+                {
+                    var version = instance.Manifest.Version.ToString();
+                    ExtensionLogMessages.ExtensionUnloaded(
+                        unloadedLogger,
+                        instance.Manifest.Id,
+                        version);
+                }
+
+                return stopped
+                    ? ExtensionRuntimeOperationResult.Success(instance.GetStatus())
+                    : ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.StopFailed, instance.GetStatus());
+            }
+            finally
+            {
+                _dispatchGate.Release();
+            }
         }
         finally
         {
-            _dispatchGate.Release();
+            if (suspended)
+            {
+                ExtensionInstance? current;
+                lock (_gate)
+                {
+                    _instances.TryGetValue(extensionId, out current);
+                }
+
+                turnstile.Resume(current);
+            }
         }
     }
 
@@ -482,23 +589,50 @@ public sealed partial class ExtensionRuntimeManager
         }
 
         HandlerBinding? binding;
-        lock (_gate)
+        HandlerBinding? tried = null;
+        while (true)
         {
-            if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+            lock (_gate)
+            {
+                if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+                {
+                    return ExtensionInvocationResult.Unavailable;
+                }
+
+                _handlers.TryGetValue(handlerId, out binding);
+            }
+
+            if (binding is null || binding.Handler is null ||
+                !binding.Instance.IsHandlerOwned(handlerId))
             {
                 return ExtensionInvocationResult.Unavailable;
             }
 
-            _handlers.TryGetValue(handlerId, out binding);
+            if (ReferenceEquals(binding, tried))
+            {
+                // The same binding already refused entry (its instance is stopped but still
+                // registered); retrying would spin without progress.
+                return ExtensionInvocationResult.Unavailable;
+            }
+
+            tried = binding;
+            try
+            {
+                var entered = await GetTurnstile(binding.Instance.Manifest.Id)
+                    .EnterAsync(binding.Instance, cancellationToken)
+                    .ConfigureAwait(false);
+                if (entered is not null)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return ExtensionInvocationResult.Unavailable;
+            }
         }
 
-
-        if (binding is null || binding.Handler is not { } handler ||
-            !binding.Instance.IsHandlerOwned(handlerId) ||
-            !binding.Instance.TryEnterRequest())
-        {
-            return ExtensionInvocationResult.Unavailable;
-        }
+        var handler = binding.Handler;
 
         using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
 
@@ -560,19 +694,46 @@ public sealed partial class ExtensionRuntimeManager
         }
 
         HandlerBinding? binding;
-        lock (_gate)
+        HandlerBinding? tried = null;
+        while (true)
         {
-            if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+            lock (_gate)
+            {
+                if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+                {
+                    return ExtensionInvocationResult.NotHandled;
+                }
+
+                binding = _fallback;
+            }
+
+            if (binding is null || !binding.Instance.IsFallbackOwned)
             {
                 return ExtensionInvocationResult.NotHandled;
             }
 
-            binding = _fallback;
-        }
+            if (ReferenceEquals(binding, tried))
+            {
+                // The same binding already refused entry (its instance is stopped but still
+                // registered); retrying would spin without progress.
+                return ExtensionInvocationResult.NotHandled;
+            }
 
-        if (binding is null || !binding.Instance.IsFallbackOwned || !binding.Instance.TryEnterRequest())
-        {
-            return ExtensionInvocationResult.NotHandled;
+            tried = binding;
+            try
+            {
+                var entered = await GetTurnstile(binding.Instance.Manifest.Id)
+                    .EnterAsync(binding.Instance, cancellationToken)
+                    .ConfigureAwait(false);
+                if (entered is not null)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return ExtensionInvocationResult.NotHandled;
+            }
         }
 
         using var callbackScope = ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Route);
@@ -626,23 +787,53 @@ public sealed partial class ExtensionRuntimeManager
         }
 
         HandlerBinding? binding;
-        lock (_gate)
+        HandlerBinding? tried = null;
+        while (true)
         {
-            if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+            lock (_gate)
             {
+                if (_activePreparation is not null || _publishedDispatchGeneration is not null)
+                {
+                    return ExtensionStreamingInvocationResult.Unavailable;
+                }
+
+                _handlers.TryGetValue(handlerId, out binding);
+            }
+
+            if (binding is null || binding.StreamingHandler is null ||
+                !binding.Instance.IsStreamingHandler(handlerId))
+            {
+                request.BodyStream.Dispose();
                 return ExtensionStreamingInvocationResult.Unavailable;
             }
 
-            _handlers.TryGetValue(handlerId, out binding);
+            if (ReferenceEquals(binding, tried))
+            {
+                // The same binding already refused entry (its instance is stopped but still
+                // registered); retrying would spin without progress.
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            tried = binding;
+            try
+            {
+                var entered = await GetTurnstile(binding.Instance.Manifest.Id)
+                    .EnterAsync(binding.Instance, cancellationToken)
+                    .ConfigureAwait(false);
+                if (entered is not null)
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
         }
 
-        if (binding is null || binding.StreamingHandler is not { } handler ||
-            !binding.Instance.IsStreamingHandler(handlerId) ||
-            !binding.Instance.TryEnterRequest())
-        {
-            request.BodyStream.Dispose();
-            return ExtensionStreamingInvocationResult.Unavailable;
-        }
+        var handler = binding.StreamingHandler;
 
         var holdRequestLease = false;
         try
