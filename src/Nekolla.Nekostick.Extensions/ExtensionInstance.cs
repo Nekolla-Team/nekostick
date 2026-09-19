@@ -18,6 +18,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     private readonly ExtensionTaskTracker _tasks;
     private readonly ExtensionEventQueue _events;
     private readonly ExtensionContractRegistry _contracts;
+    private readonly HashSet<string> _contractConsumers = new(StringComparer.Ordinal);
     private readonly ExtensionFailureTracker _failures = new();
     private readonly ExtensionHandlerRegistry _registry = new();
     private readonly ExtensionRouteRegistrationSet _routeRegistrations;
@@ -30,7 +31,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         ExtensionLoadHandle loadHandle,
         HostApiVersion hostApiVersion,
         ExtensionSettingsConfiguration? settings,
-        Func<string, Type, object?> resolveProvider,
+        Func<string, Type, SemVersionRange, object?> resolveProvider,
+        IReadOnlyDictionary<string, SemVersion> availableDependencyVersions,
         IExtensionCapabilityFactory? capabilityFactory,
         ImmutableArray<Guid> routeIds = default,
         string? dataDirectory = null,
@@ -73,6 +75,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             _contracts,
             capabilities,
             lifecycle,
+            ExtensionDependencyApi.Create(manifest, availableDependencyVersions, _contracts),
             ReportStatus,
             (_, _) => { },
             dataDirectory,
@@ -384,6 +387,26 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
 
     internal bool TryResolveContract(string contractId, Type contractType, out object? value) =>
         _contracts.TryResolveExport(contractId, contractType, out value);
+
+    /// <summary>Records one extension that imported a contract from this instance during this run.</summary>
+    /// <param name="extensionId">The importing extension identifier.</param>
+    internal void TrackContractConsumer(string extensionId)
+    {
+        lock (_gate)
+        {
+            _contractConsumers.Add(extensionId);
+        }
+    }
+
+    /// <summary>Snapshots the extensions that imported contracts from this instance during this run.</summary>
+    /// <returns>The recorded importing extension identifiers, in no particular order.</returns>
+    internal string[] SnapshotContractConsumers()
+    {
+        lock (_gate)
+        {
+            return [.. _contractConsumers];
+        }
+    }
 
     internal ValueTask ReleaseAsync()
     {

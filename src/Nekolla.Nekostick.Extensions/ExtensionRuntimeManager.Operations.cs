@@ -99,14 +99,156 @@ public sealed partial class ExtensionRuntimeManager
         ExtensionSettingsConfiguration? settings = null,
         CancellationToken cancellationToken = default)
     {
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var (result, previous) = await ReloadSingleAsync(replacement, settings, cancellationToken)
+            .ConfigureAwait(false);
+        if (result.Succeeded && previous is not null)
+        {
+            visited.Add(previous.Manifest.Id);
+            await CascadeReloadDependentsAsync(
+                    previous.SnapshotContractConsumers(),
+                    visited,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    /// <summary>Restarts the recorded contract consumers of a replaced instance in dependency order, transitively, each with the same start-before-switch guarantees.</summary>
+    /// <param name="dependentIds">The consumer identifiers recorded on the replaced instance.</param>
+    /// <param name="visited">The extensions already restarted in this cascade; guards against import cycles.</param>
+    /// <param name="cancellationToken">The cascade cancellation token.</param>
+    private async ValueTask CascadeReloadDependentsAsync(
+        IReadOnlyCollection<string> dependentIds,
+        HashSet<string> visited,
+        CancellationToken cancellationToken)
+    {
+        foreach (var dependentId in OrderDependentsByDependency(dependentIds))
+        {
+            if (cancellationToken.IsCancellationRequested || !visited.Add(dependentId))
+            {
+                continue;
+            }
+
+            ExtensionInstance? current;
+            lock (_gate)
+            {
+                if (_disposed || !_instances.TryGetValue(dependentId, out current))
+                {
+                    continue;
+                }
+            }
+
+            var (result, previous) = await ReloadSingleAsync(
+                    current.Manifest,
+                    current.Settings,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (result.Succeeded && previous is not null)
+            {
+                await CascadeReloadDependentsAsync(
+                        previous.SnapshotContractConsumers(),
+                        visited,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else if (!result.Succeeded && _logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionCandidateFailed(logger, dependentId, result.FailureCode.ToString());
+            }
+        }
+    }
+
+    /// <summary>Orders the cascade set so that providers among its members restart first, using both declared dependencies and the recorded contract-import graph.</summary>
+    /// <param name="dependentIds">The extension identifiers to order.</param>
+    /// <returns>The identifiers in dependency-first order; unresolved ties keep input order.</returns>
+    private List<string> OrderDependentsByDependency(IReadOnlyCollection<string> dependentIds)
+    {
+        var predecessors = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        lock (_gate)
+        {
+            foreach (var dependentId in dependentIds)
+            {
+                predecessors[dependentId] = new HashSet<string>(StringComparer.Ordinal);
+            }
+
+            foreach (var dependentId in dependentIds)
+            {
+                if (!_instances.TryGetValue(dependentId, out var instance))
+                {
+                    continue;
+                }
+
+                foreach (var dependency in instance.Manifest.Dependencies)
+                {
+                    if (predecessors.ContainsKey(dependency.Id))
+                    {
+                        predecessors[dependentId].Add(dependency.Id);
+                    }
+                }
+
+                // The recorded import graph is the ground truth: every consumer recorded on this
+                // instance must restart after it, even without a declared manifest dependency.
+                foreach (var consumerId in instance.SnapshotContractConsumers())
+                {
+                    if (predecessors.TryGetValue(consumerId, out var consumerPredecessors))
+                    {
+                        consumerPredecessors.Add(dependentId);
+                    }
+                }
+            }
+        }
+        var remaining = new List<string>(dependentIds);
+        var ordered = new List<string>(dependentIds.Count);
+        while (remaining.Count > 0)
+        {
+            var progressed = false;
+            for (var index = 0; index < remaining.Count; index++)
+            {
+                var dependentId = remaining[index];
+                var ready = !predecessors[dependentId].Any(predecessor =>
+                    remaining.Contains(predecessor, StringComparer.Ordinal));
+                if (!ready)
+                {
+                    continue;
+                }
+
+                ordered.Add(dependentId);
+                remaining.RemoveAt(index);
+                index--;
+                progressed = true;
+            }
+
+            if (!progressed)
+            {
+                // Dependency cycle among the remaining members: emit them in input order.
+                ordered.AddRange(remaining);
+                break;
+            }
+        }
+
+        return ordered;
+    }
+
+    /// <summary>Replaces one serving extension using start-before-switch ordering, without cascading to dependents.</summary>
+    /// <param name="replacement">The explicitly discovered replacement manifest.</param>
+    /// <param name="settings">The immutable Host snapshot settings for the replacement.</param>
+    /// <param name="cancellationToken">The operation cancellation token.</param>
+    /// <returns>A safe operation result that preserves the previous instance on candidate failure, plus the replaced instance when committed.</returns>
+    private async ValueTask<(ExtensionRuntimeOperationResult Result, ExtensionInstance? Previous)> ReloadSingleAsync(
+        ExtensionManifest? replacement,
+        ExtensionSettingsConfiguration? settings,
+        CancellationToken cancellationToken)
+    {
         if (replacement is null)
         {
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.InvalidArgument), null);
         }
 
         if (cancellationToken.IsCancellationRequested)
         {
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
+            return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
         }
 
         try
@@ -120,7 +262,7 @@ public sealed partial class ExtensionRuntimeManager
                 ExtensionLogMessages.ExtensionOperationCancelled(logger, replacement.Id, nameof(ReloadAsync));
             }
 
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
+            return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
         }
 
         try
@@ -130,17 +272,17 @@ public sealed partial class ExtensionRuntimeManager
             {
                 if (_disposed)
                 {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped);
+                    return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped), null);
                 }
 
                 if (_publishedDispatchGeneration is not null)
                 {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+                    return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable), null);
                 }
 
                 if (!_instances.TryGetValue(replacement.Id, out previous) || previous is null)
                 {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded);
+                    return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded), null);
                 }
             }
 
@@ -152,11 +294,11 @@ public sealed partial class ExtensionRuntimeManager
                 .ConfigureAwait(false);
             if (!candidateResult.Succeeded || candidateResult.Instance is not { } candidate)
             {
-                return ExtensionRuntimeOperationResult.Failure(
+                return (ExtensionRuntimeOperationResult.Failure(
                     candidateResult.FailureCode == ExtensionFailureCode.None
                         ? ExtensionFailureCode.ReplacementPreserved
                         : candidateResult.FailureCode,
-                    previous.GetStatus());
+                    previous.GetStatus()), null);
             }
 
             var candidateIsStale = false;
@@ -176,9 +318,9 @@ public sealed partial class ExtensionRuntimeManager
             if (candidateIsStale)
             {
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return ExtensionRuntimeOperationResult.Failure(
+                return (ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.ReplacementPreserved,
-                    previous.GetStatus());
+                    previous.GetStatus()), null);
             }
 
             var oldStopped = await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
@@ -190,9 +332,9 @@ public sealed partial class ExtensionRuntimeManager
                 previous.MarkStopped();
                 PublishExtensionState(previous, ExtensionLoadState.Stopped);
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return ExtensionRuntimeOperationResult.Failure(
+                return (ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.StopFailed,
-                    previous.GetStatus());
+                    previous.GetStatus()), null);
             }
 
             if (!await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
@@ -203,9 +345,9 @@ public sealed partial class ExtensionRuntimeManager
                 previous.MarkStopped();
                 PublishExtensionState(previous, ExtensionLoadState.Stopped);
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return ExtensionRuntimeOperationResult.Failure(
+                return (ExtensionRuntimeOperationResult.Failure(
                     ExtensionFailureCode.LifecycleFailed,
-                    previous.GetStatus());
+                    previous.GetStatus()), null);
             }
 
             var conflict = ExtensionFailureCode.None;
@@ -231,11 +373,11 @@ public sealed partial class ExtensionRuntimeManager
             if (conflict != ExtensionFailureCode.None)
             {
                 await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                return ExtensionRuntimeOperationResult.Failure(conflict, previous.GetStatus());
+                return (ExtensionRuntimeOperationResult.Failure(conflict, previous.GetStatus()), null);
             }
 
             await previous.ReleaseAsync().ConfigureAwait(false);
-            return ExtensionRuntimeOperationResult.Success(candidate.GetStatus());
+            return (ExtensionRuntimeOperationResult.Success(candidate.GetStatus()), previous);
         }
         finally
         {

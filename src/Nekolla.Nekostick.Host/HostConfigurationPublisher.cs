@@ -327,9 +327,15 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             return ExtensionReloadPublication.TargetUnavailable;
         }
 
+        // Restart the recorded contract consumers in the same generation so they re-import from
+        // the reloaded provider; the generation handoff keeps the availability guarantees, and the
+        // topological candidate order restarts providers before their dependents.
+        var forceReloadIds = EmptyForceReloadIds
+            .Add(extensionId)
+            .Union(_runtimeManager.GetCascadeReloadSet(extensionId));
         var published = await PublishAsync(
                 latest,
-                EmptyForceReloadIds.Add(extensionId),
+                forceReloadIds,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         return published

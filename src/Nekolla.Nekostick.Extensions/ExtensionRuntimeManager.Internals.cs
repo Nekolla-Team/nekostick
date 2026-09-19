@@ -12,7 +12,8 @@ public sealed partial class ExtensionRuntimeManager
         bool reloading,
         CancellationToken cancellationToken,
         ImmutableArray<Guid> routeIds = default,
-        string? contentHash = null)
+        string? contentHash = null,
+        IReadOnlyDictionary<string, SemVersion>? availableDependencyVersions = null)
     {
         if (cancellationToken.IsCancellationRequested)
         {
@@ -24,6 +25,7 @@ public sealed partial class ExtensionRuntimeManager
         {
             return CandidateResult.Failure(contractFailure);
         }
+        availableDependencyVersions ??= GetLiveDependencyVersions(manifest);
         var loaded = _loader.Load(manifest, contentHash);
         if (!loaded.Succeeded || loaded.Handle is null)
         {
@@ -54,7 +56,12 @@ public sealed partial class ExtensionRuntimeManager
                 loadedHandle,
                 _hostApiVersion,
                 settings,
-                ResolveContractProvider,
+                // `instance` is assigned immediately after construction and always before
+                // `StartAsync`; contract imports only run inside the startup window, so the
+                // closure never observes the null state.
+                (contractId, contractType, requiredRange) =>
+                    ResolveContractProvider(instance!, contractId, contractType, requiredRange),
+                availableDependencyVersions,
                 _capabilityFactory,
                 routeIds,
                 _dataDirectory,
@@ -266,11 +273,21 @@ public sealed partial class ExtensionRuntimeManager
                 string.Equals(export.ContractId, import.ContractId, StringComparison.Ordinal));
             if (provider is null && !TryFindContractProvider(import, out provider))
             {
+                if (import.Optional)
+                {
+                    continue;
+                }
+
                 return ExtensionFailureCode.MissingContractProvider;
             }
 
             if (!import.VersionRange.IsSatisfiedBy(provider.Version))
             {
+                if (import.Optional)
+                {
+                    continue;
+                }
+
                 return ExtensionFailureCode.ContractVersionIncompatible;
             }
 
@@ -290,7 +307,9 @@ public sealed partial class ExtensionRuntimeManager
     {
         lock (_gate)
         {
-            foreach (var instance in _instances.Values.Concat(_dispatchCandidates))
+            // Candidates first: during generation preparation the incoming same-generation
+            // provider MUST win over the live instance it is about to replace.
+            foreach (var instance in _dispatchCandidates.Concat(_instances.Values))
             {
                 provider = instance.Manifest.Exports.FirstOrDefault(export =>
                     string.Equals(export.ContractId, import.ContractId, StringComparison.Ordinal))!;
@@ -305,22 +324,79 @@ public sealed partial class ExtensionRuntimeManager
         return false;
     }
 
-    private object? ResolveContractProvider(string contractId, Type contractType)
+    private Dictionary<string, SemVersion> GetLiveDependencyVersions(ExtensionManifest candidate)
     {
         lock (_gate)
         {
+            var versions = new Dictionary<string, SemVersion>(StringComparer.Ordinal);
             foreach (var instance in _instances.Values.Concat(_dispatchCandidates))
             {
-                if (instance.Manifest.Exports.Any(export =>
-                        string.Equals(export.ContractId, contractId, StringComparison.Ordinal)) &&
+                versions[instance.Manifest.Id] = instance.Manifest.Version;
+            }
+
+            versions[candidate.Id] = candidate.Version;
+            return versions;
+        }
+    }
+
+    private object? ResolveContractProvider(
+        ExtensionInstance consumer,
+        string contractId,
+        Type contractType,
+        SemVersionRange requiredRange)
+    {
+        lock (_gate)
+        {
+            // Candidates first: a consumer candidate starting during generation preparation must
+            // bind the incoming provider, never the live instance being replaced (which would
+            // leave a stale binding and record the consumer on the dying instance's table).
+            foreach (var instance in _dispatchCandidates.Concat(_instances.Values))
+            {
+                var export = instance.Manifest.Exports.FirstOrDefault(export =>
+                    string.Equals(export.ContractId, contractId, StringComparison.Ordinal));
+                if (export is not null &&
+                    requiredRange.IsSatisfiedBy(export.Version) &&
                     instance.TryResolveContract(contractId, contractType, out var value))
                 {
+                    instance.TrackContractConsumer(consumer.Manifest.Id);
                     return value;
                 }
             }
         }
 
         return null;
+    }
+
+    /// <summary>Computes the transitive closure of extensions that imported contracts from the given extension, based on the per-run records of the currently live instances.</summary>
+    /// <param name="extensionId">The provider extension identifier whose dependents are requested.</param>
+    /// <returns>The dependent extension identifiers, excluding the provider itself.</returns>
+    internal ImmutableHashSet<string> GetCascadeReloadSet(string extensionId)
+    {
+        var result = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        lock (_gate)
+        {
+            var pending = new Queue<string>();
+            pending.Enqueue(extensionId);
+            while (pending.Count > 0)
+            {
+                var current = pending.Dequeue();
+                if (!_instances.TryGetValue(current, out var instance))
+                {
+                    continue;
+                }
+
+                foreach (var consumerId in instance.SnapshotContractConsumers())
+                {
+                    if (!string.Equals(consumerId, extensionId, StringComparison.Ordinal) &&
+                        result.Add(consumerId))
+                    {
+                        pending.Enqueue(consumerId);
+                    }
+                }
+            }
+        }
+
+        return result.ToImmutable();
     }
 
     /// <summary>Publishes one required node-local core event without blocking the caller.</summary>

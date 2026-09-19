@@ -2,13 +2,15 @@
 
 1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。全部是追加式演进，不改变既有桥契约；要求 Host API 1.3 的既有扩展 manifest 仍然有效。
 
-当前 Contracts 包版本为 **1.4.0-preview.2**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
+当前 Contracts 包版本为 **1.4.0-preview.3**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
 
 ```csharp
 var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersion);
 ```
 
 在 1.3.x 及更低的 Host 上：设置文档缺失仍返回 `NotFound`；`Readiness` 不会出现 `Publishing`（发布窗口内表现为 `Unready`）；`ReportedStatusKind` / `ReportedStatusCode` 恒为 `null`；`RouteConfiguration.OwnerExtensionId` 恒为 `null`。
+
+> preview.3 起追加：manifest `dependencies` / `imports` 的 `optional` 字段与 `IExtensionHostBridge14.Dependencies` 依赖上下文 API，见下文「可选依赖与依赖上下文」。在 1.3.x 及更低的 Host 上：含 `optional` 键的 manifest 字段会被按未知字段拒绝；bridge 不会实现 `IExtensionHostBridge14`。
 
 ## 设置文档缺失的专用错误码（NoSettings）
 
@@ -47,3 +49,70 @@ if (!current.IsSuccess && current.Errors.Any(e => e.Code == ConfigurationErrorCo
 - 每次非 `Healthy` 上报都会写入一条 Warning 日志；从异常恢复到 `Healthy` 时写一条 Information 日志。
 
 上报只影响观测面，不改变扩展的加载状态、路由或失败统计。
+
+## 可选依赖与依赖上下文
+
+### 可选依赖（optional）
+
+`dependencies` 与 `imports` 的每一项都可加 `"optional": true`（缺省 `false`，旧 manifest 行为不变）：
+
+```json
+{
+  "dependencies": [
+    { "id": "example.geo", "versionRange": "^2.1.0", "optional": true }
+  ],
+  "imports": [
+    {
+      "contractId": "example.geo.lookup",
+      "versionRange": "^2.0.0",
+      "assemblyIdentity": "Example.Geo.Contracts, Version=2.0.0.0, Culture=neutral, PublicKeyToken=null",
+      "typeIdentity": "Example.Geo.Contracts.IGeoLookup",
+      "optional": true
+    }
+  ]
+}
+```
+
+可选声明在「不满足」时跳过而不是让整批加载失败：
+
+- 可选依赖的扩展不存在，或已安装版本不满足 `versionRange` → 跳过，扩展正常加载。
+- 可选导入找不到提供方，或提供方契约版本不满足 `versionRange` → 跳过；运行时 `TryImport` 返回 `false`。版本范围在绑定时强制：即使校验放行了可选导入，`TryImport` 也绝不会交出声明范围之外的契约实例。
+- 可选关系在目标存在时仍提供启动顺序保证（被依赖方/契约提供方先启动）；参与成环的可选边会被丢弃以打破循环，此时不再保证该方向的启动顺序（必需边成环仍然整批失败）。
+- `assemblyIdentity` / `typeIdentity` 不匹配属于「冲突」而非「缺失」，即使可选也仍然整批失败。
+
+注意 `optional` 是 1.4 新增的清单字段：在 1.3.x 及更低 Host 上，带 `optional` 键的依赖/导入项会按未知字段被拒绝，因此使用它的扩展应把 `requiredHostApiVersion` 设为 `>=1.4.0`。管理面行为同步：启用扩展时可选依赖不参与前置检查；停用扩展时只被可选依赖引用的扩展不再被阻止停用。
+
+### 依赖上下文（Dependencies）
+
+1.4 的 bridge sibling `IExtensionHostBridge14` 暴露 `Dependencies`（`IExtensionDependencyApi`），用于查询自己声明过的依赖的解析状态：
+
+```csharp
+if (host is IExtensionHostBridge14 bridge14)
+{
+    var geo = bridge14.Dependencies.GetDependencyContext("example.geo");
+    switch (geo.State)
+    {
+        case ExtensionDependencyState.Satisfied:
+            // geo.InstalledVersion 为已安装版本；可直接快捷导入契约：
+            if (geo.TryImport<IGeoLookup>("example.geo.lookup", out var lookup) && lookup is not null)
+            {
+                _geo = lookup;
+            }
+            break;
+        case ExtensionDependencyState.NotInstalled:
+            // 扩展不存在
+            break;
+        case ExtensionDependencyState.VersionMismatch:
+            // 存在但版本不满足 geo.VersionRange；geo.InstalledVersion 为实际版本
+            break;
+        case ExtensionDependencyState.NotDeclared:
+            // 传入的 id 并未在自己的 dependencies 里声明
+            break;
+    }
+}
+- `GetDependencyContext` 永不返回 `null`；空白 id 抛 `ArgumentException`，其余未在 `dependencies` 里声明的 id 得到 `NotDeclared` 上下文。
+
+- `IExtensionDependencyContext.TryImport` 是「状态检查 + 导入」的快捷方式：仅当状态为 `Satisfied` 时才尝试导入，其余状态一律 `false`；与 `IExtensionContractRegistry.TryImport` 一样只在启动窗口内有效。
+- 上下文是扩展自己启动时刻的快照：依赖后续更新/重载要等到本扩展下次启动才反映，与共享契约交换语义一致。
+- 提供方重载会级联重启使用方：运行时按本次运行期间实际发生的契约导入关系（仅内存记录，不持久化）在提供方重启成功后，按依赖顺序级联重启所有导入过其契约的扩展；管理面（Facade）触发的重载在同一代际内完成级联，新旧代交接的可用性保证不变。因此扩展不应假定契约实例可长期缓存——级联重启后应尽快重新导入。
+- 协商版本低于 1.4 时 `Dependencies` 返回的能力桩对所有查询给出 `ExtensionDependencyState.Unavailable`；旧的外部 bridge 实现不会实现 `IExtensionHostBridge14`，用 `is` 探测即可。
