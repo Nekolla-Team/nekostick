@@ -184,13 +184,13 @@ public sealed class ProcessOutputStructuredLoggingTests
             (_, _) => "Supervised child output. ServiceId: service-a.",
             useColor: false);
 
-        Assert.Matches(@"^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] \[warn\] HOST_EVENT 1008: ", line);
+        Assert.Matches(@"^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} (?:[+-]\d{2}|UTC)\] \[warn\] HOST_EVENT 1008: ", line);
         Assert.EndsWith("Supervised child output. ServiceId: service-a.", line);
         Assert.DoesNotContain("\x1b[", line, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void FormatLineWithColorColorsLevelAndStructuredKeysOnly()
+    public void FormatLineWithColorColorsTimestampLevelAndStructuredKeys()
     {
         IReadOnlyList<KeyValuePair<string, object?>> state =
         [
@@ -205,10 +205,10 @@ public sealed class ProcessOutputStructuredLoggingTests
             (_, _) => "Supervised child output. ServiceId: service-a.",
             useColor: true);
 
+        Assert.Matches(@"^\[\x1b\[35m\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} (?:[+-]\d{2}|UTC)\x1b\[0m\] ", line);
         Assert.Contains("[\x1b[31merror\x1b[0m]", line, StringComparison.Ordinal);
         Assert.Contains("\x1b[36mServiceId\x1b[0m: service-a.", line, StringComparison.Ordinal);
         Assert.DoesNotContain("\x1b[36m{OriginalFormat}", line, StringComparison.Ordinal);
-        Assert.Matches(@"^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] ", line);
     }
 
     [Fact]
@@ -222,7 +222,7 @@ public sealed class ProcessOutputStructuredLoggingTests
             useColor: true);
 
         Assert.EndsWith("HOST_EVENT 1003: Host startup failed.", line);
-        Assert.Equal(2, line.Split("\x1b[").Length - 1);
+        Assert.Equal(4, line.Split("\x1b[").Length - 1);
     }
 
     private static WebApplication BuildApplication(

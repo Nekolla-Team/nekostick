@@ -663,6 +663,8 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
 {
     private const string ColorReset = "\x1b[0m";
     private const string KeyColor = "\x1b[36m";
+    // Magenta: deliberately outside the level (90/34/32/33/31) and key (36) palette.
+    private const string TimestampColor = "\x1b[35m";
     private readonly LogLevel _minimumLevel;
     private readonly bool _useColor;
 
@@ -687,7 +689,10 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
         Func<TState, Exception?, string> formatter,
         bool useColor)
     {
-        var timestamp = DateTime.Now.ToString("MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+        var now = DateTimeOffset.Now;
+        var timestamp = now.Offset == TimeSpan.Zero
+            ? now.ToString("MM-dd HH:mm:ss.fff 'UTC'", CultureInfo.InvariantCulture)
+            : now.ToString("MM-dd HH:mm:ss.fff zz", CultureInfo.InvariantCulture);
         var levelToken = LevelToken(logLevel);
         var message = formatter(state, null);
         if (!useColor)
@@ -696,7 +701,7 @@ internal sealed class SafeConsoleLoggerProvider : ILoggerProvider
         }
 
         return string.Concat(
-            "[", timestamp, "] [",
+            "[", TimestampColor, timestamp, ColorReset, "] [",
             LevelColor(logLevel), levelToken, ColorReset,
             "] HOST_EVENT ", eventId.Id.ToString(CultureInfo.InvariantCulture), ": ",
             ColorizeStructuredKeys(message, state));
