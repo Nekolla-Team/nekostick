@@ -1,0 +1,36 @@
+# VCS metadata — never part of the build input.
+.git
+.gitignore
+.gitattributes
+
+# Editor and tooling workspaces (Visual Studio, VS Code, JetBrains, agent harnesses).
+.vs
+.vscode
+.idea
+.omp
+
+# Machine-local environment files — may carry secrets and must never enter image layers.
+.env
+.env.*
+
+# Build outputs and intermediate restore state; stale RID-specific assets from a host build
+# would poison the container's linux-x64 restore.
+**/bin
+**/obj
+**/out
+artifacts/
+publish/
+**/.nativehelper
+
+# Test, coverage, and benchmark artifacts.
+**/TestResults
+BenchmarkDotNet.Artifacts/
+coverage*.json
+coverage*.xml
+coverage*.info
+*.coverage
+*.coveragexml
+
+# OS noise (macOS, Windows).
+.DS_Store
+Thumbs.db

@@ -1,3 +1,7 @@
+# check=skip=FromPlatformFlagConstDisallowed
+# The constant platform pins are deliberate: release output targets the linux-x64 RID, and a
+# host-arch build on arm64 would produce an unusable image. Build via the README command.
+
 # Build with the repository root as the context. The image is linux/amd64 because
 # release output is published for the linux-x64 RID:
 # docker buildx build --platform linux/amd64 -f Dockerfile .
@@ -42,5 +46,5 @@ RUN apt-get update \
 
 USER $APP_UID
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/app/Nekolla.Nekostick.Host", "run"]
+ENTRYPOINT ["/app/Nekolla.Nekostick.Host", "run", "--log-color", "always"]
 
