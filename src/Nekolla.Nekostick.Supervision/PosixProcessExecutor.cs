@@ -638,9 +638,10 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 failureMessage: failureMessage);
 
     private static bool IsSupportedPlatform =>
+        // Distro-packaged runtimes report custom RIDs (arch-x64, fedora-x64, linux-musl-x64)
+        // that run the portable helper identically; OS + architecture are the real constraints.
         (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) &&
-        (RuntimeInformation.ProcessArchitecture is Architecture.Arm64 or Architecture.X64) &&
-        (RuntimeInformation.RuntimeIdentifier is "osx-arm64" or "osx-x64" or "linux-arm64" or "linux-x64");
+        (RuntimeInformation.ProcessArchitecture is Architecture.Arm64 or Architecture.X64);
 
     private sealed record HelperLaunchRequest(string FileName, string WorkingDirectory, string[] Arguments);
 
