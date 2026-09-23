@@ -52,7 +52,8 @@ public sealed class PostgresExtensionManagementTests
         Assert.True(snapshot.IsSuccess, snapshot.Errors.FirstOrDefault()?.Message);
         var record = Assert.Single(snapshot.Value!.ExtensionRecords);
         Assert.Equal(ContractExtensionLoadState.Disabled, record.LoadState);
-        Assert.Equal(2L, record.RecordVersion);
+        // No-op writes are idempotent: identical state must not bump the record version.
+        Assert.Equal(1L, record.RecordVersion);
     }
     [Fact]
     public async Task SetExtensionLoadStateEnforcesWhitelistAndOptimisticRecordVersions()

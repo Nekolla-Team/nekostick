@@ -148,10 +148,16 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         desiredSet.NodeStates,
                         cancellationToken)
                     .ConfigureAwait(false);
+                var unavailableBindings = string.Join(
+                    "; ",
+                    preparation.Generation.Bindings
+                        .Where(static binding => !binding.Available)
+                        .Select(static binding => $"{binding.ExtensionId ?? "unknown"}={binding.FailureCode}"));
                 HostLogMessages.UnsafeUnavailableBindingFallback(
                     _logger,
                     preparation.Generation.GenerationId,
-                    fallbackPublished);
+                    fallbackPublished,
+                    unavailableBindings);
                 // Fallback publishes the snapshot without forcing the requested
                 // reload; preserve publication cleanup while reporting failure.
                 published = fallbackPublished;
@@ -231,7 +237,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(PublishAsync));
-            HostLogMessages.ConfigurationSnapshotRejected(_logger);
+            HostLogMessages.ConfigurationSnapshotRejected(_logger, "PublishException");
             return false;
         }
         finally
@@ -287,11 +293,21 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             try
             {
-                await PublishAsync(snapshot, scheduleRecovery: false).ConfigureAwait(false);
+                var succeeded = await PublishAsync(snapshot, scheduleRecovery: false).ConfigureAwait(false);
+                HostLogMessages.ConfigurationRecoveryPublicationCompleted(
+                    _logger,
+                    succeeded ? LogLevel.Information : LogLevel.Warning,
+                    snapshot.Version,
+                    succeeded);
             }
             catch (Exception exception)
             {
                 HostLogMessages.FailureDetails(_logger, exception, "RecoveryPublication");
+                HostLogMessages.ConfigurationRecoveryPublicationCompleted(
+                    _logger,
+                    LogLevel.Warning,
+                    snapshot.Version,
+                    false);
             }
         });
     }

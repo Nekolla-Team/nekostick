@@ -138,7 +138,7 @@ internal static class Program
                 }
                 else
                 {
-                    HostLogMessages.ConfigurationSnapshotRejected(logger);
+                    HostLogMessages.ConfigurationSnapshotRejected(logger, "StartupSnapshotReadFailed");
                 }
 
                 foreach (var configurationError in snapshotResult.Errors)
@@ -154,7 +154,7 @@ internal static class Program
             var publisher = app.Services.GetRequiredService<HostConfigurationPublisher>();
             if (!await publisher.PublishAsync(snapshotResult.Value, cancellationToken: cancellationToken).ConfigureAwait(false))
             {
-                HostLogMessages.ConfigurationSnapshotRejected(logger);
+                HostLogMessages.ConfigurationSnapshotRejected(logger, "StartupPublishFailed");
                 return 1;
             }
 

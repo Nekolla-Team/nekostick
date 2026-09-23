@@ -138,7 +138,13 @@ public sealed class EfExtensionNodeStatePersistence
             .Where(value => value.NodeId == nodeId)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
-        _db.ExtensionNodeStates.RemoveRange(existing.Where(value => !recordIds.Contains(value.ExtensionRecordId)));
+        var changed = false;
+        var removed = existing.Where(value => !recordIds.Contains(value.ExtensionRecordId)).ToArray();
+        if (removed.Length != 0)
+        {
+            _db.ExtensionNodeStates.RemoveRange(removed);
+            changed = true;
+        }
 
         var now = _time.GetUtcNow().ToUniversalTime();
         foreach (var state in states)
@@ -160,17 +166,25 @@ public sealed class EfExtensionNodeStatePersistence
                     FailureCode = state.FailureCode,
                     UpdatedAt = now
                 });
+                changed = true;
             }
-            else
+            else if (!string.Equals(entity.ObservedContentHash, state.ObservedContentHash, StringComparison.OrdinalIgnoreCase) ||
+                     entity.LoadState != (DomainExtensionLoadState)state.LoadState ||
+                     !string.Equals(entity.FailureCode, state.FailureCode, StringComparison.Ordinal))
             {
                 entity.ObservedContentHash = state.ObservedContentHash;
                 entity.LoadState = (DomainExtensionLoadState)state.LoadState;
                 entity.FailureCode = state.FailureCode;
                 entity.UpdatedAt = now;
+                changed = true;
             }
         }
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        if (changed)
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;
     }
@@ -259,6 +273,12 @@ public sealed class EfExtensionRecordContentPersistence
             record =>
             {
                 var currentState = (ExtensionLoadState)record.LoadState;
+                if (currentState == state &&
+                    string.Equals(record.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
                 if (!IsAllowedExtensionLoadStateTransition(currentState, state))
                 {
                     return false;
@@ -290,6 +310,12 @@ public sealed class EfExtensionRecordContentPersistence
             expectedRecordVersion,
             record =>
             {
+                if (string.Equals(record.InstalledVersion, newVersion, StringComparison.Ordinal) &&
+                    string.Equals(record.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
                 record.InstalledVersion = newVersion;
                 record.ContentHash = contentHash;
                 return true;
@@ -314,7 +340,7 @@ public sealed class EfExtensionRecordContentPersistence
             expectedRecordVersion,
             record =>
             {
-                if (string.Equals(record.ContentHash, contentHash, StringComparison.Ordinal))
+                if (string.Equals(record.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }

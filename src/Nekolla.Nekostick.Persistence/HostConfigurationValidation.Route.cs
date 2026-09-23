@@ -65,20 +65,22 @@ internal static class HostConfigurationRouteValidator
                         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
                         TimeSpan.FromMilliseconds(HostConfigurationValueValidator.RegexTimeoutMilliseconds));
                 }
-                catch (ArgumentException)
+                catch (ArgumentException exception)
                 {
                     var invalidRegexRouteId = value?.Id.ToString() ?? "unknown";
                     PersistenceLogMessages.SemanticValidationFailed(
                         logger ?? NullLogger.Instance,
+                        exception,
                         "ValidateRouteRegex",
                         invalidRegexRouteId);
                     HostConfigurationValueValidator.Throw();
                 }
-                catch (NotSupportedException)
+                catch (NotSupportedException exception)
                 {
                     var unsupportedRegexRouteId = value?.Id.ToString() ?? "unknown";
                     PersistenceLogMessages.SemanticValidationFailed(
                         logger ?? NullLogger.Instance,
+                        exception,
                         "ValidateRouteRegex",
                         unsupportedRegexRouteId);
                     HostConfigurationValueValidator.Throw();
@@ -343,20 +345,22 @@ internal static class HostConfigurationRouteValidator
                     TimeSpan.FromMilliseconds(HostConfigurationValueValidator.RegexTimeoutMilliseconds));
                 groupNumbers = regex.GetGroupNumbers();
             }
-            catch (ArgumentException)
+            catch (ArgumentException exception)
             {
                 var invalidTemplateRouteId = routeId.ToString();
                 PersistenceLogMessages.SemanticValidationFailed(
                     logger ?? NullLogger.Instance,
+                    exception,
                     "ValidateRouteTemplate",
                     invalidTemplateRouteId);
                 return false;
             }
-            catch (NotSupportedException)
+            catch (NotSupportedException exception)
             {
                 var unsupportedTemplateRouteId = routeId.ToString();
                 PersistenceLogMessages.SemanticValidationFailed(
                     logger ?? NullLogger.Instance,
+                    exception,
                     "ValidateRouteTemplate",
                     unsupportedTemplateRouteId);
                 return false;

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -479,29 +480,53 @@ internal static class HostConfigurationSnapshotValidator
         try
         {
             ArgumentNullException.ThrowIfNull(snapshot);
-            if (snapshot.Version < 0 || snapshot.GlobalSettings is null)
+            if (snapshot.Version < 0)
             {
-                return false;
+                return Reject(logger, "SnapshotVersionNegative", snapshot.Version.ToString(CultureInfo.InvariantCulture));
+            }
+
+            if (snapshot.GlobalSettings is null)
+            {
+                return Reject(logger, "GlobalSettingsMissing");
             }
 
             if (snapshot.GlobalSettings.TrustedProxyCidrs.Any(value =>
                     value is null || string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)))
             {
-                return false;
+                return Reject(logger, "TrustedProxyCidrs");
             }
 
             if (snapshot.GlobalSettings.ConfigurationPollInterval < TimeSpan.FromSeconds(1) ||
                 snapshot.GlobalSettings.ConfigurationPollInterval.Ticks % TimeSpan.TicksPerSecond != 0)
             {
-                return false;
+                return Reject(
+                    logger,
+                    "ConfigurationPollInterval",
+                    snapshot.GlobalSettings.ConfigurationPollInterval.ToString());
             }
 
-            if (!AreUniqueIds(snapshot.Services.Select(value => value?.Id)) ||
-                !AreUniqueIds(snapshot.Routes.Select(value => value?.Id)) ||
-                !AreUniqueStrings(snapshot.ExtensionRecords.Select(value => value?.ExtensionId)) ||
-                !AreUniqueStrings(snapshot.ExtensionSettings.Select(value => value?.ExtensionId)))
+            if (!AreUniqueIds(snapshot.Services.Select(value => value?.Id), out var duplicateServiceId))
             {
-                return false;
+                return Reject(logger, "DuplicateServiceId", duplicateServiceId?.ToString());
+            }
+
+            if (!AreUniqueIds(snapshot.Routes.Select(value => value?.Id), out var duplicateRouteId))
+            {
+                return Reject(logger, "DuplicateRouteId", duplicateRouteId?.ToString());
+            }
+
+            if (!AreUniqueStrings(
+                    snapshot.ExtensionRecords.Select(value => value?.ExtensionId),
+                    out var duplicateExtensionRecordId))
+            {
+                return Reject(logger, "DuplicateExtensionRecordId", duplicateExtensionRecordId);
+            }
+
+            if (!AreUniqueStrings(
+                    snapshot.ExtensionSettings.Select(value => value?.ExtensionId),
+                    out var duplicateExtensionSettingsId))
+            {
+                return Reject(logger, "DuplicateExtensionSettingsId", duplicateExtensionSettingsId);
             }
 
             var serviceIds = snapshot.Services.Select(value => value.Id).ToHashSet();
@@ -511,12 +536,24 @@ internal static class HostConfigurationSnapshotValidator
 
             foreach (var route in snapshot.Routes)
             {
-                if (route is null ||
-                    !IsValidJsonObject(route.MetadataJson, logger) ||
-                    !AreValidRewrites(route.RequestHeaderRewrites) ||
-                    !AreValidRewrites(route.ResponseHeaderRewrites))
+                if (route is null)
                 {
-                    return false;
+                    return Reject(logger, "RouteMissing");
+                }
+
+                if (!IsValidJsonObject(route.MetadataJson, logger))
+                {
+                    return Reject(logger, "RouteMetadataInvalid", route.Id.ToString());
+                }
+
+                if (!AreValidRewrites(route.RequestHeaderRewrites))
+                {
+                    return Reject(logger, "RouteRequestHeaderRewritesInvalid", route.Id.ToString());
+                }
+
+                if (!AreValidRewrites(route.ResponseHeaderRewrites))
+                {
+                    return Reject(logger, "RouteResponseHeaderRewritesInvalid", route.Id.ToString());
                 }
 
                 switch (route.Target)
@@ -524,7 +561,10 @@ internal static class HostConfigurationSnapshotValidator
                     case MicroserviceRouteTargetConfiguration microservice:
                         if (!serviceIds.Contains(microservice.ServiceId))
                         {
-                            return false;
+                            return Reject(
+                                logger,
+                                "RouteTargetServiceMissing",
+                                microservice.ServiceId.ToString());
                         }
 
                         break;
@@ -534,35 +574,59 @@ internal static class HostConfigurationSnapshotValidator
                     case StaticFileRouteTargetConfiguration:
                         break;
                     case null:
-                        return false;
+                        return Reject(logger, "RouteTargetMissing", route.Id.ToString());
                     default:
-                        return false;
+                        return Reject(logger, "RouteTargetUnknown", route.Id.ToString());
                 }
             }
 
             foreach (var service in snapshot.Services)
             {
-                if (service is null ||
-                    !IsValidJsonArray(service.ArgumentList, logger) ||
-                    !IsValidJsonObject(service.Environment, logger) ||
-                    service.ArgumentList.Any(value => value is null || value.Any(char.IsControl)) ||
-                    service.Environment.Any(value =>
+                if (service is null)
+                {
+                    return Reject(logger, "ServiceMissing");
+                }
+
+                if (!IsValidJsonArray(service.ArgumentList, logger))
+                {
+                    return Reject(logger, "ServiceArgumentListInvalid", service.Id.ToString());
+                }
+
+                if (!IsValidJsonObject(service.Environment, logger))
+                {
+                    return Reject(logger, "ServiceEnvironmentInvalid", service.Id.ToString());
+                }
+
+                if (service.ArgumentList.Any(value => value is null || value.Any(char.IsControl)))
+                {
+                    return Reject(logger, "ServiceArgumentInvalid", service.Id.ToString());
+                }
+
+                if (service.Environment.Any(value =>
                         string.IsNullOrWhiteSpace(value.Key) ||
                         value.Key.Any(char.IsControl) ||
                         value.Value is null ||
                         value.Value.Any(char.IsControl)))
                 {
-                    return false;
+                    return Reject(logger, "ServiceEnvironmentEntryInvalid", service.Id.ToString());
                 }
             }
 
             foreach (var settings in snapshot.ExtensionSettings)
             {
-                if (settings is null ||
-                    !extensionIds.Contains(settings.ExtensionId) ||
-                    !IsValidJson(settings.SettingsJson, logger))
+                if (settings is null)
                 {
-                    return false;
+                    return Reject(logger, "ExtensionSettingsMissing");
+                }
+
+                if (!extensionIds.Contains(settings.ExtensionId))
+                {
+                    return Reject(logger, "ExtensionSettingsUnknownExtension", settings.ExtensionId);
+                }
+
+                if (!IsValidJson(settings.SettingsJson, logger))
+                {
+                    return Reject(logger, "ExtensionSettingsJsonInvalid", settings.ExtensionId);
                 }
             }
 
@@ -578,8 +642,18 @@ internal static class HostConfigurationSnapshotValidator
         }
     }
 
-    private static bool AreUniqueIds(IEnumerable<Guid?> values)
+    private static bool Reject(ILogger? logger, string check, string? detail = null)
     {
+        HostLogMessages.ConfigurationSnapshotIncomplete(
+            logger ?? HostLoggerDefaults.Logger,
+            check,
+            detail);
+        return false;
+    }
+
+    private static bool AreUniqueIds(IEnumerable<Guid?> values, out Guid? offendingId)
+    {
+        offendingId = null;
         var seen = new HashSet<Guid>();
         foreach (var value in values)
         {
@@ -590,6 +664,7 @@ internal static class HostConfigurationSnapshotValidator
 
             if (!seen.Add(value.Value))
             {
+                offendingId = value;
                 return false;
             }
         }
@@ -597,13 +672,15 @@ internal static class HostConfigurationSnapshotValidator
         return true;
     }
 
-    private static bool AreUniqueStrings(IEnumerable<string?> values)
+    private static bool AreUniqueStrings(IEnumerable<string?> values, out string? offendingValue)
     {
+        offendingValue = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var value in values)
         {
             if (value is null || string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl) || !seen.Add(value))
             {
+                offendingValue = value;
                 return false;
             }
         }

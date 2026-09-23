@@ -133,10 +133,11 @@ internal static partial class PersistenceLogMessages
 
     [LoggerMessage(
         EventId = 3013,
-        Level = LogLevel.Debug,
+        Level = LogLevel.Warning,
         Message = "Configuration semantic validation failed. Operation: {Operation}. EntityId: {EntityId}.")]
     internal static partial void SemanticValidationFailed(
         ILogger logger,
+        Exception exception,
         string operation,
         string entityId);
 }

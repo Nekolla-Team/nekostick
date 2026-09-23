@@ -51,7 +51,7 @@ internal static partial class HostLogMessages
         string safeMessage);
 
     [LoggerMessage(
-        EventId = 1002,
+        EventId = 1009,
         Level = LogLevel.Error,
         Message = "Configuration revision read failed. Message: {SafeMessage}")]
     internal static partial void ConfigurationRevisionUnavailable(ILogger logger, string safeMessage);
@@ -68,8 +68,17 @@ internal static partial class HostLogMessages
     [LoggerMessage(
         EventId = 1004,
         Level = LogLevel.Error,
-        Message = "Complete configuration snapshot validation failed.")]
-    internal static partial void ConfigurationSnapshotRejected(ILogger logger);
+        Message = "Complete configuration snapshot validation failed. Reason: {Reason}.")]
+    internal static partial void ConfigurationSnapshotRejected(ILogger logger, string reason);
+
+    [LoggerMessage(
+        EventId = 1074,
+        Level = LogLevel.Warning,
+        Message = "Complete snapshot structural validation failed. Check: {Check}. Detail: {Detail}.")]
+    internal static partial void ConfigurationSnapshotIncomplete(
+        ILogger logger,
+        string check,
+        string? detail);
 
     [LoggerMessage(
         EventId = 1005,
@@ -587,14 +596,16 @@ internal static partial class HostLogMessages
         string reason,
         long generationId);
 
+
     [LoggerMessage(
         EventId = 1064,
         Level = LogLevel.Warning,
-        Message = "Unsafe unavailable binding triggered fallback. GenerationId: {GenerationId}. FallbackPublished: {FallbackPublished}.")]
+        Message = "Unsafe unavailable binding triggered fallback. GenerationId: {GenerationId}. FallbackPublished: {FallbackPublished}. Bindings: {Bindings}.")]
     internal static partial void UnsafeUnavailableBindingFallback(
         ILogger logger,
         long generationId,
-        bool fallbackPublished);
+        bool fallbackPublished,
+        string bindings);
 
     [LoggerMessage(
         EventId = 1065,
@@ -604,7 +615,6 @@ internal static partial class HostLogMessages
         ILogger logger,
         string failureCode,
         bool fallbackPublished);
-
     [LoggerMessage(
         EventId = 1066,
         Level = LogLevel.Warning,
@@ -651,12 +661,21 @@ internal static partial class HostLogMessages
         long configurationVersion);
 
     [LoggerMessage(
-        EventId = 1071,
+        EventId = 1072,
         Level = LogLevel.Information,
         Message = "Recovery publication scheduled after a commit failure stopped previous generations. Version: {Version}.")]
     internal static partial void ConfigurationRecoveryPublicationScheduled(
         ILogger logger,
         long version);
+
+    [LoggerMessage(
+        EventId = 1073,
+        Message = "Recovery publication completed. Version: {Version}. Succeeded: {Succeeded}.")]
+    internal static partial void ConfigurationRecoveryPublicationCompleted(
+        ILogger logger,
+        LogLevel level,
+        long version,
+        bool succeeded);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

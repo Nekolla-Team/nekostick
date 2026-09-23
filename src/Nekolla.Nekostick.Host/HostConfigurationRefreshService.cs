@@ -208,7 +208,7 @@ public sealed class HostConfigurationRefreshService : BackgroundService
         {
             _runtimeState.MarkDatabaseAvailable();
             _runtimeState.MarkSnapshotRejected();
-            HostLogMessages.ConfigurationSnapshotRejected(_logger);
+            HostLogMessages.ConfigurationSnapshotRejected(_logger, "VersionRegression");
             return;
         }
 
@@ -223,7 +223,7 @@ public sealed class HostConfigurationRefreshService : BackgroundService
             }
             else
             {
-                HostLogMessages.ConfigurationSnapshotRejected(_logger);
+                HostLogMessages.ConfigurationSnapshotRejected(_logger, "SnapshotReadFailed");
             }
 
             return;
@@ -236,7 +236,7 @@ public sealed class HostConfigurationRefreshService : BackgroundService
         else
         {
             _runtimeState.MarkSnapshotRejected();
-            HostLogMessages.ConfigurationSnapshotRejected(_logger);
+            HostLogMessages.ConfigurationSnapshotRejected(_logger, "PublishFailed");
         }
     }
 }

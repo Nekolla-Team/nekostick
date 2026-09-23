@@ -147,6 +147,7 @@ public static class HostConfigurationSemanticValidator
         {
             PersistenceLogMessages.SemanticValidationFailed(
                 logger ?? NullLogger.Instance,
+                exception,
                 operation,
                 "configuration");
             return false;

@@ -224,9 +224,10 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             }
 
             var now = _timeProvider.GetUtcNow();
+            bool changed;
             if (_ownerWriteContext.Value is { } ownerContext)
             {
-                _entityOperations.ApplyReplacement(
+                changed = _entityOperations.ApplyReplacement(
                     changes,
                     revision,
                     globalSettings,
@@ -242,7 +243,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             }
             else
             {
-                _entityOperations.ApplyReplacement(
+                changed = _entityOperations.ApplyReplacement(
                     changes,
                     revision,
                     globalSettings,
@@ -252,6 +253,12 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                     extensionSettings,
                     extensionNodeStates,
                     now);
+            }
+
+            if (!changed)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ConfigurationWriteResult.Success(revision.Version);
             }
 
             var newVersion = EfHostConfigRevisionHelper.IncrementVersion(revision.Version);
@@ -533,7 +540,18 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             }
 
             var currentState = (ExtensionLoadState)record.LoadState;
-            if (!Enum.IsDefined(currentState) || !IsAllowedExtensionLoadStateTransition(currentState, state))
+            if (!Enum.IsDefined(currentState))
+            {
+                return EfHostConfigRevisionHelper.ValidationWriteFailure();
+            }
+
+            if (currentState == state)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ConfigurationWriteResult.Success(revision.Version);
+            }
+
+            if (!IsAllowedExtensionLoadStateTransition(currentState, state))
             {
                 return EfHostConfigRevisionHelper.ValidationWriteFailure();
             }
@@ -645,6 +663,13 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             if (record.Version != expectedRecordVersion)
             {
                 return EfHostConfigRevisionHelper.ConflictWriteFailure();
+            }
+
+            if (string.Equals(record.InstalledVersion, newVersion, StringComparison.Ordinal) &&
+                record.ContentHash is null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ConfigurationWriteResult.Success(revision.Version);
             }
 
             var now = _timeProvider.GetUtcNow();
@@ -1096,10 +1121,18 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 return EfHostConfigRevisionHelper.ConflictWriteFailure();
             }
 
+            var settingsJson = HostConfigurationSemanticValidator.NormalizeJson(settings.SettingsJson, null);
+            if (setting.SchemaVersion == settings.SchemaVersion &&
+                string.Equals(setting.SettingsJson, settingsJson, StringComparison.Ordinal))
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return ConfigurationWriteResult.Success(setting.Version);
+            }
+
             var newSettingVersion = EfHostConfigRevisionHelper.IncrementVersion(setting.Version);
             var updateTime = _timeProvider.GetUtcNow();
             setting.SchemaVersion = settings.SchemaVersion;
-            setting.SettingsJson = HostConfigurationSemanticValidator.NormalizeJson(settings.SettingsJson, null);
+            setting.SettingsJson = settingsJson;
             setting.UpdatedAt = updateTime;
             setting.Version = newSettingVersion;
             await _dbContext.SaveChangesAsync(cancellationToken);
