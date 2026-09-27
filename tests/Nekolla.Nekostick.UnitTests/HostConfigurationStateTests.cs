@@ -15,6 +15,9 @@ public sealed class HostConfigurationStateTests
     private static readonly Guid RouteId =
         Guid.Parse("018f3a52-4cde-7abc-8def-0123456789ab");
 
+    private static readonly Guid ServiceId =
+        Guid.Parse("018f3a53-4cde-7abc-8def-0123456789ab");
+
     [Fact]
     public void SemanticValidatorRejectsInvalidPersistedTrustedProxyCidr()
     {
@@ -73,6 +76,53 @@ public sealed class HostConfigurationStateTests
                     DateTimeOffset.UnixEpoch,
                     DateTimeOffset.UnixEpoch,
                     1)));
+
+        Assert.True(HostConfigurationSnapshotValidator.IsComplete(snapshot));
+        Assert.False(HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot));
+    }
+
+    [Theory]
+    [InlineData("${HOST:NAME}")]
+    [InlineData("${PORT}")]
+    [InlineData("${_VALUE_1}")]
+    [InlineData("${VALUE@018f3a53-4cde-7abc-8def-0123456789ab}")]
+    [InlineData(@"\$")]
+    [InlineData(@"\${HOST:X}")]
+    [InlineData(@"prefix ${HOST:X} ${VALUE} ${VALUE@018f3a53-4cde-7abc-8def-0123456789ab} \${PORT} \$PORT")]
+    public void SemanticValidatorAcceptsTemplateEnvironmentValues(string value)
+    {
+        var snapshot = CreateSnapshotWithServiceEnvironment(value);
+
+        Assert.True(HostConfigurationSnapshotValidator.IsComplete(snapshot));
+        Assert.True(HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot));
+    }
+
+    [Theory]
+    [InlineData("${")]
+    [InlineData("${}")]
+    [InlineData("${1NAME}")]
+    [InlineData("${NAME-OTHER}")]
+    [InlineData("${HOST:}")]
+    [InlineData("${HOST:1}")]
+    [InlineData("${NAME@}")]
+    [InlineData("${@018f3a53-4cde-7abc-8def-0123456789ab}")]
+    [InlineData("${NAME@not-a-guid}")]
+    [InlineData("${NAME@018f3a53-4cde-7abc-8def-0123456789ab@018f3a53-4cde-7abc-8def-0123456789ab}")]
+    [InlineData("${NAME @018f3a53-4cde-7abc-8def-0123456789ab}")]
+    [InlineData("${HOST:NAME:OTHER}")]
+    [InlineData("${HOST:NAME@018f3a53-4cde-7abc-8def-0123456789ab}")]
+    public void SemanticValidatorRejectsMalformedTemplateEnvironmentValues(string value)
+    {
+        var snapshot = CreateSnapshotWithServiceEnvironment(value);
+
+        Assert.True(HostConfigurationSnapshotValidator.IsComplete(snapshot));
+        Assert.False(HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot));
+    }
+
+    [Fact]
+    public void SemanticValidatorRejectsTemplateTokenLongerThanLimit()
+    {
+        var snapshot = CreateSnapshotWithServiceEnvironment("${" + new string('A', 254) + "}");
 
         Assert.True(HostConfigurationSnapshotValidator.IsComplete(snapshot));
         Assert.False(HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot));
@@ -256,14 +306,35 @@ public sealed class HostConfigurationStateTests
         long version = 1,
         GlobalSettingsConfiguration? globalSettings = null,
         ImmutableArray<RouteConfiguration> routes = default,
+        ImmutableArray<ServiceConfiguration> services = default,
         ImmutableArray<ExtensionRecordConfiguration> extensionRecords = default) =>
         new(
             version,
             globalSettings ?? new GlobalSettingsConfiguration(version: version),
             routes,
-            default,
+            services,
             extensionRecords,
             default);
+
+    private static HostConfigurationSnapshot CreateSnapshotWithServiceEnvironment(string value) =>
+        CreateSnapshot(
+            services: ImmutableArray.Create(
+                new ServiceConfiguration(
+                    ServiceId,
+                    enabled: true,
+                    fileName: "/bin/sh",
+                    argumentList: ImmutableArray<string>.Empty,
+                    workingDirectory: "/tmp",
+                    environment: ImmutableDictionary<string, string>.Empty.Add("TEMPLATE", value),
+                    startMode: ServiceStartMode.Lazy,
+                    restartPolicy: ServiceRestartPolicy.Never,
+                    healthCheck: new ServiceHealthCheckConfiguration(
+                        ServiceHealthCheckType.Process,
+                        httpPath: null,
+                        timeout: TimeSpan.FromSeconds(1)),
+                    createdAt: DateTimeOffset.UnixEpoch,
+                    updatedAt: DateTimeOffset.UnixEpoch,
+                    version: 1)));
 
     private static RouteConfiguration CreateRoute(
         RouteMatcherConfiguration matcher,

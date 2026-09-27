@@ -11,24 +11,39 @@ namespace Nekolla.Nekostick.Host;
 
 public sealed partial class HostServiceLifecycleManager
 {
-    private ServiceSupervisor CreateSupervisor(
+    private (ServiceSupervisor Supervisor, ImmutableDictionary<string, string> ResolvedEnvironment) CreateSupervisor(
         ServiceConfiguration service,
         int port,
         PortLease? initialLease = null,
         DateTimeOffset? initialLeaseNow = null)
     {
-        var arguments = service.ArgumentList.IsDefault
-            ? ImmutableArray<string>.Empty
-            : service.ArgumentList.Select(value => value.Replace("$PORT", port.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)).ToImmutableArray();
-        var environment = service.Environment.ToDictionary(value => value.Key, value => value.Value, StringComparer.Ordinal);
-        environment["PORT"] = port.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        environment["HOST"] = "127.0.0.1";
+        var dynamicValues = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PORT"] = port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["HOST"] = "127.0.0.1"
+        };
+        var expandedEnvironment = ServiceLaunchTemplate.ExpandEnvironment(
+            service.Environment,
+            dynamicValues,
+            ResolveRemoteEnvironment);
+        var resolvedEnvironment = expandedEnvironment.ToImmutableDictionary(
+            value => value.Key,
+            value => value.Value,
+            StringComparer.Ordinal);
+        var context = new ServiceTemplateContext(
+            expandedEnvironment,
+            ResolveRemoteEnvironment,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["PORT"] = dynamicValues["PORT"]
+            });
+        var arguments = ServiceLaunchTemplate.ExpandArguments(service.ArgumentList, context);
         var launch = new ProcessLaunchSpecification(
             service.Id,
             ServicePathResolver.Resolve(_dataDirectory, service.FileName),
             ServicePathResolver.Resolve(_dataDirectory, service.WorkingDirectory),
             arguments,
-            new ProcessEnvironment(environment));
+            new ProcessEnvironment(expandedEnvironment));
         var healthDefinition = new HealthCheckDefinition(
             service.HealthCheck.Type switch
             {
@@ -48,7 +63,7 @@ public sealed partial class HostServiceLifecycleManager
             service.Id,
             port,
             LeasePolicy.TimeToLive);
-        return new ServiceSupervisor(
+        var supervisor = new ServiceSupervisor(
             _processExecutor,
             _healthProbe,
             _leaseStore,
@@ -66,6 +81,7 @@ public sealed partial class HostServiceLifecycleManager
             now: initialLeaseNow,
             initialLease: initialLease,
             logger: _logger);
+        return (supervisor, resolvedEnvironment);
     }
     private async Task ReleaseAutomaticLeaseBestEffortAsync(
         PortLeaseRequest request,
@@ -324,6 +340,7 @@ public sealed partial class HostServiceLifecycleManager
         CancellationToken cancellationToken)
     {
         generation.Ready = false;
+        RemoveRuntimeEnvironment(generation);
         HostLogMessages.ServiceStopped(_logger, generation.Configuration.Id);
         try
         {
@@ -449,6 +466,7 @@ public sealed partial class HostServiceLifecycleManager
             long snapshotVersion,
             HealthRetryState healthRetryState,
             string? ownerExtensionId,
+            ImmutableDictionary<string, string> resolvedEnvironment,
             bool ready = true)
         {
             Configuration = configuration;
@@ -457,6 +475,7 @@ public sealed partial class HostServiceLifecycleManager
             SnapshotVersion = snapshotVersion;
             HealthRetryState = healthRetryState;
             OwnerExtensionId = ownerExtensionId;
+            ResolvedEnvironment = resolvedEnvironment;
             _ready = ready;
         }
 
@@ -470,6 +489,7 @@ public sealed partial class HostServiceLifecycleManager
         internal long SnapshotVersion { get; }
         internal HealthRetryState HealthRetryState { get; set; }
         internal string? OwnerExtensionId { get; }
+        internal ImmutableDictionary<string, string> ResolvedEnvironment { get; }
         internal bool Ready
         {
             get => _ready;

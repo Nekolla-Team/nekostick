@@ -23,6 +23,7 @@ internal static class HostEventIds
     internal static readonly EventId ExtensionText = new(1014, "ExtensionText");
     internal static readonly EventId HostNodeActivityLost = new(1017, "HostNodeActivityLost");
     internal static readonly EventId ServiceLaunchMissingHostEnvironment = new(1018, "ServiceLaunchMissingHostEnvironment");
+    internal static readonly EventId ServiceDependencyUnsatisfied = new(1075, "ServiceDependencyUnsatisfied");
 }
 
 internal static class HostLoggerCategory
@@ -112,6 +113,16 @@ internal static partial class HostLogMessages
         Guid serviceId,
         long version,
         string placeholder);
+
+    [LoggerMessage(
+        EventId = 1075,
+        Level = LogLevel.Warning,
+        Message = "Service startup dependency is unsatisfied. ServiceId: {ServiceId}. Version: {Version}. DependencyId: {DependencyId}.")]
+    internal static partial void ServiceDependencyUnsatisfied(
+        ILogger logger,
+        Guid serviceId,
+        long version,
+        Guid dependencyId);
 
     [LoggerMessage(
         EventId = 1007,

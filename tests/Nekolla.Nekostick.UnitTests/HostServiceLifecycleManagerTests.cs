@@ -23,6 +23,25 @@ public sealed class HostServiceLifecycleManagerTests
 
     private static readonly Guid DisabledServiceId =
         Guid.Parse("018f0000-0000-7000-8000-000000000023");
+    private static readonly Guid DependencyServiceId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000024");
+
+    private static readonly Guid ConsumerServiceId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000025");
+
+    private static readonly Guid MissingDependencyServiceId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000026");
+
+    private static readonly Guid DisabledDependencyServiceId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000027");
+
+    private static readonly Guid CycleServiceAId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000028");
+
+    private static readonly Guid CycleServiceBId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000029");
+    private static readonly string[] ExpectedTemplateArguments =
+        ["--dynamic", "35000", "--legacy", "35000"];
 
     [Fact]
     public async Task ReconcileStartsOnlyEnabledEagerServices()
@@ -41,6 +60,162 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.True(publisher.Current.ContainsKey(EagerServiceId));
         Assert.False(publisher.Current.ContainsKey(LazyServiceId));
         Assert.False(publisher.Current.ContainsKey(DisabledServiceId));
+    }
+
+    [Fact]
+    public async Task LaunchTemplatesResolveDynamicLegacyAndOwnEnvironmentValues()
+    {
+        var service = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ["--dynamic", "${PORT}", "--legacy", "$PORT"],
+            environment: ImmutableDictionary<string, string>.Empty.Add("SELF", "self-value"));
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        var readiness = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
+        var specification = Assert.Single(executor.StartedSpecifications);
+        Assert.Equal(ExpectedTemplateArguments, specification.Arguments);
+        Assert.Equal("self-value", specification.Environment.Values["SELF"]);
+    }
+
+    [Fact]
+    public async Task RemoteTemplateResolvesPublishedDependencyEnvironment()
+    {
+        var dependency = CreateService(DependencyServiceId, ServiceStartMode.Lazy, enabled: true);
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add(
+                "REMOTE_PORT",
+                string.Concat("${PORT@", DependencyServiceId, "}")));
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await manager.EnsureReadyAsync(snapshot, dependency.Id, TestContext.Current.CancellationToken)).Status);
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await manager.EnsureReadyAsync(snapshot, consumer.Id, TestContext.Current.CancellationToken)).Status);
+
+        var specification = Assert.Single(
+            executor.StartedSpecifications,
+            value => value.ServiceId == consumer.Id);
+        Assert.Equal("35000", specification.Environment.Values["REMOTE_PORT"]);
+    }
+
+    [Fact]
+    public async Task ReconcileStartsEagerDependenciesBeforeConsumers()
+    {
+        var dependency = CreateService(DependencyServiceId, ServiceStartMode.Eager, enabled: true);
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", DependencyServiceId, "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        await manager.ReconcileAsync(snapshot, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { DependencyServiceId, ConsumerServiceId }, executor.StartedServices);
+        var consumerSpecification = Assert.Single(
+            executor.StartedSpecifications,
+            value => value.ServiceId == ConsumerServiceId);
+        Assert.Equal("35000", consumerSpecification.Arguments[0]);
+    }
+
+    [Fact]
+    public async Task UnsatisfiedMissingOrDisabledDependencyLeavesOtherEagerServicesRunning()
+    {
+        var healthy = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var missing = CreateServiceWithLaunch(
+            MissingDependencyServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", Guid.Parse("018f0000-0000-7000-8000-000000000030"), "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var disabledDependency = CreateService(DisabledDependencyServiceId, ServiceStartMode.Eager, enabled: false);
+        var disabledConsumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", DisabledDependencyServiceId, "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(healthy, missing, disabledDependency, disabledConsumer);
+        var executor = new RecordingExecutor();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            publisher,
+            new RecordingLeaseStore());
+
+        await manager.ReconcileAsync(snapshot, TestContext.Current.CancellationToken);
+
+        Assert.Contains(EagerServiceId, executor.StartedServices);
+        Assert.DoesNotContain(MissingDependencyServiceId, executor.StartedServices);
+        Assert.DoesNotContain(ConsumerServiceId, executor.StartedServices);
+        Assert.True(publisher.Current.ContainsKey(EagerServiceId));
+    }
+
+    [Fact]
+    public async Task EagerDependencyCycleFailsWithoutHanging()
+    {
+        var serviceA = CreateServiceWithLaunch(
+            CycleServiceAId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", CycleServiceBId, "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var serviceB = CreateServiceWithLaunch(
+            CycleServiceBId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", CycleServiceAId, "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(serviceA, serviceB);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        await manager.ReconcileAsync(snapshot, TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Empty(executor.StartedServices);
     }
 
     [Fact]
@@ -581,6 +756,29 @@ public sealed class HostServiceLifecycleManagerTests
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
             1);
+    private static ServiceConfiguration CreateServiceWithLaunch(
+        Guid id,
+        ServiceStartMode startMode,
+        bool enabled,
+        ImmutableArray<string> arguments,
+        ImmutableDictionary<string, string> environment) =>
+        new(
+            id,
+            enabled,
+            "/bin/sh",
+            arguments,
+            "/tmp",
+            environment,
+            startMode,
+            Nekolla.Nekostick.Contracts.ServiceRestartPolicy.Never,
+            new ServiceHealthCheckConfiguration(
+                ServiceHealthCheckType.Process,
+                null,
+                TimeSpan.FromSeconds(1)),
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            1);
+
     private static ServiceConfiguration CreateServiceWithEnvironment(
         Guid id,
         ImmutableDictionary<string, string> environment) =>
@@ -615,6 +813,7 @@ public sealed class HostServiceLifecycleManagerTests
         }
 
         public List<Guid> StartedServices { get; } = [];
+        public List<ProcessLaunchSpecification> StartedSpecifications { get; } = [];
         public List<Guid> StoppedServices { get; } = [];
         public List<Guid> AcceptedServices { get; } = [];
         public TaskCompletionSource<bool> StartEntered { get; } =
@@ -625,6 +824,7 @@ public sealed class HostServiceLifecycleManagerTests
             CancellationToken cancellationToken = default)
         {
             StartedServices.Add(specification.ServiceId);
+            StartedSpecifications.Add(specification);
             StartEntered.TrySetResult(true);
             if (_blockStart)
             {

@@ -103,12 +103,67 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly NodeIdentifier _nodeId;
     private readonly ConcurrentDictionary<ServiceGeneration, RetiringGenerationState> _retiringGenerations = new();
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
+    private readonly ConcurrentDictionary<Guid, ServiceRuntimeEnvironmentEntry> _runtimeEnvironments = new();
+    private readonly ConcurrentDictionary<Guid, Guid> _startupDependencyWaits = new();
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private readonly object _lifecycleGate = new();
     private readonly string _dataDirectory;
     private readonly CancellationTokenSource _shutdownCts = new();
     private IDisposable? _processExitSubscription;
     private int _stopping;
+    private sealed class ServiceRuntimeEnvironmentEntry
+    {
+        internal ServiceGeneration Generation;
+        internal ImmutableDictionary<string, string> Values;
+
+        internal ServiceRuntimeEnvironmentEntry(
+            ServiceGeneration generation,
+            ImmutableDictionary<string, string> values)
+        {
+            Generation = generation;
+            Values = values;
+        }
+    }
+
+    private string? ResolveRemoteEnvironment(Guid serviceId, string name) =>
+        _runtimeEnvironments.TryGetValue(serviceId, out var entry) &&
+        entry.Values.TryGetValue(name, out var value)
+            ? value
+            : null;
+
+    private void RemoveRuntimeEnvironment(ServiceGeneration generation)
+    {
+        if (_runtimeEnvironments.TryGetValue(generation.Configuration.Id, out var entry) &&
+            ReferenceEquals(entry.Generation, generation))
+        {
+            ((ICollection<KeyValuePair<Guid, ServiceRuntimeEnvironmentEntry>>)_runtimeEnvironments)
+                .Remove(new KeyValuePair<Guid, ServiceRuntimeEnvironmentEntry>(generation.Configuration.Id, entry));
+        }
+    }
+
+    private bool WouldCreateStartupDependencyCycle(Guid serviceId, Guid dependencyId)
+    {
+        var visited = new HashSet<Guid>();
+        var current = dependencyId;
+        for (var hop = 0; hop < 1024; hop++)
+        {
+            if (current == serviceId)
+            {
+                return true;
+            }
+
+            if (!visited.Add(current) ||
+                !_startupDependencyWaits.TryGetValue(current, out var next))
+            {
+                return false;
+            }
+
+            current = next;
+        }
+
+        return true;
+    }
+
     /// <summary>Creates the Host lifecycle composition service.</summary>
     public HostServiceLifecycleManager(
         IProcessExecutor processExecutor,
@@ -154,16 +209,27 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     }
 
     /// <inheritdoc />
-    public async ValueTask<HostServiceReadinessResult> EnsureReadyAsync(
+    public ValueTask<HostServiceReadinessResult> EnsureReadyAsync(
         HostConfigurationSnapshot snapshot,
         Guid serviceId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        EnsureReadyAsync(snapshot, serviceId, ImmutableHashSet<Guid>.Empty, cancellationToken);
+
+    private async ValueTask<HostServiceReadinessResult> EnsureReadyAsync(
+        HostConfigurationSnapshot snapshot,
+        Guid serviceId,
+        ImmutableHashSet<Guid> dependencyChain,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         cancellationToken.ThrowIfCancellationRequested();
         if (IsStopping)
         {
             return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Cancelled);
+        }
+        if (dependencyChain.Contains(serviceId))
+        {
+            return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Unavailable);
         }
         var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
         if (service is null || !service.Enabled || !IsServiceEnabledForSnapshot(snapshot, serviceId))
@@ -200,7 +266,6 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                         waiting.Supervisor.Snapshot);
                 }
 
-
                 if (!_runtimeState.NewServicesAllowed)
                 {
                     return new(serviceId, snapshot.Version, HostServiceReadinessStatus.DatabaseUnavailable);
@@ -208,7 +273,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 if (slot.Startup is null)
                 {
                     slot.StartupGeneration = service.Version;
-                    startup = StartOrSwitchAsync(slot, snapshot, service);
+                    startup = StartOrSwitchAsync(slot, snapshot, service, dependencyChain);
                 }
                 else
                 {
@@ -244,7 +309,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
         if (slot.StartupGeneration != service.Version)
         {
-            return await EnsureReadyAsync(snapshot, serviceId, cancellationToken).ConfigureAwait(false);
+            return await EnsureReadyAsync(snapshot, serviceId, dependencyChain, cancellationToken).ConfigureAwait(false);
         }
 
         return result;
@@ -416,11 +481,41 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             }
         }
 
-        var eagerStarts = configured.Values
+        var eagerServices = configured.Values
             .Where(value => value.StartMode == ContractStartMode.Eager)
-            .Select(value => EnsureReadyAsync(snapshot, value.Id, cancellationToken).AsTask())
             .ToArray();
-        await Task.WhenAll(eagerStarts).ConfigureAwait(false);
+        var pending = eagerServices.ToDictionary(value => value.Id);
+        var batchIds = pending.Keys.ToImmutableHashSet();
+        var dependencies = eagerServices.ToDictionary(
+            value => value.Id,
+            value => ServiceLaunchTemplate.ExtractDependencies(
+                    value.ArgumentList.Cast<string?>().Concat(value.Environment.Values))
+                .Where(batchIds.Contains)
+                .ToImmutableHashSet());
+
+        while (pending.Count > 0)
+        {
+            var layer = pending.Values
+                .Where(value => dependencies[value.Id].All(dependencyId => !pending.ContainsKey(dependencyId)))
+                .ToArray();
+            if (layer.Length == 0)
+            {
+                layer = pending.Values.ToArray();
+                pending.Clear();
+            }
+            else
+            {
+                foreach (var service in layer)
+                {
+                    pending.Remove(service.Id);
+                }
+            }
+
+            var starts = layer
+                .Select(value => EnsureReadyAsync(snapshot, value.Id, cancellationToken).AsTask())
+                .ToArray();
+            await Task.WhenAll(starts).ConfigureAwait(false);
+        }
     }
 
     private async Task RetryWaitingServicesAsync(CancellationToken cancellationToken)

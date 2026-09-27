@@ -66,6 +66,7 @@ public sealed partial class HostServiceLifecycleManager
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
+        ImmutableHashSet<Guid> dependencyChain,
         bool stopReplacedGeneration = true)
     {
         var startup = new TaskCompletionSource<HostServiceReadinessResult>(
@@ -75,8 +76,15 @@ public sealed partial class HostServiceLifecycleManager
             slot.Startup = startup.Task;
         }
 
+        var startupDependencyChain = dependencyChain.Add(service.Id);
         ObserveBackgroundTask(
-            CompleteStartOrSwitchAsync(slot, snapshot, service, stopReplacedGeneration, startup),
+            CompleteStartOrSwitchAsync(
+                slot,
+                snapshot,
+                service,
+                startupDependencyChain,
+                stopReplacedGeneration,
+                startup),
             nameof(CompleteStartOrSwitchAsync),
             service.Id);
         return startup.Task;
@@ -86,6 +94,7 @@ public sealed partial class HostServiceLifecycleManager
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
+        ImmutableHashSet<Guid> dependencyChain,
         bool stopReplacedGeneration,
         TaskCompletionSource<HostServiceReadinessResult> startup)
     {
@@ -95,6 +104,7 @@ public sealed partial class HostServiceLifecycleManager
                 slot,
                 snapshot,
                 service,
+                dependencyChain,
                 stopReplacedGeneration).ConfigureAwait(false);
             startup.TrySetResult(result);
         }
@@ -127,10 +137,12 @@ public sealed partial class HostServiceLifecycleManager
         }
     }
 
+
     private async Task<HostServiceReadinessResult> RunStartOrSwitchAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
+        ImmutableHashSet<Guid> dependencyChain,
         bool stopReplacedGeneration)
     {
         try
@@ -144,6 +156,81 @@ public sealed partial class HostServiceLifecycleManager
             {
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.DatabaseUnavailable);
             }
+            await Task.Yield();
+            var dependencies = ServiceLaunchTemplate.ExtractDependencies(
+                service.ArgumentList.Cast<string?>().Concat(service.Environment.Values));
+            foreach (var dependencyId in dependencies)
+            {
+                if (dependencyId == service.Id || dependencyChain.Contains(dependencyId))
+                {
+                    HostLogMessages.ServiceDependencyUnsatisfied(
+                        _logger,
+                        service.Id,
+                        snapshot.Version,
+                        dependencyId);
+                    PublishServiceState(service.Id, snapshot.Version, "unavailable");
+                    return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                }
+
+                if (_runtimeEnvironments.ContainsKey(dependencyId))
+                {
+                    continue;
+                }
+
+                var dependency = snapshot.Services.FirstOrDefault(value => value.Id == dependencyId);
+                if (dependency is null ||
+                    !dependency.Enabled ||
+                    !IsServiceEnabledForSnapshot(snapshot, dependencyId))
+                {
+                    HostLogMessages.ServiceDependencyUnsatisfied(
+                        _logger,
+                        service.Id,
+                        snapshot.Version,
+                        dependencyId);
+                    PublishServiceState(service.Id, snapshot.Version, "unavailable");
+                    return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                }
+
+                // Write the wait edge before checking: the edge closing a cycle is always the
+                // one being added, so the later writer's walk observes the earlier writer's
+                // edge and at least one participant in any concurrent cycle fails fast.
+                _startupDependencyWaits[service.Id] = dependencyId;
+                HostServiceReadinessResult dependencyResult;
+                try
+                {
+                    if (WouldCreateStartupDependencyCycle(service.Id, dependencyId))
+                    {
+                        HostLogMessages.ServiceDependencyUnsatisfied(
+                            _logger,
+                            service.Id,
+                            snapshot.Version,
+                            dependencyId);
+                        PublishServiceState(service.Id, snapshot.Version, "unavailable");
+                        return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                    }
+
+                    dependencyResult = await EnsureReadyAsync(
+                        snapshot,
+                        dependencyId,
+                        dependencyChain.Add(service.Id),
+                        _shutdownCts.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _startupDependencyWaits.TryRemove(service.Id, out _);
+                }
+                if (dependencyResult.Status != HostServiceReadinessStatus.Ready)
+                {
+                    HostLogMessages.ServiceDependencyUnsatisfied(
+                        _logger,
+                        service.Id,
+                        snapshot.Version,
+                        dependencyId);
+                    PublishServiceState(service.Id, snapshot.Version, "unavailable");
+                    return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                }
+            }
+
 
             var candidate = await StartGenerationAsync(snapshot, service, _shutdownCts.Token).ConfigureAwait(false);
             if (candidate is null)
@@ -170,6 +257,8 @@ public sealed partial class HostServiceLifecycleManager
                         old = slot.Active;
                         slot.Active = candidate;
                     }
+                    _runtimeEnvironments[service.Id] =
+                        new ServiceRuntimeEnvironmentEntry(candidate, candidate.ResolvedEnvironment);
 
                     accepted = true;
                 }
@@ -288,6 +377,7 @@ public sealed partial class HostServiceLifecycleManager
 
         ServiceSupervisor? supervisor = null;
         Task<SupervisorOperationResult>? startTask = null;
+        var resolvedEnvironment = ImmutableDictionary<string, string>.Empty;
         // Re-validate against the freshest known snapshot only when it is newer than the
         // decision snapshot; an empty/lagging holder must not veto a legitimate launch.
         var gateSnapshot = _snapshotHolder.Current is { } latestSnapshot &&
@@ -305,7 +395,9 @@ public sealed partial class HostServiceLifecycleManager
             {
                 try
                 {
-                    supervisor = CreateSupervisor(service, acquired.Port, acquired, now);
+                    var created = CreateSupervisor(service, acquired.Port, acquired, now);
+                    supervisor = created.Supervisor;
+                    resolvedEnvironment = created.ResolvedEnvironment;
                     startTask = supervisor.StartAsync(now, _shutdownCts.Token).AsTask();
                 }
                 catch (Exception exception)
@@ -365,6 +457,7 @@ public sealed partial class HostServiceLifecycleManager
                 snapshot.Version,
                 HealthRetryState.Start(service.Id, DateTimeOffset.UtcNow, HealthPolicy.StartupTimeout),
                 waitingOwnerExtensionId,
+                resolvedEnvironment,
                 ready: false);
         }
 
@@ -403,7 +496,8 @@ public sealed partial class HostServiceLifecycleManager
             ready.Lease,
             snapshot.Version,
             ready.Retry,
-            ownerExtensionId);
+            ownerExtensionId,
+            resolvedEnvironment);
      }
 
     private async Task<(PortLease Lease, HealthRetryState Retry)?> WaitForHealthyAsync(

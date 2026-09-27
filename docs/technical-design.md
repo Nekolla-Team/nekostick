@@ -246,10 +246,10 @@ service 是独立实体，可被多条 route 引用。其启动配置只公开 `
 
 - `FileName` 和 `WorkingDirectory` 可以是绝对路径，也可以是相对路径：相对路径在**启动时**按本节点的 Host data 目录解析为绝对路径后再创建进程；词法归一化后会逃逸出 data 目录的相对路径（如 `../x`）在写入校验时即被拒绝，运行期解析还有 fail-closed 的包含性复查。工作目录不存在时服务启动失败。
 - 服务继承宿主环境变量，再由 service `Environment` 覆盖同名键；机密环境变量绝不写入日志。
-- `ArgumentList` 每一项中的所有字面 `$PORT` 都替换为分配或显式端口。
-- 子进程环境总是附加 `PORT=<port>` 和 `HOST=<configured-loopback-address>`。
-- 上游地址仅为 `http://127.0.0.1:<port>` 或 `http://[::1]:<port>`，由 service 的 loopback 地址字段选择；子进程必须监听收到的 `HOST` 和 `PORT`。
-- service `Environment` 的值支持 `${HOST:VAR}` 占位符，启动时单次展开为宿主进程的同名环境变量值（展开结果不再二次扫描）。宿主缺少该变量时启动被明确拒绝（原因码 `MissingHostEnvironment`）；失败信息只包含占位符 token 本身，任何环境变量值绝不进入日志或失败消息。
+- `ArgumentList` 和 `Environment` 的值支持 `${}` 模板：`${PORT}` 与 `${HOST}` 分别展开为本次启动分配的端口和 `127.0.0.1`；`${NAME}` 从 service 自身环境变量解析，并支持递归展开。
+- `${NAME@service-guid}` 从目标 service 已发布的运行时环境读取值，并建立隐式启动依赖：依赖会先启动；依赖缺失、禁用、循环或无法就绪时，当前 service 启动失败。
+- `${HOST:VAR}` 保持原样交给 `PosixProcessExecutor` 处理；宿主缺少该变量时启动被明确拒绝（原因码 `MissingHostEnvironment`），失败信息只包含占位符 token 本身。
+- `\$` 用于产生字面 `$`；为兼容旧配置，`ArgumentList` 中的 legacy `$PORT` 仍替换为分配到的端口。
 
 service 启动模式为 `Eager` 或 `Lazy`。Eager 在节点加载配置后启动；Lazy 由首个请求触发，并合并同一 service 的并发启动。Lazy 请求等待服务通过 startup health check，超时或失败时返回 `503`。服务配置变更时，supervisor 先启动并验证新实例，再切换 route 所用实例并停止旧实例；端口不足或新实例不健康时保留旧的健康实例。禁用或删除服务后，引用它的 route 返回 `503`。
 

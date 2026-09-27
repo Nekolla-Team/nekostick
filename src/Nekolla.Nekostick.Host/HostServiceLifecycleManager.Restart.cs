@@ -567,6 +567,7 @@ public sealed partial class HostServiceLifecycleManager
                             slot,
                             snapshot,
                             generation.Configuration,
+                            ImmutableHashSet<Guid>.Empty,
                             stopReplacedGeneration: false);
                     }
                 }
@@ -684,6 +685,7 @@ public sealed partial class HostServiceLifecycleManager
         ServiceGeneration generation,
         CancellationToken cancellationToken)
     {
+        RemoveRuntimeEnvironment(generation);
         if (generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null)
         {
             await generation.Supervisor.AcknowledgeProcessExitAsync().ConfigureAwait(false);
@@ -709,6 +711,7 @@ public sealed partial class HostServiceLifecycleManager
 
         if (generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null)
         {
+            RemoveRuntimeEnvironment(generation);
             await generation.Supervisor.AcknowledgeProcessExitAsync().ConfigureAwait(false);
             generation.Lease = null;
             return;

@@ -199,7 +199,7 @@ internal static class HostConfigurationValueValidator
 
     internal static bool IsSafeEnvironmentValue(string? value) =>
         value is not null && value.Length <= MaxEnvironmentValueLength &&
-        !ContainsControlCharacter(value) && !ContainsInvalidHostPlaceholder(value);
+        !ContainsControlCharacter(value) && !ContainsInvalidTemplatePlaceholder(value);
 
     internal static bool IsSafeEnvironmentValueForRead(string? value) =>
         value is not null && value.Length <= MaxEnvironmentValueLength &&
@@ -316,47 +316,83 @@ internal static class HostConfigurationValueValidator
 
     private static bool ContainsControlCharacter(string value) => value.Any(char.IsControl);
 
-    private static bool ContainsInvalidHostPlaceholder(string value)
+    private static bool ContainsInvalidTemplatePlaceholder(string value)
     {
         var offset = 0;
-        while (true)
+        while (offset < value.Length)
         {
-            var start = value.IndexOf("${", offset, StringComparison.Ordinal);
-            if (start < 0)
+            if (value[offset] == '\\' && offset + 1 < value.Length && value[offset + 1] == '$')
             {
-                return false;
+                offset += 2;
+                continue;
             }
 
-            if (start > 0 && value[start - 1] == '\\')
+            if (value[offset] != '$' || offset + 1 >= value.Length || value[offset + 1] != '{')
+            {
+                offset++;
+                continue;
+            }
+
+            var end = value.IndexOf('}', offset + 2);
+            if (end < 0 || end - offset + 1 > 256)
             {
                 return true;
             }
 
-            var end = value.IndexOf('}', start + 2);
-            if (end < 0 || end - start + 1 > 256 ||
-                value.IndexOf("${HOST:", start, StringComparison.Ordinal) != start)
+            if (!IsValidTemplateExpression(value.AsSpan(offset + 2, end - offset - 2)))
             {
                 return true;
-            }
-
-            var variableStart = start + 7;
-            if (end <= variableStart ||
-                !(char.IsAsciiLetter(value[variableStart]) || value[variableStart] == '_'))
-            {
-                return true;
-            }
-
-            for (var index = variableStart + 1; index < end; index++)
-            {
-                var character = value[index];
-                if (!(char.IsAsciiLetterOrDigit(character) || character == '_'))
-                {
-                    return true;
-                }
             }
 
             offset = end + 1;
         }
+
+        return false;
+    }
+
+    private static bool IsValidTemplateExpression(ReadOnlySpan<char> expression)
+    {
+        const string hostPrefix = "HOST:";
+        if (expression.StartsWith(hostPrefix, StringComparison.Ordinal))
+        {
+            return IsValidTemplateName(expression[hostPrefix.Length..]);
+        }
+
+        var at = expression.IndexOf('@');
+        if (at < 0)
+        {
+            return IsValidTemplateName(expression);
+        }
+
+        if (at != expression.LastIndexOf('@'))
+        {
+            return false;
+        }
+
+        var name = expression[..at];
+        var serviceId = expression[(at + 1)..];
+        return IsValidTemplateName(name) &&
+            serviceId.Length > 0 &&
+            Guid.TryParse(serviceId, out _);
+    }
+
+    private static bool IsValidTemplateName(ReadOnlySpan<char> name)
+    {
+        if (name.IsEmpty || !(char.IsAsciiLetter(name[0]) || name[0] == '_'))
+        {
+            return false;
+        }
+
+        for (var index = 1; index < name.Length; index++)
+        {
+            var character = name[index];
+            if (!(char.IsAsciiLetterOrDigit(character) || character == '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static JsonSerializerOptions CreateJsonOptions()

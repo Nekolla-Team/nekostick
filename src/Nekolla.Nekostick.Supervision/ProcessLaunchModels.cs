@@ -233,14 +233,29 @@ public sealed class ProcessLaunchSpecification
             _ => throw new ArgumentOutOfRangeException(nameof(address))
         };
         var portText = port.ToString(CultureInfo.InvariantCulture);
-        var arguments = service.Arguments.IsDefault
-            ? ImmutableArray<string>.Empty
-            : service.Arguments.Select(argument => argument.Replace("$PORT", portText, StringComparison.Ordinal)).ToImmutableArray();
-        var environment = new Dictionary<string, string>(service.Environment, StringComparer.Ordinal)
+        var dynamicValues = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["PORT"] = portText,
             ["HOST"] = host
         };
+        var variables = new Dictionary<string, string>(service.Environment, StringComparer.Ordinal);
+        foreach (var entry in dynamicValues)
+        {
+            variables[entry.Key] = entry.Value;
+        }
+
+        var arguments = ServiceLaunchTemplate.ExpandArguments(
+            service.Arguments,
+            new ServiceTemplateContext(
+                variables,
+                legacyVariables: new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["PORT"] = portText
+                }));
+        var environment = ServiceLaunchTemplate.ExpandEnvironment(
+            service.Environment,
+            dynamicValues,
+            remoteResolver: null);
         return new ProcessLaunchSpecification(
             service.Id,
             service.FileName,

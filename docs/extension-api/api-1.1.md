@@ -160,7 +160,7 @@ var service = new ExtensionServiceConfiguration(
     id: Guid.CreateVersion7(),
     enabled: true,
     fileName: "/opt/example/worker",                       // 绝对路径，或相对 Host data 目录的相对路径（按节点解析）
-    argumentList: ["--port", "$PORT"],                     // $PORT 会被替换为分配到的端口
+    argumentList: ["--port", "${PORT}"],                  // `${PORT}` 会被替换为分配到的端口；legacy `$PORT` 仍兼容
     workingDirectory: "/opt/example",                      // 绝对路径，或相对 Host data 目录的相对路径（按节点解析）
     startMode: ServiceStartMode.Lazy,                      // Eager = 配置生效即启动；Lazy = 首个请求触发
     restartPolicy: ServiceRestartPolicy.OnFailure,         // Never / OnFailure / Always
@@ -170,6 +170,9 @@ var service = new ExtensionServiceConfiguration(
     updatedAt: DateTimeOffset.UtcNow,                      // 新建时由 Host 覆盖
     version: 0);                                           // 新建时填 0，由 Host 分配
 ```
+
+启动参数和完整配置 API 中的 `Environment` 值支持 `${}` 模板：`${PORT}`、`${HOST}` 是本次启动的动态值，`${NAME}` 读取 service 自身环境变量并递归展开，`${NAME@service-guid}` 读取目标 service 已发布的运行时环境并建立隐式启动依赖（依赖先启动；缺失、禁用、循环或无法就绪时当前 service 启动失败）。`${HOST:VAR}` 保持原样交给 `PosixProcessExecutor`，`\$` 用于字面 `$`；旧配置中的 `$PORT` 仍可在参数中使用。
+
 
 `IExtensionServiceApi`：
 
@@ -205,7 +208,7 @@ public async ValueTask DeployBackendAsync(IExtensionHostBridge host, Cancellatio
     var serviceId = Guid.CreateVersion7();
     var service = new ExtensionServiceConfiguration(
         serviceId, true,
-        "/opt/example/backend", ["--urls", "http://127.0.0.1:$PORT"],
+        "/opt/example/backend", ["--urls", "http://127.0.0.1:${PORT}"],
         "/opt/example",
         ServiceStartMode.Eager, ServiceRestartPolicy.OnFailure,
         new ServiceHealthCheckConfiguration(ServiceHealthCheckType.Tcp, null, TimeSpan.FromSeconds(3)),
