@@ -1,4 +1,4 @@
-# API 1.4：完善扩展能力与全局管控
+# API 1.4：完善扩展能力、全局管控与微服务输出流
 
 1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。全部是追加式演进，不改变既有桥契约；要求 Host API 1.3 的既有扩展 manifest 仍然有效。
 
@@ -127,3 +127,148 @@ if (host is IExtensionHostBridge14 bridge14)
 - **同步契约方法会阻塞调用线程**：返回 `Task`/`ValueTask` 的契约方法异步等待，普通同步方法在提供方重载期间阻塞当前线程（同样有约 25 秒上界）。不要在持有调用方自有锁的情况下调用同步契约方法。
 - **级联重载整体预挂起**：提供方重载会先同时挂起提供方与全部传递依赖方，再按依赖顺序依次重启。依赖方的不可用窗口因此以上游各重载耗时之和为上界——链路越长，尾部依赖方等待越久，但任何一环结束后请求都会落到新实例上。
 - **永久不可用快速失败**：提供方被卸载、停止或重载失败移除后，契约代理立即抛 `InvalidOperationException`（信息含提供方 id），路由调用得到 `Unavailable`；事件回调是 fire-and-forget，排空窗口内跳过的投递计入扩展的丢弃事件统计。
+
+## 微服务输出流（ServiceOutput）
+
+API 1.4.0 在 `IExtensionHostBridge14` 上提供 `ServiceOutput` 能力，为属主扩展提供微服务 stdout/stderr 的原始字节流读取和 chunk 回调订阅。`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`。
+
+### 能力探测（必读）
+
+使用服务输出能力前，必须同时检查 bridge 类型和协商版本：
+
+```csharp
+static readonly HostApiVersion Api14Minimum = new(1, 4, 0);
+
+if (context.Host is not IExtensionHostBridge14 bridge14 ||
+    !ExtensionAbi.IsCompatible(Api14Minimum, bridge14.ApiVersion))
+{
+    // Host 未实现 API 1.4，或协商版本低于 1.4.0
+    return;
+}
+
+var output = bridge14.ServiceOutput;
+```
+
+旧版 Host（API 1.3 及更低）不会实现 `IExtensionHostBridge14`；对于实现了该接口但协商版本低于 `1.4.0` 的 Host，或当前 Host 没有可用的服务输出实现，`ServiceOutput` 的操作返回 `ExtensionServiceOutputCode.Unsupported`，不会因业务失败抛异常。
+
+### 输出流类型
+
+`ExtensionServiceOutputStream` 选择要观察的标准流：
+
+| 值 | 含义 |
+| --- | --- |
+| `Stdout` | 微服务的标准输出。 |
+| `Stderr` | 微服务的标准错误输出。 |
+
+服务输出 API 传递的是原始 bytes，不提供行边界或文本解码保证。Host helper 写入管道的 `NK_*` 协议 marker（例如 `NK_READY`、`NK_FAILED`、`NK_UNAVAILABLE`）由 Host 在 fan-out 前消费；这些 marker 永远不会出现在扩展收到的 stdout/stderr 数据中。
+
+### `IExtensionServiceOutputApi`
+
+`IExtensionHostBridge14.ServiceOutput` 暴露两个操作：
+
+```csharp
+ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
+    Guid serviceId,
+    ExtensionServiceOutputStream stream,
+    CancellationToken cancellationToken = default);
+
+ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
+    Guid serviceId,
+    ExtensionServiceOutputStream stream,
+    IExtensionServiceOutputSink sink,
+    CancellationToken cancellationToken = default);
+```
+
+两个操作都只接受调用扩展**当前拥有**的 service。业务失败通过结果对象和 `ExtensionServiceOutputCode` 表达；取消仍按 .NET 的 `CancellationToken` 约定传播。
+
+### `OpenStreamAsync`：读取原始输出流
+
+`OpenStreamAsync` 成功时返回 `ExtensionServiceOutputStreamResult`，其中 `Succeeded` 为 `true`、`Code` 为 `Opened`，`Stream` 为调用方负责释放的可读流：
+
+```csharp
+var result = await bridge14.ServiceOutput.OpenStreamAsync(
+    serviceId,
+    ExtensionServiceOutputStream.Stdout,
+    cancellationToken);
+
+if (!result.Succeeded || result.Stream is null)
+{
+    // 根据 result.Code 处理 NotFound / NotRunning / Unsupported / Failed
+    return;
+}
+
+await using var output = result.Stream;
+var buffer = new byte[8192];
+while (await output.ReadAsync(buffer, cancellationToken) is > 0)
+{
+    // buffer 中是任意边界的原始 stdout bytes
+}
+```
+
+返回的 `Stream` 是只读、不可 seek 的 caller-owned 流。它绑定到打开时 service 的**当前进程代次**，不会在该 service 重启后自动切换到新进程；进程退出后该流结束。自然进程退出表现为 EOF；Host teardown 或 fan-out 读取故障会以经过清理的通用 `IOException` 结束读取，不把 Host 内部异常直接泄漏给扩展。
+
+打开和订阅都不重放操作发生前已经产生的输出。若 service 进程恰好在绑定后结束，操作仍可返回 `Opened`，随后立即结束，而不是把这个竞态误报为 `NotRunning`。
+
+每个 stream subscriber 都有有界缓冲；缓冲溢出时可能丢失字节。`Stream` API 不提供 gap 回调，因此这些缺口对读取方表现为静默的字节缺口；需要知道丢弃位置和数量时，使用下文的 sink API。
+
+### `SubscribeAsync`：chunk 回调
+
+`SubscribeAsync` 成功时返回 `ExtensionServiceOutputSubscriptionResult`，其中包含 `IExtensionServiceOutputSubscription`。Host 为每个订阅在 thread pool 上串行调用 sink，不会并发调用同一订阅的回调。订阅 callback 必须快速返回且不得阻塞：若 sink 阻塞，只会耗尽该订阅自己的有界缓冲并产生该订阅的丢弃，不会阻塞输出 pump 或其他订阅者。sink 抛出的异常会被 Host 捕获并记录，不会停止 pump，也不会传播回输出 API。
+
+### `IExtensionServiceOutputSink`
+
+```csharp
+public interface IExtensionServiceOutputSink
+{
+    void OnChunk(ExtensionServiceOutputChunk chunk);
+    void OnCompleted(ExtensionServiceOutputCompletionReason reason);
+    void OnDropped(long byteCount);
+}
+```
+
+回调契约如下：
+
+- `OnChunk` 接收一个 `ExtensionServiceOutputChunk`。其 `ServiceId` 和 `Stream` 标识来源，`Timestamp` 是 fan-out offer 时捕获的 UTC 时间，`Data` 是该次投递专门创建的 fresh `byte[]`。该数组归 recipient 所有；扩展可以在回调返回后保留或修改它，不能假定 Host 会复用它。
+- `OnDropped` 的 `byteCount` 是被丢弃的正数字节数，表示一段没有对应 `OnChunk` 的静默 gap。它会在 gap 后下一次 `OnChunk` 之前投递；如果 gap 位于流尾，也会在 terminal `OnCompleted` 之前投递。sink API 因而是 gap-aware 的路径。
+- `OnCompleted` 每个订阅最多调用一次，且订阅 dispose 后不会再调用。`reason` 的值为：
+
+| `ExtensionServiceOutputCompletionReason` | 含义 |
+| --- | --- |
+| `ProcessExited` | 当前进程代次自然退出。 |
+| `Faulted` | fan-out 或读取过程发生故障。 |
+| `HostTeardown` | Host 正在 teardown，主动终止该输出订阅。 |
+
+订阅不重放 subscribe 之前已经产生的 bytes，只接收绑定的当前进程代次中订阅建立之后的输出。当前代次结束后不会自动绑定到后续 restart；sink 会先收到尚未投递的 dropped gap（如有），再收到一次完成通知。
+
+### `IExtensionServiceOutputSubscription` 的释放
+
+订阅句柄实现 `IExtensionServiceOutputSubscription : IDisposable, IAsyncDisposable`，两种释放方式的等待语义不同：
+
+- `Dispose()` 是 best-effort detach：尽快解除订阅，但不等待已经进入 callback drainer 的 `OnChunk` / `OnDropped` / `OnCompleted` 返回。
+- `DisposeAsync()` 是 quiescent dispose：解除订阅并等待 callback drainer 排空，返回时不会再有该订阅的 in-flight callback。即使先调用过同步 `Dispose()`，后续 `DisposeAsync()` 仍必须等待已经开始的 callback 完成。
+
+回调内部不得同步等待自己的 `DisposeAsync()`（例如调用 `.GetAwaiter().GetResult()`），否则会发生 self-wait deadlock。若必须从回调中释放，调用 `Dispose()`，或 fire-and-forget `DisposeAsync()`，不要在回调线程上同步等待其完成。
+
+### 属主检查与进程代次绑定
+
+Host 在 `OpenStreamAsync` 或 `SubscribeAsync` 开始时，根据配置快照检查 service 是否属于调用扩展。这个 ownership check 只发生在打开/订阅时：操作成功后，即使之后配置移除了属主关系，已返回的 stream 或 subscription 仍继续接收，直到它绑定的进程代次退出或 Host teardown；不会对每个 chunk 重新执行属主检查。
+
+- service ID 不存在、不是调用扩展属主，或输入 ID 不是有效的 UUID v7 → `NotFound`。
+- service 属于调用扩展但当前没有运行的进程代次 → `NotRunning`。
+- 成功绑定后，service 的 restart 只建立新代次；旧 stream/subscription 不会跟随迁移。
+- 在 pump 已结束但结果尚未交付的窄竞态中，成功的 open/subscribe 返回 `Opened` 并立即 EOF/完成；它不会重放旧代次的 output。
+
+### 结果与失败代码
+
+`OpenStreamAsync` 和 `SubscribeAsync` 分别返回 `ExtensionServiceOutputStreamResult` / `ExtensionServiceOutputSubscriptionResult`。成功结果的 payload（`Stream` 或 `Subscription`）非空；失败结果的 payload 为 `null`。
+
+| `ExtensionServiceOutputCode` | 含义 |
+| --- | --- |
+| `Opened` | 已打开 stream 或已建立 sink subscription；`Succeeded` 为 `true`。 |
+| `NotFound` | service 不存在、不属于调用扩展，或 service ID 无效。 |
+| `NotRunning` | service 属于调用扩展，但当前没有可绑定的运行进程。 |
+| `Unsupported` | 协商版本、Host 能力或当前 executor 不支持服务输出。 |
+| `Failed` | Host 在 ownership 检查之后执行打开/订阅时发生其他运行时失败。 |
+| `None` | 枚举的默认/保留值，不表示成功的打开或订阅。 |
+
+这些结果码属于业务结果，不应通过异常控制正常的不存在、未运行或不支持分支。

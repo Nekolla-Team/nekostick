@@ -11,6 +11,8 @@ public sealed partial class FixtureEntrypoint
     private static async ValueTask<string> ProbeCapabilitiesAsync(
         IExtensionHostBridge host,
         ExtensionSettingsConfiguration? legacySettings,
+        bool holdServiceOutput,
+        int serviceOutputBlockPort,
         CancellationToken cancellationToken)
     {
         var emptyChanges = new ExtensionConfigurationChangeSet(
@@ -52,6 +54,12 @@ public sealed partial class FixtureEntrypoint
             host.Endpoints is not null &&
             host.Lifecycle is not null;
         var api13 = await ProbeApi13CapabilitiesAsync(host, cancellationToken).ConfigureAwait(false);
+        var api14 = await ProbeApi14CapabilitiesAsync(
+                host,
+                holdServiceOutput,
+                serviceOutputBlockPort,
+                cancellationToken)
+            .ConfigureAwait(false);
         return $"api={host.ApiVersion};legacy={legacy?.ExtensionId}:{legacy?.SchemaVersion}:{legacy?.Version};properties={properties};" +
             $"lifecycle={lifecycleStatus?.ExtensionId}:{lifecycleStatus?.State};" +
             $"configRead={ReadCode(configurationRead)};configApply={WriteCode(configurationApply)};" +
@@ -60,7 +68,7 @@ public sealed partial class FixtureEntrypoint
             $"routeRead={ReadCode(routeRead)};routeRemove={WriteCode(routeRemove)};" +
             $"serviceRead={ReadCode(serviceRead)};serviceRemove={WriteCode(serviceRemove)};" +
             $"serviceStart={serviceStart.Code};serviceStop={serviceStop.Code};serviceRestart={serviceRestart.Code};" +
-            $"endpoints={endpointCount};endpointResolve={(endpoint is null ? "null" : "present")};{api13}";
+            $"endpoints={endpointCount};endpointResolve={(endpoint is null ? "null" : "present")};{api13};{api14}";
     }
 
     private static string ReadCode<T>(ConfigurationReadResult<T> result) =>

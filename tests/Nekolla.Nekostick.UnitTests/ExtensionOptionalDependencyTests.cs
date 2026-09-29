@@ -299,7 +299,7 @@ public sealed class ExtensionOptionalDependencyTests
             (_, _, _) => new TestLogger());
         var availableVersions = new Dictionary<string, SemVersion>(StringComparer.Ordinal)
         {
-            ["present.extension"] = new(1, 5, 0),
+            ["present.extension"] = new(1, 4, 0),
             ["stale.extension"] = new(1, 0, 0),
             ["consumer.extension"] = new(1, 0, 0)
         };
@@ -309,7 +309,7 @@ public sealed class ExtensionOptionalDependencyTests
         Assert.Equal(ExtensionDependencyState.Satisfied, present.State);
         Assert.False(present.IsOptional);
         Assert.Equal("^1.0.0", present.VersionRange);
-        Assert.Equal("1.5.0", present.InstalledVersion);
+        Assert.Equal("1.4.0", present.InstalledVersion);
         Assert.True(present.TryImport<IExtensionLogger>("shared.logger", out var imported));
         Assert.NotNull(imported);
 

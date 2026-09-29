@@ -41,6 +41,9 @@ internal sealed class FixtureOptions
     internal int StartupDelayMilliseconds { get; private set; }
 
     internal bool FailStartup { get; private set; }
+    internal bool EmitOutput { get; private set; }
+
+    internal string? OutputGateFile { get; private set; }
 
     internal int ExitAfterMilliseconds { get; private set; }
 
@@ -54,8 +57,7 @@ internal sealed class FixtureOptions
         "usage: Fixtures.Microservice [--listen-address 127.0.0.1|::1] [--port 0..65535] "
         + "[--mode echo|stream|websocket|fail|hold|delay|mixed] [options]\n"
         + "options: --response-bytes N --response-pattern TEXT --chunk-size N --chunked "
-        + "--chunk-delay-ms N --delay-ms N --hold-ms N --status-code 400..599 "
-        + "--startup-delay-ms N --fail-startup --exit-after-ms N "
+        + "--startup-delay-ms N --fail-startup --emit-output --output-gate-file PATH --exit-after-ms N "
         + "--ws-close-after-frames N --ws-close-after-ms N --ws-close-code N\n"
         + "endpoints: /fixture/health, /fixture/ws (HTTP/1.1 WebSocket upgrade)";
 
@@ -131,6 +133,13 @@ internal sealed class FixtureOptions
                 case "--fail-startup":
                     RequireNoInlineValue(inlineValue);
                     options.FailStartup = true;
+                    break;
+                case "--emit-output":
+                    RequireNoInlineValue(inlineValue);
+                    options.EmitOutput = true;
+                    break;
+                case "--output-gate-file":
+                    options.OutputGateFile = ReadValue(args, ref index, inlineValue);
                     break;
                 case "--exit-after-ms":
                     options.ExitAfterMilliseconds = ParseInteger(ReadValue(args, ref index, inlineValue), 1, 86_400_000);

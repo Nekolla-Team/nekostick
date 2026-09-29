@@ -119,6 +119,18 @@ internal static class Program
                         protocol = "http/1.1",
                     }));
                     await Console.Out.FlushAsync().ConfigureAwait(false);
+                    if (options.EmitOutput)
+                    {
+                        if (options.OutputGateFile is { } outputGateFile)
+                        {
+                            await WaitForFileAsync(outputGateFile, shutdown.Token).ConfigureAwait(false);
+                        }
+
+                        Console.WriteLine("FIXTURE_STDOUT_LINE");
+                        Console.Error.WriteLine("FIXTURE_STDERR_LINE");
+                        await Console.Out.FlushAsync().ConfigureAwait(false);
+                        await Console.Error.FlushAsync().ConfigureAwait(false);
+                    }
 
                     if (descendant is not null)
                     {
@@ -179,6 +191,42 @@ internal static class Program
             {
                 Console.CancelKeyPress -= cancelHandler;
             }
+        }
+    }
+
+    private static async Task WaitForFileAsync(string path, CancellationToken cancellationToken)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (File.Exists(fullPath))
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(fullPath)!;
+        var fileName = Path.GetFileName(fullPath);
+        using var watcher = new FileSystemWatcher(directory, fileName)
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite,
+            EnableRaisingEvents = true,
+        };
+        var created = new TaskCompletionSource<object?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        FileSystemEventHandler signal = (_, _) => created.TrySetResult(null);
+        watcher.Created += signal;
+        watcher.Changed += signal;
+        try
+        {
+            if (File.Exists(fullPath))
+            {
+                return;
+            }
+
+            await created.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            watcher.Created -= signal;
+            watcher.Changed -= signal;
         }
     }
 

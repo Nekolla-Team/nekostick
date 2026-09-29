@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
@@ -18,21 +19,20 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     private const int MaximumOutputBytesPerSecond = 1024 * 1024;
     private readonly string? helperPath;
     private readonly TimeSpan helperGracePeriod;
-    private readonly IProcessOutputSink outputSink;
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<ProcessInstanceId, ProcessLease> leases = new();
     private readonly ConcurrentDictionary<long, Action<ProcessExitObservation>> observers = new();
+    private readonly ConcurrentDictionary<long, CaptureSubscription> captureSubscriptions = new();
     private long nextObserverId;
+    private long nextCaptureSubscriptionId;
 
     /// <summary>Creates a helper-backed executor using an absolute extracted helper path.</summary>
     /// <param name="helperPath">The absolute helper executable or DLL path, or null to reject starts.</param>
     /// <param name="defaultStopGracePeriod">The helper's bounded graceful-stop period.</param>
-    /// <param name="outputSink">The optional bounded child-output sink.</param>
     /// <param name="logger">The optional supervision logger.</param>
     public PosixProcessExecutor(
         string? helperPath = null,
         TimeSpan? defaultStopGracePeriod = null,
-        IProcessOutputSink? outputSink = null,
         ILogger? logger = null)
     {
         this.helperPath = helperPath is not null && Path.IsPathRooted(helperPath) && File.Exists(helperPath)
@@ -42,7 +42,6 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(helperGracePeriod, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(helperGracePeriod, TimeSpan.FromMinutes(5));
 
-        this.outputSink = outputSink ?? NullProcessOutputSink.Instance;
         _logger = logger ?? NullLogger.Instance;
     }
 
@@ -53,6 +52,97 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         var id = Interlocked.Increment(ref nextObserverId);
         observers[id] = observer;
         return new ObserverSubscription(observers, id);
+    }
+
+    /// <summary>Subscribes to structured child-output capture for future process generations.</summary>
+    /// <param name="sink">The sink that receives bounded decoded output lines.</param>
+    /// <param name="enabledGate">An optional gate evaluated when each process generation starts.</param>
+    /// <returns>A subscription that detaches the sink.</returns>
+    public IDisposable SubscribeOutputCapture(IProcessOutputSink sink, Func<bool>? enabledGate = null)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        var id = Interlocked.Increment(ref nextCaptureSubscriptionId);
+        var subscription = new CaptureSubscription(this, id, sink, enabledGate);
+        captureSubscriptions[id] = subscription;
+        return subscription;
+    }
+
+    /// <summary>Gets whether any capture subscription is enabled for a new process generation.</summary>
+    public bool HasActiveOutputCapture => captureSubscriptions.Values.Any(subscription => subscription.IsEnabled());
+
+    /// <summary>Opens a raw readable stream for the current process generation.</summary>
+    /// <param name="serviceId">The service identifier.</param>
+    /// <param name="stream">The child-output stream to open.</param>
+    /// <param name="output">The bounded raw output stream when the service is running.</param>
+    /// <returns><see langword="true"/> when a current process generation was found.</returns>
+    public bool TryOpenOutputStream(Guid serviceId, ProcessOutputStream stream, out Stream output)
+    {
+        if (!TryGetCurrentLease(serviceId, out var lease) || !TryGetFanout(lease, stream, out var fanout))
+        {
+            output = Stream.Null;
+            return false;
+        }
+
+        output = fanout.OpenStream();
+        return true;
+    }
+
+    /// <summary>Subscribes to raw chunks from the current process generation.</summary>
+    /// <param name="serviceId">The service identifier.</param>
+    /// <param name="stream">The child-output stream to subscribe to.</param>
+    /// <param name="sink">The sink that receives raw chunks and completion notifications.</param>
+    /// <returns>A subscription, or null when the service is not running.</returns>
+    public IDisposable? TrySubscribeOutput(
+        Guid serviceId,
+        ProcessOutputStream stream,
+        IProcessOutputChunkSink sink)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        if (!TryGetCurrentLease(serviceId, out var lease) || !TryGetFanout(lease, stream, out var fanout))
+        {
+            return null;
+        }
+
+        return fanout.Subscribe(sink);
+    }
+
+    private bool TryGetCurrentLease(Guid serviceId, out ProcessLease lease)
+    {
+        ProcessLease? current = null;
+        foreach (var candidate in leases.Values)
+        {
+            if (candidate.ServiceId != serviceId || candidate.Exited.Task.IsCompleted)
+            {
+                continue;
+            }
+
+            if (current is null || candidate.StartedAt > current.StartedAt)
+            {
+                current = candidate;
+            }
+        }
+
+        lease = current!;
+        return current is not null;
+    }
+
+    private static bool TryGetFanout(
+        ProcessLease lease,
+        ProcessOutputStream stream,
+        out ProcessOutputFanout fanout)
+    {
+        switch (stream)
+        {
+            case ProcessOutputStream.Stdout:
+                fanout = lease.Stdout;
+                return true;
+            case ProcessOutputStream.Stderr:
+                fanout = lease.Stderr;
+                return true;
+            default:
+                fanout = null!;
+                return false;
+        }
     }
 
     /// <inheritdoc />
@@ -106,6 +196,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 {
                     var forceReapInstanceId = instanceId.ToString();
                     SupervisionLogMessages.ProcessCleanupTimedOut(_logger, "ForceReap", forceReapInstanceId);
+                    lease.FailOutputs();
                     // The bounded force-reap wait elapsed; monitor ownership remains contained.
                 }
             }
@@ -113,7 +204,59 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         catch (Exception exception)
         {
             SupervisionLogMessages.ProcessCleanupFailed(_logger, exception, "Cleanup", instanceId.ToString());
+            lease.FailOutputs();
             // Owned-process cleanup is best effort and never exposes process details.
+        }
+    }
+
+    private static async ValueTask<bool> ReadReadyMarkerAsync(Stream stderr, CancellationToken cancellationToken)
+    {
+        const string expected = "NK_READY";
+        const int maximumMarkerLength = 64;
+        var oneByte = ArrayPool<byte>.Shared.Rent(1);
+        var position = 0;
+        var length = 0;
+        var matches = true;
+
+        try
+        {
+            // One-byte reads avoid a buffering reader consuming early child output after the marker.
+            while (true)
+            {
+                var read = await stderr.ReadAsync(oneByte.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return false;
+                }
+
+                var value = oneByte[0];
+                if (value == (byte)'\n')
+                {
+                    return matches && position == expected.Length;
+                }
+
+                length++;
+                if (length > maximumMarkerLength)
+                {
+                    return false;
+                }
+
+                if (matches)
+                {
+                    if (position >= expected.Length || value != (byte)expected[position])
+                    {
+                        matches = false;
+                    }
+                    else
+                    {
+                        position++;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(oneByte);
         }
     }
 
@@ -156,8 +299,8 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
             using var startupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupTimeout.CancelAfter(TimeSpan.FromSeconds(10));
-            var marker = await process.StandardError.ReadLineAsync(startupTimeout.Token).ConfigureAwait(false);
-            if (!string.Equals(marker, "NK_READY", StringComparison.Ordinal))
+            var markerReady = await ReadReadyMarkerAsync(process.StandardError.BaseStream, startupTimeout.Token).ConfigureAwait(false);
+            if (!markerReady)
             {
                 SupervisionLogMessages.ProcessStartValidationRejected(_logger, "HelperReadyMarker", specification.ServiceId);
                 await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
@@ -171,15 +314,18 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 specification.ServiceId,
                 process,
                 processStartedAt,
-                new ProcessOutputBudget(MaximumOutputLinesPerSecond, MaximumOutputBytesPerSecond));
+                _logger);
             if (!leases.TryAdd(instanceId, lease))
             {
                 SupervisionLogMessages.ProcessStartValidationRejected(_logger, "LeaseRegistration", specification.ServiceId);
+                lease.DisposeOutputs();
                 await KillHelperAsync(process, _logger, specification.ServiceId.ToString()).ConfigureAwait(false);
                 return Rejected();
             }
 
-            lease.Monitor = MonitorAsync(lease, process.StandardOutput, process.StandardError);
+            AttachCaptureConsumers(lease);
+            lease.StartOutputPumps();
+            lease.Monitor = MonitorAsync(lease);
             if (cancellationToken.IsCancellationRequested)
             {
                 SupervisionLogMessages.ProcessStartCancelled(_logger, specification.ServiceId);
@@ -347,8 +493,6 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
-            StandardOutputEncoding = new UTF8Encoding(false, false),
-            StandardErrorEncoding = new UTF8Encoding(false, false)
         };
         if (helperPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
         {
@@ -367,6 +511,23 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         }
 
         return new Process { StartInfo = startInfo, EnableRaisingEvents = false };
+    }
+
+    private void AttachCaptureConsumers(ProcessLease lease)
+    {
+        foreach (var subscription in captureSubscriptions.Values)
+        {
+            if (!subscription.IsEnabled())
+            {
+                continue;
+            }
+
+            var binding = new CaptureBinding(lease, subscription);
+            if (!subscription.TryAttach(lease, binding))
+            {
+                binding.Dispose();
+            }
+        }
     }
 
     /// <summary>Stops the current process generation for a service.</summary>
@@ -430,6 +591,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             catch (TimeoutException)
             {
                 SupervisionLogMessages.ProcessStopTimedOut(_logger, lease.ServiceId, stoppedInstanceId);
+                lease.FailOutputs();
                 throw;
             }
         }
@@ -444,32 +606,23 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             catch (TimeoutException)
             {
                 SupervisionLogMessages.ProcessStopTimedOut(_logger, lease.ServiceId, stoppedInstanceId);
+                lease.FailOutputs();
                 throw;
             }
 
             return new(ProcessOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled);
         }
+        catch
+        {
+            lease.FailOutputs();
+            throw;
+        }
 
         return new(ProcessOperationStatus.Completed, ServiceStateReasonCode.StopCompleted);
     }
 
-    private async Task MonitorAsync(ProcessLease lease, TextReader stdout, TextReader stderr)
+    private async Task MonitorAsync(ProcessLease lease)
     {
-        var stdoutTask = ProcessOutputCapture.ReadAsync(
-            stdout,
-            lease.ServiceId,
-            ProcessOutputStream.Stdout,
-            lease.Budget,
-            outputSink,
-            CancellationToken.None);
-        var stderrTask = ProcessOutputCapture.ReadAsync(
-            stderr,
-            lease.ServiceId,
-            ProcessOutputStream.Stderr,
-            lease.Budget,
-            outputSink,
-            CancellationToken.None,
-            skipMarker: true);
         var exited = false;
         var successfulExit = false;
         try
@@ -491,7 +644,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
             try
             {
-                await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+                await Task.WhenAll(lease.GetDrainTasks()).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -523,15 +676,22 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         }
         catch (Exception exception)
         {
+            lease.FailOutputs();
             SupervisionLogMessages.ProcessMonitorFailed(
                 _logger,
                 exception,
                 "Monitor",
                 lease.ServiceId,
                 lease.InstanceId.ToString());
-         }
-         finally
+        }
+        finally
         {
+            lease.DisposeCaptureBindings();
+            foreach (var subscription in captureSubscriptions.Values)
+            {
+                subscription.RemoveBinding(lease.InstanceId);
+            }
+            lease.DisposeOutputs();
             leases.TryRemove(lease.InstanceId, out _);
             lease.Process.Dispose();
             lease.Exited.TrySetResult(true);
@@ -595,6 +755,15 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         }
     }
 
+    private void RemoveCaptureSubscription(CaptureSubscription subscription)
+    {
+        captureSubscriptions.TryRemove(subscription.Id, out _);
+        foreach (var lease in leases.Values)
+        {
+            lease.RemoveCaptureBinding(subscription.Id);
+        }
+    }
+
     bool IProcessLiveness.IsRunning(Guid serviceId) =>
         leases.Values.Any(lease => lease.ServiceId == serviceId && !lease.Exited.Task.IsCompleted);
 
@@ -645,21 +814,191 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
     private sealed record HelperLaunchRequest(string FileName, string WorkingDirectory, string[] Arguments);
 
+    private sealed class CaptureSubscription : IDisposable, IProcessOutputSink
+    {
+        private readonly PosixProcessExecutor owner;
+        private readonly IProcessOutputSink sink;
+        private readonly Func<bool>? enabledGate;
+        private readonly ConcurrentDictionary<ProcessInstanceId, CaptureBinding> bindings = new();
+        private int disposed;
+
+        internal CaptureSubscription(
+            PosixProcessExecutor owner,
+            long id,
+            IProcessOutputSink sink,
+            Func<bool>? enabledGate)
+        {
+            this.owner = owner;
+            Id = id;
+            this.sink = sink;
+            this.enabledGate = enabledGate;
+        }
+
+        internal long Id { get; }
+
+        internal bool IsEnabled()
+        {
+            if (Volatile.Read(ref disposed) != 0)
+            {
+                return false;
+            }
+
+            if (enabledGate is null)
+            {
+                return true;
+            }
+
+            try
+            {
+                return enabledGate();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        internal bool TryAttach(ProcessLease lease, CaptureBinding binding)
+        {
+            if (Volatile.Read(ref disposed) != 0)
+            {
+                return false;
+            }
+
+            lease.AddCaptureBinding(Id, binding);
+            if (!bindings.TryAdd(lease.InstanceId, binding))
+            {
+                lease.RemoveCaptureBinding(Id);
+                return false;
+            }
+
+            if (Volatile.Read(ref disposed) != 0 && bindings.TryRemove(lease.InstanceId, out _))
+            {
+                lease.RemoveCaptureBinding(Id);
+                return false;
+            }
+
+            return true;
+        }
+
+        internal void RemoveBinding(ProcessInstanceId instanceId) => bindings.TryRemove(instanceId, out _);
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+
+            owner.RemoveCaptureSubscription(this);
+            foreach (var binding in bindings.Values)
+            {
+                binding.Dispose();
+            }
+        }
+
+        public void OnLine(ProcessOutputRecord record)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                sink.OnLine(record);
+            }
+        }
+
+        public void OnDropped(Guid serviceId, ProcessOutputStream stream, long count)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                sink.OnDropped(serviceId, stream, count);
+            }
+        }
+
+        public void OnGap(Guid serviceId, ProcessOutputStream stream, long droppedBytes)
+        {
+            if (Volatile.Read(ref disposed) == 0)
+            {
+                sink.OnGap(serviceId, stream, droppedBytes);
+            }
+        }
+    }
+
+    private sealed class CaptureBinding : IDisposable
+    {
+        private ProcessOutputCapture.CallbackConsumer? stdoutConsumer;
+        private ProcessOutputCapture.CallbackConsumer? stderrConsumer;
+        private IDisposable? stdoutSubscription;
+        private IDisposable? stderrSubscription;
+        private int disposed;
+
+        internal CaptureBinding(ProcessLease lease, IProcessOutputSink sink)
+        {
+            var budget = new ProcessOutputBudget(MaximumOutputLinesPerSecond, MaximumOutputBytesPerSecond);
+            var stdout = ProcessOutputCapture.CreateCallbackConsumer(
+                lease.ServiceId,
+                ProcessOutputStream.Stdout,
+                budget,
+                sink);
+            var stderr = ProcessOutputCapture.CreateCallbackConsumer(
+                lease.ServiceId,
+                ProcessOutputStream.Stderr,
+                budget,
+                sink);
+            IDisposable? stdoutHandle = null;
+            IDisposable? stderrHandle = null;
+            try
+            {
+                stdoutHandle = lease.Stdout.Subscribe(stdout);
+                stderrHandle = lease.Stderr.Subscribe(stderr);
+                stdoutConsumer = stdout;
+                stderrConsumer = stderr;
+                stdoutSubscription = stdoutHandle;
+                stderrSubscription = stderrHandle;
+                StdoutTask = stdout.Completion;
+                StderrTask = stderr.Completion;
+            }
+            catch
+            {
+                stdoutHandle?.Dispose();
+                stderrHandle?.Dispose();
+                stdout.Dispose();
+                stderr.Dispose();
+                throw;
+            }
+        }
+
+        internal Task StdoutTask { get; private set; } = Task.CompletedTask;
+        internal Task StderrTask { get; private set; } = Task.CompletedTask;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) == 0)
+            {
+                stdoutSubscription?.Dispose();
+                stderrSubscription?.Dispose();
+                stdoutConsumer?.Dispose();
+                stderrConsumer?.Dispose();
+            }
+        }
+    }
+
     private sealed class ProcessLease
     {
+        private readonly ConcurrentDictionary<long, CaptureBinding> captureBindings = new();
+
         internal ProcessLease(
             ProcessInstanceId instanceId,
             Guid serviceId,
             Process process,
             DateTimeOffset startedAt,
-            ProcessOutputBudget budget)
+            ILogger logger)
         {
             InstanceId = instanceId;
             ServiceId = serviceId;
             Process = process;
             ProcessId = process.Id;
             StartedAt = startedAt.ToUniversalTime();
-            Budget = budget;
+            Stdout = new ProcessOutputFanout(process.StandardOutput.BaseStream, serviceId, ProcessOutputStream.Stdout, logger);
+            Stderr = new ProcessOutputFanout(process.StandardError.BaseStream, serviceId, ProcessOutputStream.Stderr, logger);
         }
 
         internal ProcessInstanceId InstanceId { get; }
@@ -667,11 +1006,65 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         internal Process Process { get; }
         internal int ProcessId { get; }
         internal DateTimeOffset StartedAt { get; }
-        internal ProcessOutputBudget Budget { get; }
+        internal ProcessOutputFanout Stdout { get; }
+        internal ProcessOutputFanout Stderr { get; }
         internal Task? Monitor { get; set; }
         internal int StopRequested;
         internal TaskCompletionSource<bool> Exited { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        internal void AddCaptureBinding(long id, CaptureBinding binding) => captureBindings[id] = binding;
+
+        internal void RemoveCaptureBinding(long id)
+        {
+            if (captureBindings.TryRemove(id, out var binding))
+            {
+                binding.Dispose();
+            }
+        }
+
+        internal Task[] GetDrainTasks()
+        {
+            var bindings = captureBindings.Values.ToArray();
+            var tasks = new Task[2 + (bindings.Length * 2)];
+            tasks[0] = Stdout.Completion;
+            tasks[1] = Stderr.Completion;
+            var index = 2;
+            foreach (var binding in bindings)
+            {
+                tasks[index++] = binding.StdoutTask;
+                tasks[index++] = binding.StderrTask;
+            }
+
+            return tasks;
+        }
+
+        internal void StartOutputPumps()
+        {
+            Stdout.Start();
+            Stderr.Start();
+        }
+
+        internal void FailOutputs()
+        {
+            Stdout.Fail();
+            Stderr.Fail();
+        }
+
+        internal void DisposeCaptureBindings()
+        {
+            foreach (var binding in captureBindings.Values)
+            {
+                binding.Dispose();
+            }
+
+            captureBindings.Clear();
+        }
+
+        internal void DisposeOutputs()
+        {
+            Stdout.Dispose();
+            Stderr.Dispose();
+        }
     }
 }
 

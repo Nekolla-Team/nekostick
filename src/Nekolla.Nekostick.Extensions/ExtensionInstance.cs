@@ -6,9 +6,11 @@ namespace Nekolla.Nekostick.Extensions;
 
 internal sealed partial class ExtensionInstance : IAsyncDisposable
 {
+    private static readonly TimeSpan CapabilityCleanupTimeout = TimeSpan.FromSeconds(5);
     private readonly object _gate = new();
     private readonly ExtensionLoadHandle _loadHandle;
     private readonly ExtensionHostBridge _bridge;
+    private readonly IAsyncDisposable? _capabilityCleanup;
     private IExtensionEntrypoint? _entrypoint;
     private Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>>? _reloadCallback;
     private Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>>? _unloadCallback;
@@ -88,6 +90,7 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                     ? routeFactory.CreateWithRouteEvents(manifest.Id, IsHandlerOwned, _routeRegistrations)
                     : capabilityFactory?.Create(manifest.Id, IsHandlerOwned)
                       ?? UnsupportedExtensionCapabilities.Create(hostApiVersion);
+        _capabilityCleanup = capabilities.ServiceOutput as IAsyncDisposable;
         _bridge = new ExtensionHostBridge(
             hostApiVersion,
             settings,
@@ -457,14 +460,74 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         }
     }
 
-    internal ValueTask ReleaseAsync()
+    internal async ValueTask ReleaseAsync()
     {
         _routeRegistrations.Retire();
+        if (_capabilityCleanup is { } capabilityCleanup)
+        {
+            try
+            {
+                await capabilityCleanup.DisposeAsync()
+                    .AsTask()
+                    .WaitAsync(CapabilityCleanupTimeout)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                if (_logger is { } timeoutLogger)
+                {
+                    ExtensionLogMessages.ExtensionServiceOutputCleanupTimedOut(
+                        timeoutLogger,
+                        exception,
+                        Manifest.Id,
+                        (int)CapabilityCleanupTimeout.TotalSeconds);
+                }
+
+                DetachCapabilityCleanup(capabilityCleanup);
+            }
+            catch (Exception exception)
+            {
+                if (_logger is { } failedLogger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        failedLogger,
+                        exception,
+                        Manifest.Id,
+                        nameof(ReleaseAsync));
+                }
+
+                DetachCapabilityCleanup(capabilityCleanup);
+            }
+        }
+
         _entrypoint = null;
         _registry.Clear();
         _contracts.Dispose();
         _loadHandle.Unload();
-        return ValueTask.CompletedTask;
+    }
+
+    private void DetachCapabilityCleanup(IAsyncDisposable capabilityCleanup)
+    {
+        if (capabilityCleanup is not IExtensionServiceOutputCleanup detachable)
+        {
+            return;
+        }
+
+        try
+        {
+            detachable.DetachAll();
+        }
+        catch (Exception exception)
+        {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                    logger,
+                    exception,
+                    Manifest.Id,
+                    nameof(IExtensionServiceOutputCleanup.DetachAll));
+            }
+        }
     }
 
     private async Task<bool> StopCoreAsync(TimeSpan timeout)

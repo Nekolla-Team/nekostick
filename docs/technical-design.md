@@ -274,6 +274,8 @@ health check 类型为 `Process`、`Tcp` 和 `Http`，全局默认可由 service
 stdout 和 stderr 采用 UTF-8 按行读取，supervision 捕获契约保留有界的原始文本；Host 结构化日志只记录 service ID、stream、timestamp、日志级别、截断和丢弃聚合元数据，任意子进程输出文本绝不进入 Host 日志。无效 UTF-8 以 replacement character 表示；stdout 默认 `Information`，stderr 默认 `Warning`。
 
 **计划默认值，可配置：** 单行最大 16 KiB；每 service 每秒最多 200 行且最多 1 MiB。超额行截断或丢弃，并以聚合计数日志报告；进程退出码、终止信号、启动失败和进程树清理失败始终记录。
+**API 1.4 输出架构：** 子进程 stdout/stderr 先进入 raw-byte fan-out，再由 capture 作为条件消费者接入。每条管道的 pump 以 8 KiB 读取；每个 subscriber 同时受 256 KiB 字节上限和 4096 个 chunk 上限约束，溢出时丢弃而不阻塞 pump。没有任何 capture subscriber 的 gate 通过且 Trace 未启用时，fan-out 仍排空管道，但跳过解码和按行拆分。默认子进程输出日志级别为 `Trace`，并在结构化字段 `Text` 中记录文本；sink API 的 `OnDropped` 报告 callback subscriber 的字节 gap，Stream subscriber 可能看到静默缺口。
+
 
 ### 6.3 HTTP/1.1 与 WebSocket 代理
 

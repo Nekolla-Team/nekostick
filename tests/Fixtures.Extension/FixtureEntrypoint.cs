@@ -41,6 +41,8 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
             state.CapabilityProbe = await ProbeCapabilitiesAsync(
                     context.Host,
                     legacySettings,
+                    options.HoldServiceOutput,
+                    options.LifecycleObservationPort,
                     cancellationToken)
                 .ConfigureAwait(false);
         }

@@ -40,7 +40,8 @@ public sealed record FixtureMode(
         int UnregisterBarrierPort,
         bool SubscribeSettingsChanged,
         bool ReadDataDirectory,
-        string? ReportStatus)
+        string? ReportStatus,
+        bool HoldServiceOutput)
     {
         /// <summary>Reads the small test-only settings document.</summary>
         public static FixtureMode Parse(string? settingsJson)
@@ -89,7 +90,8 @@ public sealed record FixtureMode(
                 ReadPort(root, "unregisterBarrierPort"),
                 ReadBool(root, "subscribeSettingsChanged"),
                 ReadBool(root, "readDataDirectory"),
-                ReadOptionalString(root, "reportStatus"));
+                ReadOptionalString(root, "reportStatus"),
+                ReadBool(root, "holdServiceOutput"));
         }
 
         private static string ReadString(JsonElement root, string name, string fallback) =>
@@ -157,5 +159,6 @@ public sealed record FixtureMode(
             0,
             false,
             false,
-            null);
+            null,
+            false);
     }

@@ -97,6 +97,15 @@ internal static class Program
         await using var app = BuildApplication(command, listenAddress);
         var logger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger(HostLoggerCategory.Startup);
+        var outputSink = app.Services.GetService<IProcessOutputSink>() as HostProcessOutputLogSink;
+        using var outputCaptureSubscription =
+            app.Services.GetService<IProcessExecutor>() is PosixProcessExecutor executor &&
+            outputSink is not null
+                ? executor.SubscribeOutputCapture(
+                    outputSink,
+                    () => outputSink.IsTraceEnabled)
+                : null;
+        // The trace gate is sampled when each process generation starts; log-level changes apply to the next generation.
 
         var inspection = await InspectDatabaseAsync(
             app,
@@ -370,7 +379,6 @@ internal static class Program
                 builder.Services.AddSingleton<IProcessExecutor>(serviceProvider =>
                     new PosixProcessExecutor(
                         helperPath,
-                        outputSink: serviceProvider.GetRequiredService<IProcessOutputSink>(),
                         logger: serviceProvider.GetRequiredService<ILogger<PosixProcessExecutor>>()));
                 builder.Services.AddSingleton<IServiceHealthProbe>(serviceProvider =>
                     new ServiceHealthProbe(

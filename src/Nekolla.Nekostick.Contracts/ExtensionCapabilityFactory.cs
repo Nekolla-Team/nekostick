@@ -96,6 +96,34 @@ public sealed record ExtensionCapabilitySet(
         IExtensionLogWriter? logWriter,
         IExtensionManagementApi? management,
         Func<ExtensionHostInfoSnapshot>? hostInfo)
+        : this(configurationApi, routes, services, endpoints, fullConfiguration, supervisor, routeEvents, logWriter, management, hostInfo, null)
+    {
+    }
+
+    /// <summary>Creates an extension capability set including the API 1.4 service-output capability.</summary>
+    /// <param name="configurationApi">The owner-scoped configuration capability.</param>
+    /// <param name="routes">The owner-scoped route capability.</param>
+    /// <param name="services">The owner-scoped service capability.</param>
+    /// <param name="endpoints">The read-only endpoint capability.</param>
+    /// <param name="fullConfiguration">The full configuration capability.</param>
+    /// <param name="supervisor">The optional global runtime telemetry capability.</param>
+    /// <param name="routeEvents">The optional route observation and hook capability.</param>
+    /// <param name="logWriter">The optional Host-attributed text writer.</param>
+    /// <param name="management">The optional extension management capability.</param>
+    /// <param name="hostInfo">The optional provider for the latest non-sensitive host information snapshot.</param>
+    /// <param name="serviceOutput">The optional caller-owned service stdout/stderr capability.</param>
+    public ExtensionCapabilitySet(
+        IExtensionConfigurationApi configurationApi,
+        IExtensionRouteApi routes,
+        IExtensionServiceApi services,
+        IExtensionEndpointApi endpoints,
+        IExtensionFullConfigurationApi fullConfiguration,
+        IExtensionSupervisorApi? supervisor,
+        IExtensionRouteEvents? routeEvents,
+        IExtensionLogWriter? logWriter,
+        IExtensionManagementApi? management,
+        Func<ExtensionHostInfoSnapshot>? hostInfo,
+        IExtensionServiceOutputApi? serviceOutput)
         : this(configurationApi, routes, services, endpoints, fullConfiguration)
     {
         Supervisor = supervisor;
@@ -103,6 +131,7 @@ public sealed record ExtensionCapabilitySet(
         LogWriter = logWriter;
         ExtensionManagement = management;
         HostInfo = hostInfo;
+        ServiceOutput = serviceOutput;
     }
 
     /// <summary>Gets the optional global runtime telemetry capability.</summary>
@@ -119,6 +148,9 @@ public sealed record ExtensionCapabilitySet(
 
     /// <summary>Gets the optional API 1.3.3 provider for non-sensitive host information snapshots.</summary>
     public Func<ExtensionHostInfoSnapshot>? HostInfo { get; }
+
+    /// <summary>Gets the optional API 1.4 provider for caller-owned service stdout/stderr streams.</summary>
+    public IExtensionServiceOutputApi? ServiceOutput { get; }
 }
 
 /// <summary>Provides the persistence-backed owner-scoped configuration seam used by Host facades.</summary>

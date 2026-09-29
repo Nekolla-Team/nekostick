@@ -134,6 +134,27 @@ internal static partial class SupervisionLogMessages
         string instanceId);
 
     [LoggerMessage(
+        EventId = 5026,
+        Level = LogLevel.Warning,
+        Message = "Process output fan-out failed. Stream: {Stream}. ServiceId: {ServiceId}.")]
+    internal static partial void ProcessOutputFanoutFailed(
+        ILogger logger,
+        Exception exception,
+        string stream,
+        Guid serviceId);
+
+    [LoggerMessage(
+        EventId = 5027,
+        Level = LogLevel.Warning,
+        Message = "Process output subscriber callback failed. Operation: {Operation}. Stream: {Stream}. ServiceId: {ServiceId}.")]
+    internal static partial void ProcessOutputSubscriberFailed(
+        ILogger logger,
+        Exception exception,
+        string operation,
+        string stream,
+        Guid serviceId);
+
+    [LoggerMessage(
         EventId = 5016,
         Level = LogLevel.Debug,
         Message = "Process exit code could not be read. ServiceId: {ServiceId}. InstanceId: {InstanceId}.")]

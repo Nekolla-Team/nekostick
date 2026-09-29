@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Proxy;
 using Nekolla.Nekostick.Extensions;
+using Nekolla.Nekostick.Supervision;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -57,6 +58,7 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             handlerIsOwned);
         var logger = _serviceProvider.GetService<ILoggerFactory>()?.CreateLogger(HostLoggerCategory.Extensions)
             ?? NullLogger.Instance;
+        var processExecutor = _serviceProvider.GetService<IProcessExecutor>() as PosixProcessExecutor;
         var management = ExtensionAbi.IsCompatible(new HostApiVersion(1, 3, 2), runtimeManager.ApiVersion)
             ? new ExtensionManagementFacade(
                 extensionId,
@@ -90,7 +92,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             routeEvents,
             new ExtensionLogWriter(extensionId, logger),
             management,
-            BuildHostInfoSnapshot);
+            BuildHostInfoSnapshot,
+            new ExtensionServiceOutputFacade(extensionId, configuration, processExecutor, logger));
     }
     private ExtensionHostInfoSnapshot BuildHostInfoSnapshot()
     {

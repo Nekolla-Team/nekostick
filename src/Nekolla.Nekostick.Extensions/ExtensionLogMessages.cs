@@ -443,4 +443,14 @@ internal static partial class ExtensionLogMessages
     internal static partial void ExtensionReportedHealthyStatus(
         ILogger logger,
         string extensionId);
+    [LoggerMessage(
+        EventId = 2052,
+        Level = LogLevel.Warning,
+        Message = "Extension service-output cleanup timed out. ExtensionId: {ExtensionId}. TimeoutSeconds: {TimeoutSeconds}.")]
+    internal static partial void ExtensionServiceOutputCleanupTimedOut(
+        ILogger logger,
+        Exception exception,
+        string extensionId,
+        int timeoutSeconds);
+
 }

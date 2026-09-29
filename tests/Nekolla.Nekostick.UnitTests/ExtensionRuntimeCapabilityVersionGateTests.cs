@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Xunit;
@@ -12,12 +13,18 @@ public sealed partial class ExtensionRuntimeTests
         using var api10Fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         using var api11Fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         using var api12Fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        using var api13Fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        using var api14Fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         var api10Manifest = Discover(api10Fixture.RootPath);
         var api11Manifest = Discover(api11Fixture.RootPath);
         var api12Manifest = Discover(api12Fixture.RootPath);
+        var api13Manifest = Discover(api13Fixture.RootPath);
+        var api14Manifest = Discover(api14Fixture.RootPath);
         var api10Factory = new RecordingCapabilityFactory();
         var api11Factory = new RecordingCapabilityFactory();
         var api12Factory = new RecordingCapabilityFactory();
+        var api13Factory = new RecordingCapabilityFactory(provideServiceOutput: true);
+        var api14Factory = new RecordingCapabilityFactory(provideServiceOutput: true);
 
         await using (var api10 = new ExtensionRuntimeManager(
                          new HostApiVersion(1, 0, 0),
@@ -46,6 +53,7 @@ public sealed partial class ExtensionRuntimeTests
             Assert.Contains("routeRead=Unsupported", body, StringComparison.Ordinal);
             Assert.Contains("serviceRead=Unsupported", body, StringComparison.Ordinal);
             Assert.Contains("endpoints=0", body, StringComparison.Ordinal);
+            Assert.Contains("api14=bridge14;serviceOutputOpen=Unsupported;serviceOutputSubscribe=Unsupported", body, StringComparison.Ordinal);
             Assert.Contains("start-lifecycle=reload=Unsupported;unload=Unsupported", body, StringComparison.Ordinal);
             Assert.Equal(0, api10Factory.CreateCount);
             Assert.Equal(
@@ -96,10 +104,59 @@ public sealed partial class ExtensionRuntimeTests
             Assert.Equal(1, api12Factory.LastFullConfiguration!.ReadCount);
             Assert.Equal(1, api12Factory.LastFullConfiguration.WriteCount);
         }
+
+        await using (var api13 = new ExtensionRuntimeManager(
+                         new HostApiVersion(1, 3, 2),
+                         capabilityFactory: api13Factory))
+        {
+            Assert.True(
+                (await api13.LoadAsync(
+                    api13Manifest,
+                    Settings(api13Manifest.Id, label: "api13", verifyBridgeCapabilities: true),
+                    TestContext.Current.CancellationToken)).Succeeded);
+
+            var result = await api13.HandleAsync(
+                "fixture.handler",
+                new ExtensionHandlerRequest("GET", "/api13-gated"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(ExtensionInvocationState.Handled, result.State);
+            var body = Body(result);
+            Assert.Contains(
+                "api14=bridge14;serviceOutputOpen=Unsupported;serviceOutputSubscribe=Unsupported",
+                body,
+                StringComparison.Ordinal);
+            Assert.Equal(1, api13Factory.CreateCount);
+        }
+
+        await using (var api14 = new ExtensionRuntimeManager(
+                         new HostApiVersion(1, 4, 0),
+                         capabilityFactory: api14Factory))
+        {
+            Assert.True(
+                (await api14.LoadAsync(
+                    api14Manifest,
+                    Settings(api14Manifest.Id, label: "api14", verifyBridgeCapabilities: true),
+                    TestContext.Current.CancellationToken)).Succeeded);
+
+            var result = await api14.HandleAsync(
+                "fixture.handler",
+                new ExtensionHandlerRequest("GET", "/api14-gated"),
+                TestContext.Current.CancellationToken);
+            var body = Body(result);
+            Assert.Equal(ExtensionInvocationState.Handled, result.State);
+            Assert.Contains("api14=bridge14;serviceOutputOpen=Opened;serviceOutputSubscribe=Opened", body, StringComparison.Ordinal);
+            Assert.Equal(1, api14Factory.CreateCount);
+        }
+
     }
 
     private sealed class RecordingCapabilityFactory : IExtensionCapabilityFactory
     {
+        private readonly bool _provideServiceOutput;
+
+        internal RecordingCapabilityFactory(bool provideServiceOutput = false) =>
+            _provideServiceOutput = provideServiceOutput;
+
         internal int CreateCount;
         internal RecordingFullConfiguration? LastFullConfiguration { get; private set; }
 
@@ -113,8 +170,45 @@ public sealed partial class ExtensionRuntimeTests
                 unsupported.Routes,
                 unsupported.Services,
                 unsupported.Endpoints,
-                LastFullConfiguration);
+                LastFullConfiguration,
+                unsupported.Supervisor,
+                unsupported.RouteEvents,
+                unsupported.LogWriter,
+                unsupported.ExtensionManagement,
+                unsupported.HostInfo,
+                _provideServiceOutput ? new RecordingServiceOutput() : null);
         }
+    }
+
+    private sealed class RecordingServiceOutput : IExtensionServiceOutputApi
+    {
+        public ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
+            Guid serviceId,
+            ExtensionServiceOutputStream stream,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new ExtensionServiceOutputStreamResult(
+                true,
+                ExtensionServiceOutputCode.Opened,
+                serviceId,
+                new MemoryStream()));
+
+        public ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
+            Guid serviceId,
+            ExtensionServiceOutputStream stream,
+            IExtensionServiceOutputSink sink,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new ExtensionServiceOutputSubscriptionResult(
+                true,
+                ExtensionServiceOutputCode.Opened,
+                serviceId,
+                new RecordingSubscription()));
+    }
+
+    private sealed class RecordingSubscription : IExtensionServiceOutputSubscription
+    {
+        public void Dispose() { }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class RecordingFullConfiguration : IExtensionFullConfigurationApi

@@ -578,6 +578,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         private ProcessInstanceId? _instanceId;
         private bool _disposed;
         private readonly CapturingOutputSink? _outputSink;
+        private readonly IDisposable? _captureSubscription;
 
 
         private FixtureProcessHarness(
@@ -594,7 +595,10 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             Arguments = arguments;
             _outputSink = outputSink;
             _serviceId = Guid.CreateVersion7();
-            _executor = new PosixProcessExecutor(helperPath, StopGrace, outputSink);
+            _executor = new PosixProcessExecutor(helperPath, StopGrace);
+            _captureSubscription = outputSink is null
+                ? null
+                : _executor.SubscribeOutputCapture(outputSink, static () => true);
             _probe = new ServiceHealthProbe(_executor);
         }
 
@@ -806,6 +810,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             }
             finally
             {
+                _captureSubscription?.Dispose();
                 _probe.Dispose();
             }
         }

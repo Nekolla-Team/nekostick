@@ -81,3 +81,23 @@ dotnet test tests/Nekolla.Nekostick.IntegrationTests   # requires NEKOSTICK_TEST
   The native helper itself is published per portable RID (`NETCoreSdkPortableRuntimeIdentifier`).
 - **Commit style**: Conventional Commits with a lowercase summary, e.g.
   `feat(extensions): ...`, `fix(host): ...`, matching git history.
+
+## Extension ABI versioning and release
+
+- `HostApiVersion.Current` identifies the **in-development** API version. While that version is
+  unreleased, extend it directly: add members to its bridge interfaces and capability set, and
+  update `docs/extension-api/api-<version>.md` in place. NEVER bump minor/patch for work landing
+  before the release ships.
+- Bump `HostApiVersion.Current` only when cutting a release. Once a version is released its
+  surface is frozen: further capabilities require an additive sibling bridge interface (the
+  `IExtensionHostBridge13`/`14` pattern), a new `ExtensionApiCapabilityGate` check, and an
+  `UnsupportedExtensionCapabilities` fallback for older negotiated versions.
+- New capability checklist: Contracts DTOs/interfaces (XML docs, failure-code enums, no
+  exceptions, dependency-free) -> `ExtensionCapabilitySet` entry -> member on the current
+  in-development bridge -> capability gate + unsupported facade -> Host facade with
+  caller-ownership binding -> docs page update -> fixture entrypoint + tests.
+- **Contracts package versioning**: `Nekolla.Nekostick.Contracts.csproj` `PackageVersion` tracks
+  the in-development ABI as `<minor>.0-preview.N`. Whenever Contracts content changes while the
+  csproj itself has no uncommitted changes, bump it in the same change: increment `-preview.N`,
+  or if the current version is not a preview, move to the next version's `-preview.1`. Skip the
+  bump only when the user explicitly asks.

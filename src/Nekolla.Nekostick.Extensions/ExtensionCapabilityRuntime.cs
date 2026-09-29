@@ -25,6 +25,7 @@ internal static class ExtensionApiCapabilityGate
 
     internal static bool IsApi14Supported(HostApiVersion host) =>
         host.Major == Api14Version.Major && host >= Api14Version;
+
 }
 
 internal enum ExtensionCallbackKind
@@ -36,7 +37,9 @@ internal enum ExtensionCallbackKind
     /// <summary>Extension task-scheduler callback; an independent logical context that inherits no callback constraints.</summary>
     Scheduler,
     /// <summary>Entrypoint lifecycle callback (start/stop/previous-stopped) awaited by the runtime under the publication gate.</summary>
-    Lifecycle
+    Lifecycle,
+    /// <summary>Extension service-output sink callback; the invocation is isolated from lifecycle reentrancy.</summary>
+    ServiceOutput,
 }
 
 internal static class ExtensionCallbackGuard
@@ -45,6 +48,7 @@ internal static class ExtensionCallbackGuard
     private const int EventBit = 2;
     private const int SchedulerBit = 4;
     private const int LifecycleBit = 8;
+    private const int ServiceOutputBit = 16;
 
     private static readonly AsyncLocal<int> Bits = new();
 
@@ -53,8 +57,8 @@ internal static class ExtensionCallbackGuard
     /// <summary>Gets whether the current context is an entrypoint lifecycle callback awaited under the publication gate.</summary>
     internal static bool IsLifecycleActive => (Bits.Value & LifecycleBit) != 0;
 
-    /// <summary>Gets whether the current context is torn down during generation replacement of the calling extension (route lease drain, event consumer, or tracked scheduler task).</summary>
-    internal static bool IsSelfReplacementUnsafe => (Bits.Value & (RouteBit | EventBit | SchedulerBit)) != 0;
+    /// <summary>Gets whether the current context is torn down during generation replacement of the calling extension (route lease drain, event consumer, tracked scheduler task, or service-output callback).</summary>
+    internal static bool IsSelfReplacementUnsafe => (Bits.Value & (RouteBit | EventBit | SchedulerBit | ServiceOutputBit)) != 0;
 
     internal static IDisposable Enter(ExtensionCallbackKind kind)
     {
@@ -72,6 +76,7 @@ internal static class ExtensionCallbackGuard
         ExtensionCallbackKind.Route => RouteBit,
         ExtensionCallbackKind.Event => EventBit,
         ExtensionCallbackKind.Scheduler => SchedulerBit,
+        ExtensionCallbackKind.ServiceOutput => ServiceOutputBit,
         _ => LifecycleBit
     };
 
@@ -83,6 +88,11 @@ internal static class ExtensionCallbackGuard
 
         public void Dispose() => Bits.Value = _prior;
     }
+}
+
+internal interface IExtensionServiceOutputCleanup : IAsyncDisposable
+{
+    void DetachAll();
 }
 
 internal sealed class ExtensionLifecycleApi : IExtensionLifecycleApi
@@ -115,7 +125,7 @@ internal sealed class ExtensionLifecycleApi : IExtensionLifecycleApi
 }
 
 /// <summary>Creates explicit unsupported facades for unavailable or unnegotiated capabilities.</summary>
-/// <remarks>The API 1.3 members use these no-op/error facades on hosts below 1.3 or when a capability was not composed; they are never Host logging sinks.</remarks>
+/// <remarks>The API 1.3 and 1.4 members use these no-op/error facades on hosts below their negotiated versions or when a capability was not composed; they are never Host logging sinks.</remarks>
 internal static class UnsupportedExtensionCapabilities
 {
     internal static ExtensionCapabilitySet Create() => Create(HostApiVersion.Current);
@@ -130,7 +140,9 @@ internal static class UnsupportedExtensionCapabilities
             new UnsupportedSupervisorApi(),
             new UnsupportedRouteEvents(),
             new UnsupportedLogWriter(),
-            new UnsupportedManagementApi(negotiatedVersion));
+            new UnsupportedManagementApi(negotiatedVersion),
+            null,
+            CreateServiceOutput());
 
     internal static IExtensionSupervisorApi CreateSupervisor() => new UnsupportedSupervisorApi();
     internal static IExtensionManagementApi CreateManagement() =>
@@ -142,8 +154,25 @@ internal static class UnsupportedExtensionCapabilities
     internal static IExtensionRouteEvents CreateRouteEvents() => new UnsupportedRouteEvents();
 
     internal static IExtensionLogWriter CreateLogWriter() => new UnsupportedLogWriter();
+    internal static IExtensionServiceOutputApi CreateServiceOutput() => new UnsupportedServiceOutputApi();
     internal static IExtensionLifecycleApi CreateLifecycle() => new UnsupportedLifecycleApi();
     internal static IExtensionDependencyApi CreateDependencyApi() => new UnsupportedDependencyApi();
+    private static Guid SafeServiceId(Guid serviceId)
+    {
+        if (serviceId != Guid.Empty)
+        {
+            var text = serviceId.ToString("D");
+            var variant = text[19];
+            if (text[14] == '7' &&
+                (variant == '8' || variant == '9' || variant == 'a' || variant == 'b'))
+            {
+                return serviceId;
+            }
+        }
+
+        return Guid.CreateVersion7();
+    }
+
 
 
     private sealed class UnsupportedConfigurationApi : IExtensionConfigurationApi
@@ -221,6 +250,32 @@ internal static class UnsupportedExtensionCapabilities
         public ValueTask<ExtensionServiceOperationResult> RestartAsync(Guid serviceId, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId));
     }
+    private sealed class UnsupportedServiceOutputApi : IExtensionServiceOutputApi
+    {
+        public ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
+            Guid serviceId,
+            ExtensionServiceOutputStream stream,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                new ExtensionServiceOutputStreamResult(
+                    false,
+                    ExtensionServiceOutputCode.Unsupported,
+                    SafeServiceId(serviceId),
+                    null));
+
+        public ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
+            Guid serviceId,
+            ExtensionServiceOutputStream stream,
+            IExtensionServiceOutputSink sink,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                new ExtensionServiceOutputSubscriptionResult(
+                    false,
+                    ExtensionServiceOutputCode.Unsupported,
+                    SafeServiceId(serviceId),
+                    null));
+    }
+
 
     private sealed class UnsupportedEndpointApi : IExtensionEndpointApi
     {

@@ -1,7 +1,12 @@
+using System.Diagnostics;
 using System.Net;
+using System.Text;
+using System.Collections;
+using System.Collections.Immutable;
 using System.Reflection;
-using Microsoft.AspNetCore.Builder;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Host;
@@ -13,7 +18,7 @@ namespace Nekolla.Nekostick.UnitTests;
 public sealed class ProcessOutputStructuredLoggingTests
 {
     [Fact]
-    public void SinkNeverLogsRawChildOutputText()
+    public void SinkLogsChildOutputTextAtTraceWithStreamMetadata()
     {
         var logger = new CapturingLogger();
         var sink = new HostProcessOutputLogSink(logger);
@@ -26,38 +31,22 @@ public sealed class ProcessOutputStructuredLoggingTests
             serviceId,
             ProcessOutputStream.Stdout,
             timestamp,
-            "Warning",
             stdoutSecret,
             true));
         sink.OnLine(new ProcessOutputRecord(
             serviceId,
             ProcessOutputStream.Stderr,
             timestamp,
-            "Information",
             stderrSecret,
             false));
 
         Assert.Equal(2, logger.Entries.Count);
-        AssertLine(
-            logger.Entries[0],
-            LogLevel.Information,
-            serviceId,
-            "stdout",
-            timestamp,
-            stdoutSecret,
-            true);
-        AssertLine(
-            logger.Entries[1],
-            LogLevel.Warning,
-            serviceId,
-            "stderr",
-            timestamp,
-            stderrSecret,
-            false);
+        AssertOutputLine(logger.Entries[0], serviceId, "stdout", timestamp, stdoutSecret, true);
+        AssertOutputLine(logger.Entries[1], serviceId, "stderr", timestamp, stderrSecret, false);
     }
 
     [Fact]
-    public void SinkReportsAggregateDropsAndContainsLoggerFailures()
+    public void SinkReportsLineDropsAndByteGapsAsWarningEvents()
     {
         var logger = new CapturingLogger();
         var sink = new HostProcessOutputLogSink(logger);
@@ -66,53 +55,247 @@ public sealed class ProcessOutputStructuredLoggingTests
         sink.OnDropped(serviceId, ProcessOutputStream.Stderr, 7);
         sink.OnDropped(serviceId, (ProcessOutputStream)99, 1);
         sink.OnDropped(serviceId, ProcessOutputStream.Stdout, 0);
+        sink.OnGap(serviceId, ProcessOutputStream.Stdout, 11);
+        sink.OnGap(serviceId, (ProcessOutputStream)99, 1);
+        sink.OnGap(serviceId, ProcessOutputStream.Stderr, 0);
 
-        var dropped = Assert.Single(logger.Entries);
+        Assert.Equal(2, logger.Entries.Count);
+        var dropped = logger.Entries[0];
         Assert.Equal(LogLevel.Warning, dropped.Level);
         Assert.Equal(1009, dropped.EventId.Id);
         Assert.Null(dropped.Exception);
         Assert.Equal(serviceId, Assert.IsType<Guid>(dropped.Fields["ServiceId"]));
         Assert.Equal("stderr", Assert.IsType<string>(dropped.Fields["Stream"]));
         Assert.IsType<DateTimeOffset>(dropped.Fields["Timestamp"]);
-        Assert.False(dropped.Fields.ContainsKey("Text"));
-        Assert.False(Assert.IsType<bool>(dropped.Fields["Truncated"]));
-        Assert.True(Assert.IsType<bool>(dropped.Fields["Dropped"]));
         Assert.Equal(7L, Assert.IsType<long>(dropped.Fields["DroppedCount"]));
 
-        var throwingSink = new HostProcessOutputLogSink(new ThrowingLogger());
-        throwingSink.OnLine(new ProcessOutputRecord(
-            serviceId,
-            ProcessOutputStream.Stdout,
-            DateTimeOffset.UtcNow,
-            "Information",
-            "ignored",
-            false));
-        throwingSink.OnDropped(serviceId, ProcessOutputStream.Stderr, 1);
+        var gap = logger.Entries[1];
+        Assert.Equal(LogLevel.Warning, gap.Level);
+        Assert.Equal(1077, gap.EventId.Id);
+        Assert.Null(gap.Exception);
+        Assert.Equal(serviceId, Assert.IsType<Guid>(gap.Fields["ServiceId"]));
+        Assert.Equal("stdout", Assert.IsType<string>(gap.Fields["Stream"]));
+        Assert.IsType<DateTimeOffset>(gap.Fields["Timestamp"]);
+        Assert.Equal(11L, Assert.IsType<long>(gap.Fields["DroppedBytes"]));
     }
 
     [Fact]
-    public void ExecutorAcceptsOutputSinkAndHostRegistersItOnlyWhenSupervisorIsActive()
+    public void ExecutorCaptureSubscriptionsEvaluateTheirGateAndDetach()
     {
-        var suppliedSink = new DiscardingOutputSink();
-        var executor = new PosixProcessExecutor(outputSink: suppliedSink);
-        var defaultExecutor = new PosixProcessExecutor();
-        var nullExecutor = new PosixProcessExecutor(outputSink: null);
+        var sink = new DiscardingOutputSink();
+        var traceEnabled = false;
+        var executor = new PosixProcessExecutor();
+        using var subscription = executor.SubscribeOutputCapture(sink, () => traceEnabled);
 
-        Assert.Same(suppliedSink, GetOutputSink(executor));
-        Assert.NotNull(GetOutputSink(defaultExecutor));
-        Assert.NotNull(GetOutputSink(nullExecutor));
+        Assert.False(executor.HasActiveOutputCapture);
+        traceEnabled = true;
+        Assert.True(executor.HasActiveOutputCapture);
+        subscription.Dispose();
+        Assert.False(executor.HasActiveOutputCapture);
+    }
 
-        using var activeApplication = BuildApplication(disableSupervisor: false);
-        var activeSink = activeApplication.Services.GetRequiredService<IProcessOutputSink>();
-        var activeExecutor = Assert.IsType<PosixProcessExecutor>(
-            activeApplication.Services.GetRequiredService<IProcessExecutor>());
+    [Fact]
+    public async Task TraceDisabledLeavesCaptureDetachedAndSinkUnused()
+    {
+        var helperPath = RequireNativeHelperPath();
+        var logger = new CapturingLogger();
+        var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
+        using var subscription = executor.SubscribeOutputCapture(
+            new HostProcessOutputLogSink(logger),
+            static () => false);
 
-        Assert.IsType<HostProcessOutputLogSink>(activeSink);
-        Assert.Same(activeSink, GetOutputSink(activeExecutor));
+        Assert.False(executor.HasActiveOutputCapture);
+        var serviceId = Guid.Parse("0198a1af-6e94-7b25-9732-59c9075b14f6");
+        var fifoPath = CreateFifo();
+        try
+        {
+            var start = await executor.StartAsync(
+                CreateLaunch(serviceId, $"read _ < {fifoPath}; printf trace-off"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(ProcessOperationStatus.Accepted, start.Status);
+            AssertNoCaptureBindings(executor);
 
-        using var disabledApplication = BuildApplication(disableSupervisor: true);
-        Assert.Null(disabledApplication.Services.GetService<IProcessOutputSink>());
-        Assert.Null(disabledApplication.Services.GetService<IProcessExecutor>());
+            var rawSink = new RecordingChunkSink();
+            using var rawSubscription = executor.TrySubscribeOutput(
+                serviceId,
+                ProcessOutputStream.Stdout,
+                rawSink) ?? throw new InvalidOperationException("The running fixture must expose stdout.");
+            await File.WriteAllTextAsync(
+                fifoPath,
+                "\n",
+                TestContext.Current.CancellationToken);
+            var rawBytes = await rawSink.FirstChunk.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+            Assert.Equal("trace-off", Encoding.UTF8.GetString(rawBytes));
+            await executor.StopAsync(
+                serviceId,
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+            await executor.CleanupAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+
+            Assert.DoesNotContain(logger.Entries, entry => entry.EventId.Id == 1076);
+        }
+        finally
+        {
+            File.Delete(fifoPath);
+        }
+    }
+
+    [Fact]
+    public async Task TraceEnabledCapturesTextAndStreamThroughStructuredSink()
+    {
+        var helperPath = RequireNativeHelperPath();
+        var logger = new CapturingLogger();
+        var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
+        using var subscription = executor.SubscribeOutputCapture(
+            new HostProcessOutputLogSink(logger),
+            static () => true);
+
+        Assert.True(executor.HasActiveOutputCapture);
+        var serviceId = Guid.Parse("0198a1af-6e94-7b25-9732-59c9075b14f6");
+        var start = await executor.StartAsync(
+            CreateLaunch(serviceId, "printf trace-on; sleep 2"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ProcessOperationStatus.Accepted, start.Status);
+
+        var trace = await logger.TraceEntry.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        AssertOutputLine(
+            trace,
+            serviceId,
+            "stdout",
+            trace.Fields["Timestamp"] is DateTimeOffset timestamp ? timestamp : default,
+            "trace-on",
+            truncated: false);
+
+        await executor.StopAsync(
+            serviceId,
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await executor.CleanupAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ReadyMarkerReaderLeavesChildBytesForFanout()
+    {
+        var method = typeof(PosixProcessExecutor).GetMethod(
+            "ReadReadyMarkerAsync",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var childBytes = Encoding.UTF8.GetBytes("child-output\n");
+        await using var stream = new MemoryStream(
+            Encoding.UTF8.GetBytes("NK_READY\n").Concat(childBytes).ToArray());
+
+        var markerRead = (ValueTask<bool>)method!.Invoke(
+            null,
+            [stream, TestContext.Current.CancellationToken])!;
+        Assert.True(await markerRead);
+
+        var remaining = new byte[childBytes.Length];
+        var read = await stream.ReadAsync(remaining, TestContext.Current.CancellationToken);
+        Assert.Equal(childBytes.Length, read);
+        Assert.Equal(childBytes, remaining);
+    }
+
+    private static void AssertNoCaptureBindings(PosixProcessExecutor executor)
+    {
+        var leasesField = typeof(PosixProcessExecutor).GetField(
+            "leases",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(leasesField);
+        var entry = Assert.Single((IEnumerable)leasesField!.GetValue(executor)!)!;
+        var lease = entry.GetType().GetProperty("Value")!.GetValue(entry)!;
+
+        var bindingsField = lease.GetType().GetField(
+            "captureBindings",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(bindingsField);
+        Assert.Empty((ICollection)bindingsField!.GetValue(lease)!);
+
+        foreach (var propertyName in new[] { "Stdout", "Stderr" })
+        {
+            var fanout = lease.GetType().GetProperty(
+                propertyName,
+                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(lease)!;
+            var subscribersField = fanout.GetType().GetField(
+                "subscribers",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(subscribersField);
+            Assert.Empty((ICollection)subscribersField!.GetValue(fanout)!);
+        }
+    }
+    private static string CreateFifo()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "nekostick-trace-fifo-" + Guid.NewGuid().ToString("N"));
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "mkfifo",
+            ArgumentList = { path },
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        });
+        Assert.NotNull(process);
+        process!.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+        return path;
+    }
+
+    private static ProcessLaunchSpecification CreateLaunch(Guid serviceId, string command) =>
+        new(
+            serviceId,
+            "/bin/sh",
+            "/tmp",
+            ImmutableArray.Create("-c", command),
+            new ProcessEnvironment(new Dictionary<string, string>()));
+
+    private static string RequireNativeHelperPath()
+    {
+        if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux())
+        {
+            Assert.Skip("POSIX process helper tests are unsupported on this platform.");
+            return string.Empty;
+        }
+
+        var runtimeIdentifier = RuntimeInformation.RuntimeIdentifier;
+        var baseDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var current = baseDirectory; current is not null; current = current.Parent)
+        {
+            var candidates = new[]
+            {
+                Path.Combine(current.FullName, "Nekolla.Nekostick.NativeHelper"),
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.Host", ".nativehelper", "Debug", runtimeIdentifier, "Nekolla.Nekostick.NativeHelper"),
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Debug", "net10.0", runtimeIdentifier, "Nekolla.Nekostick.NativeHelper"),
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Debug", "net10.0", "Nekolla.Nekostick.NativeHelper")
+            };
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        Assert.Skip("The compiled native process helper is unavailable; build the repository test artifacts first.");
+        return string.Empty;
+    }
+
+    [Fact]
+    public void HostProcessOutputLogSinkUsesItsLoggerCategoryForTraceGate()
+    {
+        var sinkCategory = new CategoryFilteredLogger("Nekolla.Nekostick.Host.HostProcessOutputLogSink");
+        var startupCategory = new CategoryFilteredLogger("Nekolla.Nekostick.Host.Startup");
+
+        Assert.True(new HostProcessOutputLogSink(sinkCategory).IsTraceEnabled);
+        Assert.False(new HostProcessOutputLogSink(startupCategory).IsTraceEnabled);
     }
 
     [Fact]
@@ -129,6 +312,7 @@ public sealed class ProcessOutputStructuredLoggingTests
         Assert.True(startup.IsEnabled(LogLevel.Warning));
         Assert.True(framework.IsEnabled(LogLevel.Information));
     }
+
     [Fact]
     public void EntityFrameworkDebugLogsRequireExplicitOptIn()
     {
@@ -265,49 +449,24 @@ public sealed class ProcessOutputStructuredLoggingTests
                 IPAddress.Loopback
             ]));
     }
-    private static void AssertLine(
+    private static void AssertOutputLine(
         CapturedLog entry,
-        LogLevel expectedLevel,
         Guid serviceId,
         string stream,
         DateTimeOffset timestamp,
         string childOutputText,
         bool truncated)
     {
-        Assert.Equal(expectedLevel, entry.Level);
-        Assert.Equal(1008, entry.EventId.Id);
+        Assert.Equal(LogLevel.Trace, entry.Level);
+        Assert.Equal(1076, entry.EventId.Id);
         Assert.Null(entry.Exception);
         Assert.Equal(serviceId, Assert.IsType<Guid>(entry.Fields["ServiceId"]));
         Assert.Equal(stream, Assert.IsType<string>(entry.Fields["Stream"]));
         Assert.Equal(timestamp, Assert.IsType<DateTimeOffset>(entry.Fields["Timestamp"]));
-        Assert.False(entry.Fields.ContainsKey("Text"));
-        Assert.DoesNotContain(
-            childOutputText,
-            entry.FormattedMessage,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            childOutputText,
-            FormatStructuredFields(entry),
-            StringComparison.Ordinal);
+        Assert.Equal(childOutputText, Assert.IsType<string>(entry.Fields["Text"]));
         Assert.Equal(truncated, Assert.IsType<bool>(entry.Fields["Truncated"]));
-        Assert.False(Assert.IsType<bool>(entry.Fields["Dropped"]));
-        Assert.Equal(0L, Assert.IsType<long>(entry.Fields["DroppedCount"]));
+        Assert.Contains(childOutputText, entry.FormattedMessage, StringComparison.Ordinal);
     }
-
-    private static string FormatStructuredFields(CapturedLog entry) => string.Join(
-        "\n",
-        entry.Fields.Select(pair => $"{pair.Key}={pair.Value}"));
-
-    private static IProcessOutputSink GetOutputSink(PosixProcessExecutor executor)
-    {
-        var outputSinkField = typeof(PosixProcessExecutor).GetField(
-            "outputSink",
-            BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("The executor output sink field is required.");
-        return outputSinkField.GetValue(executor) as IProcessOutputSink
-            ?? throw new InvalidOperationException("The executor must retain an output sink.");
-    }
-
 
     private sealed class DiscardingOutputSink : IProcessOutputSink
     {
@@ -320,26 +479,50 @@ public sealed class ProcessOutputStructuredLoggingTests
         }
     }
 
-    private sealed class ThrowingLogger : ILogger
+    private sealed class RecordingChunkSink : IProcessOutputChunkSink
     {
+        internal TaskCompletionSource<byte[]> FirstChunk { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void OnChunk(ReadOnlyMemory<byte> chunk, DateTimeOffset timestamp) =>
+            FirstChunk.TrySetResult(chunk.ToArray());
+
+        public void OnCompleted(ProcessOutputCompletion completion) { }
+
+        public void OnDropped(long byteCount) { }
+    }
+
+    private sealed class CategoryFilteredLogger : ILogger
+    {
+        internal CategoryFilteredLogger(string category) => Category = category;
+
+        private string Category { get; }
+
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
-        public bool IsEnabled(LogLevel logLevel) => true;
+        public bool IsEnabled(LogLevel logLevel) =>
+            string.Equals(
+                Category,
+                "Nekolla.Nekostick.Host.HostProcessOutputLogSink",
+                StringComparison.Ordinal)
+            && logLevel == LogLevel.Trace;
 
         public void Log<TState>(
             LogLevel logLevel,
             EventId eventId,
             TState state,
             Exception? exception,
-            Func<TState, Exception?, string> formatter) =>
-            throw new InvalidOperationException("logger failure");
+            Func<TState, Exception?, string> formatter)
+        {
+        }
     }
-
     private sealed class CapturingLogger : ILogger
     {
         private readonly List<CapturedLog> entries = [];
 
         internal List<CapturedLog> Entries => entries;
+        internal TaskCompletionSource<CapturedLog> TraceEntry { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -361,12 +544,21 @@ public sealed class ProcessOutputStructuredLoggingTests
                 }
             }
 
-            entries.Add(new CapturedLog(
+            var entry = new CapturedLog(
                 logLevel,
                 eventId,
                 exception,
                 formatter(state, exception),
-                fields));
+                fields);
+            lock (entries)
+            {
+                entries.Add(entry);
+            }
+
+            if (eventId.Id == 1076)
+            {
+                TraceEntry.TrySetResult(entry);
+            }
         }
     }
 
@@ -376,4 +568,6 @@ public sealed class ProcessOutputStructuredLoggingTests
         Exception? Exception,
         string FormattedMessage,
         IReadOnlyDictionary<string, object?> Fields);
+
+
 }
