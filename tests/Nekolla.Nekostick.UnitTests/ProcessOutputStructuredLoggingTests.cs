@@ -272,8 +272,11 @@ public sealed class ProcessOutputStructuredLoggingTests
             {
                 Path.Combine(current.FullName, "Nekolla.Nekostick.NativeHelper"),
                 Path.Combine(current.FullName, "src", "Nekolla.Nekostick.Host", ".nativehelper", "Debug", runtimeIdentifier, "Nekolla.Nekostick.NativeHelper"),
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.Host", ".nativehelper", "Release", runtimeIdentifier, "Nekolla.Nekostick.NativeHelper"),
                 Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Debug", "net10.0", runtimeIdentifier, "Nekolla.Nekostick.NativeHelper"),
-                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Debug", "net10.0", "Nekolla.Nekostick.NativeHelper")
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Release", "net10.0", runtimeIdentifier, "Nekolla.Nekostick.NativeHelper"),
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Debug", "net10.0", "Nekolla.Nekostick.NativeHelper"),
+                Path.Combine(current.FullName, "src", "Nekolla.Nekostick.NativeHelper", "bin", "Release", "net10.0", "Nekolla.Nekostick.NativeHelper")
             };
             foreach (var candidate in candidates)
             {

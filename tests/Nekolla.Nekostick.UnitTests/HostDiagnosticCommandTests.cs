@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Host;
@@ -114,22 +115,31 @@ public sealed class HostDiagnosticCommandTests
 
     private static async Task<ProcessResult> InvokeMainAsync(string[] args)
     {
-        var originalOutput = Console.Out;
-        var originalError = Console.Error;
-        using var output = new StringWriter();
-        using var error = new StringWriter();
-        try
+        // Run the CLI in a child process: Console.SetOut is process-global and races with
+        // the in-process test framework's own console writes, polluting the captured JSON.
+        var hostAssembly = Path.Combine(AppContext.BaseDirectory, "Nekolla.Nekostick.Host.dll");
+        Assert.True(File.Exists(hostAssembly), $"The host assembly is missing at '{hostAssembly}'.");
+
+        var startInfo = new ProcessStartInfo
         {
-            Console.SetOut(output);
-            Console.SetError(error);
-            var exitCode = await Program.Main(args);
-            return new ProcessResult(exitCode, output.ToString(), error.ToString());
-        }
-        finally
+            FileName = "dotnet",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add(hostAssembly);
+        foreach (var argument in args)
         {
-            Console.SetOut(originalOutput);
-            Console.SetError(originalError);
+            startInfo.ArgumentList.Add(argument);
         }
+
+        using var process = Process.Start(startInfo);
+        Assert.NotNull(process);
+        var cancellation = TestContext.Current.CancellationToken;
+        var standardOutput = await process!.StandardOutput.ReadToEndAsync(cancellation);
+        var standardError = await process.StandardError.ReadToEndAsync(cancellation);
+        await process.WaitForExitAsync(cancellation);
+        return new ProcessResult(process.ExitCode, standardOutput, standardError);
     }
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);

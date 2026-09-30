@@ -400,6 +400,13 @@ public sealed class ExtensionServiceOutputFacadeTests
             yield return Path.Combine(
                 current.FullName,
                 "src",
+                "Nekolla.Nekostick.Host",
+                ".nativehelper",
+                "Release",
+                runtimeIdentifier);
+            yield return Path.Combine(
+                current.FullName,
+                "src",
                 "Nekolla.Nekostick.NativeHelper",
                 "bin",
                 "Debug",
@@ -410,7 +417,22 @@ public sealed class ExtensionServiceOutputFacadeTests
                 "src",
                 "Nekolla.Nekostick.NativeHelper",
                 "bin",
+                "Release",
+                "net10.0",
+                runtimeIdentifier);
+            yield return Path.Combine(
+                current.FullName,
+                "src",
+                "Nekolla.Nekostick.NativeHelper",
+                "bin",
                 "Debug",
+                "net10.0");
+            yield return Path.Combine(
+                current.FullName,
+                "src",
+                "Nekolla.Nekostick.NativeHelper",
+                "bin",
+                "Release",
                 "net10.0");
         }
     }

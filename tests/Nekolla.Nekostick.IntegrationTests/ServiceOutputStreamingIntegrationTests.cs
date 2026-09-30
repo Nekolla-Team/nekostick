@@ -141,6 +141,7 @@ public sealed class ServiceOutputStreamingIntegrationTests
             yield return Path.Combine(current.FullName, "tests", "Fixtures.Microservice", "bin", "Debug", "net10.0", fileName);
             yield return Path.Combine(current.FullName, "tests", "Fixtures.Microservice", "bin", "Release", "net10.0", fileName);
             yield return Path.Combine(current.FullName, "src", "Nekolla.Nekostick.Host", ".nativehelper", "Debug", runtimeIdentifier, fileName);
+            yield return Path.Combine(current.FullName, "src", "Nekolla.Nekostick.Host", ".nativehelper", "Release", runtimeIdentifier, fileName);
         }
     }
 
