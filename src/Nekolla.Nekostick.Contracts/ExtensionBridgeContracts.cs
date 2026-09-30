@@ -113,7 +113,7 @@ public interface IExtensionHostBridge14 : IExtensionHostBridge13
     /// <summary>Gets the dependency resolution information for the calling extension.</summary>
     IExtensionDependencyApi Dependencies { get; }
 
-    /// <summary>Gets caller-owned service stdout/stderr streaming operations.</summary>
+    /// <summary>Gets live stdout/stderr streaming operations for configured services.</summary>
     IExtensionServiceOutputApi ServiceOutput { get; }
 }
 
