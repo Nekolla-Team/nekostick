@@ -36,10 +36,10 @@ public enum ExtensionServiceOutputCode
     /// <summary>The requested output stream or subscription was opened.</summary>
     Opened,
 
-    /// <summary>The requested service was not found or is not owned by the caller.</summary>
+    /// <summary>The identifier is invalid or no configured service has that identifier.</summary>
     NotFound,
 
-    /// <summary>The requested service is not currently running.</summary>
+    /// <summary>No live or retained output pump is available for the configured service.</summary>
     NotRunning,
 
     /// <summary>Service output is not supported for the requested service.</summary>
@@ -53,7 +53,7 @@ public enum ExtensionServiceOutputCode
 public sealed record ExtensionServiceOutputChunk
 {
     /// <summary>Creates a service-output chunk.</summary>
-    /// <param name="serviceId">The caller-owned service identifier.</param>
+    /// <param name="serviceId">The identifier of the service that emitted the bytes.</param>
     /// <param name="stream">The service-output stream that emitted the bytes.</param>
     /// <param name="timestamp">The time at which the bytes were captured.</param>
     /// <param name="data">The raw bytes captured from the service.</param>
@@ -75,7 +75,7 @@ public sealed record ExtensionServiceOutputChunk
         Data = data;
     }
 
-    /// <summary>Gets the caller-owned service identifier.</summary>
+    /// <summary>Gets the identifier of the service that emitted the bytes.</summary>
     public Guid ServiceId { get; }
 
     /// <summary>Gets the service-output stream that emitted the bytes.</summary>
@@ -88,7 +88,7 @@ public sealed record ExtensionServiceOutputChunk
     public byte[] Data { get; }
 }
 
-/// <summary>Represents a caller-owned handle for one service-output subscription.</summary>
+/// <summary>Represents a disposable handle for one service-output subscription.</summary>
 /// <remarks>
 /// <see cref="IDisposable.Dispose"/> detaches the subscription on a best-effort basis; callbacks may still be
 /// in flight. <see cref="IAsyncDisposable.DisposeAsync"/> additionally awaits quiescence of any in-flight
@@ -216,17 +216,20 @@ public sealed record ExtensionServiceOutputSubscriptionResult
     public IExtensionServiceOutputSubscription? Subscription { get; }
 }
 
-/// <summary>Provides caller-owned service stdout/stderr stream and subscription operations.</summary>
+/// <summary>Provides stdout/stderr streams and subscriptions for configured services.</summary>
 /// <remarks>
-/// Output content excludes helper protocol markers. Each stream or subscription is bound to the current
-/// process instance; a stream reaches end-of-stream and a sink receives completion when that process exits.
-/// The caller must own the service. Domain failures are returned through result codes rather than exceptions.
-/// Ownership is verified when <see cref="OpenStreamAsync"/> or <see cref="SubscribeAsync"/> is called. An
-/// established stream or subscription keeps receiving output from the bound process generation until that
-/// generation exits, even if the service is later removed from or reassigned in the caller's configuration.
-/// Output produced before <see cref="OpenStreamAsync"/> or <see cref="SubscribeAsync"/> is not replayed.
-/// Subscribing moments after the pump completes returns <see cref="ExtensionServiceOutputCode.Opened"/>,
-/// followed by immediate <see cref="IExtensionServiceOutputSink.OnCompleted"/>; it does not return
+/// Any loaded extension may open or subscribe to the live stdout/stderr of any service in the current host
+/// configuration. Output content excludes helper protocol markers. Each stream or subscription is bound to
+/// the current process instance; a stream reaches end-of-stream and a sink receives completion when that
+/// process exits. When the executor is available, a configured service without a live or retained output pump returns
+/// <see cref="ExtensionServiceOutputCode.NotRunning"/>. Domain failures are returned through result codes
+/// rather than exceptions. Configuration is checked when <see cref="OpenStreamAsync"/> or
+/// <see cref="SubscribeAsync"/> is called. An established stream or subscription keeps receiving output from
+/// the bound process generation until that generation exits, even if the service is later removed from the
+/// configuration. Output produced before <see cref="OpenStreamAsync"/> or <see cref="SubscribeAsync"/> is not
+/// replayed. Subscribing moments after the pump completes returns
+/// <see cref="ExtensionServiceOutputCode.Opened"/>, followed by immediate
+/// <see cref="IExtensionServiceOutputSink.OnCompleted"/>; it does not return
 /// <see cref="ExtensionServiceOutputCode.NotRunning"/>.
 /// The <see cref="System.IO.Stream"/> from <see cref="OpenStreamAsync"/> is read-only, non-seekable, one
 /// per call, and caller-disposed. It may contain silent byte gaps after buffer overflow; use the sink API
@@ -234,9 +237,9 @@ public sealed record ExtensionServiceOutputSubscriptionResult
 /// </remarks>
 public interface IExtensionServiceOutputApi
 {
-    /// <summary>Opens a readable raw output stream for one caller-owned running service.</summary>
-    /// <param name="serviceId">The caller-owned service identifier.</param>
-    /// <param name="stream">The standard output stream to open.</param>
+    /// <summary>Opens a readable raw output stream for one configured running service.</summary>
+    /// <param name="serviceId">The configured service identifier.</param>
+    /// <param name="stream">The output stream to open (stdout or stderr).</param>
     /// <param name="cancellationToken">The operation cancellation token.</param>
     /// <returns>A safe result containing the readable stream when opened.</returns>
     ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
@@ -244,9 +247,9 @@ public interface IExtensionServiceOutputApi
         ExtensionServiceOutputStream stream,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Subscribes to raw output chunks for one caller-owned running service.</summary>
-    /// <param name="serviceId">The caller-owned service identifier.</param>
-    /// <param name="stream">The standard output stream to observe.</param>
+    /// <summary>Subscribes to raw output chunks for one configured running service.</summary>
+    /// <param name="serviceId">The configured service identifier.</param>
+    /// <param name="stream">The output stream to subscribe to (stdout or stderr).</param>
     /// <param name="sink">The sink receiving chunks and lifecycle notifications.</param>
     /// <param name="cancellationToken">The operation cancellation token.</param>
     /// <returns>A safe result containing the subscription handle when subscribed.</returns>

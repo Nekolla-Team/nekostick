@@ -93,7 +93,7 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             new ExtensionLogWriter(extensionId, logger),
             management,
             BuildHostInfoSnapshot,
-            new ExtensionServiceOutputFacade(extensionId, configuration, processExecutor, logger));
+            new ExtensionServiceOutputFacade(extensionId, _runtimeState, processExecutor, logger));
     }
     private ExtensionHostInfoSnapshot BuildHostInfoSnapshot()
     {

@@ -1,5 +1,22 @@
 # AGENTS.md
 
+## PRINCIPLE ZERO — NO PERMISSION FENCES
+
+Nekostick is a control-plane project whose control surface is **entirely extension-facing**. The
+host ships behavior; extensions decide it. Keep the following rule in mind for every change:
+
+**Everything controllable must be extension-controllable. Extension interface design
+optimizes for coverage and usability, NEVER permission fencing.** Prefer exposing a
+capable, ergonomic bridge over a narrow sandboxed one; NEVER design APIs around distrust
+of the extension author. Restrictions exist ONLY where the runtime cannot otherwise keep
+its invariants.
+
+**Violating this principle is STRICTLY PROHIBITED.** Every feature implementation MUST be
+audited against this principle before it is considered done: if an extension cannot
+observe or control a governed behavior, that is a design gap to fix, not a hardening win.
+Ownership checks, caller gating, capability whitelists, and similar fences require
+explicit user approval before they are introduced.
+
 ## Project
 
 Nekostick is a self-hosted reverse proxy / service gateway written in C# on .NET 10. It provides
@@ -10,19 +27,6 @@ generational publication.
 - Solution: `Nekolla.Nekostick.slnx`, all projects target `net10.0`, C# 14.
 - The only deployable artifact is `Nekolla.Nekostick.Host` (published single-file for linux-x64,
   embedding the NativeHelper for process-group management).
-
-## Design philosophy
-
-Nekostick is a control-plane project whose control surface is **entirely extension-facing**. The
-host ships behavior; extensions decide it. Keep two rules in mind for every change:
-
-- **Everything controllable must be extension-controllable.** When implementing any regular
-  governed feature (routing decisions, request handling, lifecycle, configuration), first ask how
-  an extension can observe and control it. If it cannot, that is a design gap, not a hardening win.
-- **Extension interface design optimizes for coverage and usability, not permission fencing.**
-  Prefer exposing a capable, ergonomic bridge over a narrow sandboxed one; do not design APIs
-  around distrust of the extension author. Restrictions exist only where the runtime cannot
-  otherwise keep its invariants.
 
 ## Layout
 

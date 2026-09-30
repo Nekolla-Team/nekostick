@@ -4,7 +4,6 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
@@ -102,18 +101,36 @@ public sealed class ServiceOutputStreamingIntegrationTests
 
     private static ExtensionServiceOutputFacade CreateOutputFacade(PosixProcessExecutor executor)
     {
-        var store = new OwnedStore();
-        var configuration = new ExtensionConfigurationFacade(
-            "fixture.extension.deterministic",
-            new SingleScopeFactory(store),
-            new HostRuntimeState(
-                new HostConfigurationSnapshotHolder(),
-                new HostNodeOptions(false, false, false)),
-            new HostApiVersion(1, 4, 0),
-            static _ => true);
+        var snapshot = new HostConfigurationSnapshot(
+            1,
+            new GlobalSettingsConfiguration(version: 1),
+            ImmutableArray<RouteConfiguration>.Empty,
+            ImmutableArray.Create(new ServiceConfiguration(
+                ServiceId,
+                enabled: true,
+                fileName: "/bin/sh",
+                argumentList: ImmutableArray<string>.Empty,
+                workingDirectory: "/tmp",
+                environment: ImmutableDictionary<string, string>.Empty,
+                startMode: ServiceStartMode.Lazy,
+                restartPolicy: ServiceRestartPolicy.Never,
+                healthCheck: new ServiceHealthCheckConfiguration(
+                    ServiceHealthCheckType.Process,
+                    httpPath: null,
+                    timeout: TimeSpan.FromSeconds(1)),
+                createdAt: DateTimeOffset.UnixEpoch,
+                updatedAt: DateTimeOffset.UnixEpoch,
+                version: 1)),
+            ImmutableArray<ExtensionRecordConfiguration>.Empty,
+            ImmutableArray<ExtensionSettingsConfiguration>.Empty);
+        var holder = new HostConfigurationSnapshotHolder();
+        var serviceOwners = ImmutableDictionary<Guid, string?>.Empty
+            .Add(ServiceId, "another.extension");
+        Assert.True(holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
+        var runtimeState = new HostRuntimeState(holder, new HostNodeOptions(false, false, false));
         return new ExtensionServiceOutputFacade(
             "fixture.extension.deterministic",
-            configuration,
+            runtimeState,
             executor,
             NullLogger.Instance);
     }
@@ -280,77 +297,4 @@ public sealed class ServiceOutputStreamingIntegrationTests
         public void OnDropped(long byteCount) => _inner.OnDropped(byteCount);
     }
 
-    private sealed class OwnedStore : IExtensionOwnedConfigurationApi
-    {
-        private static readonly ExtensionConfigurationSnapshot Snapshot =
-            new(
-                0,
-                [],
-                [new ExtensionServiceConfiguration(
-                    ServiceId,
-                    true,
-                    "/bin/sh",
-                    [],
-                    "/tmp",
-                    ServiceStartMode.Lazy,
-                    ServiceRestartPolicy.Never,
-                    new ServiceHealthCheckConfiguration(ServiceHealthCheckType.Process, null, TimeSpan.FromSeconds(1)),
-                    DateTimeOffset.UtcNow,
-                    DateTimeOffset.UtcNow,
-                    0)],
-                null);
-
-        public ValueTask<ConfigurationReadResult<ExtensionConfigurationSnapshot>> ReadOwnedAsync(
-            string extensionId,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ExtensionConfigurationSnapshot>.Success(Snapshot));
-
-        public ValueTask<ConfigurationWriteResult> ApplyOwnedAsync(
-            string extensionId,
-            long expectedVersion,
-            ExtensionConfigurationChangeSet changes,
-            Func<string, bool>? handlerIsOwned = null,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
-
-        public ValueTask<ConfigurationReadResult<ExtensionSettingsConfiguration>> ReadOwnedSettingsAsync(
-            string extensionId,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(new ConfigurationError(ConfigurationErrorCode.NoSettings)));
-
-        public ValueTask<ConfigurationWriteResult> WriteOwnedSettingsAsync(
-            string extensionId,
-            long expectedVersion,
-            ExtensionSettingsConfiguration settings,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
-    }
-
-    private sealed class SingleScopeFactory : IServiceScopeFactory
-    {
-        private readonly IExtensionOwnedConfigurationApi _store;
-
-        public SingleScopeFactory(IExtensionOwnedConfigurationApi store) => _store = store;
-
-        public IServiceScope CreateScope() => new Scope(_store);
-    }
-
-    private sealed class Scope : IServiceScope
-    {
-        public Scope(IExtensionOwnedConfigurationApi store) => ServiceProvider = new Provider(store);
-
-        public IServiceProvider ServiceProvider { get; }
-
-        public void Dispose() { }
-    }
-
-    private sealed class Provider : IServiceProvider
-    {
-        private readonly IExtensionOwnedConfigurationApi _store;
-
-        public Provider(IExtensionOwnedConfigurationApi store) => _store = store;
-
-        public object? GetService(Type serviceType) =>
-            serviceType == typeof(IExtensionOwnedConfigurationApi) ? _store : null;
-    }
 }

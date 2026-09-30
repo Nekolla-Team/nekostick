@@ -179,7 +179,7 @@ ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
     CancellationToken cancellationToken = default);
 ```
 
-两个操作都只接受调用扩展**当前拥有**的 service。业务失败通过结果对象和 `ExtensionServiceOutputCode` 表达；取消仍按 .NET 的 `CancellationToken` 约定传播。
+任何已加载扩展都可以打开或订阅当前配置中任意已配置 service 的实时 stdout/stderr。业务失败通过结果对象和 `ExtensionServiceOutputCode` 表达；取消仍按 .NET 的 `CancellationToken` 约定传播。
 
 ### `OpenStreamAsync`：读取原始输出流
 
@@ -249,12 +249,12 @@ public interface IExtensionServiceOutputSink
 
 回调内部不得同步等待自己的 `DisposeAsync()`（例如调用 `.GetAwaiter().GetResult()`），否则会发生 self-wait deadlock。若必须从回调中释放，调用 `Dispose()`，或 fire-and-forget `DisposeAsync()`，不要在回调线程上同步等待其完成。
 
-### 属主检查与进程代次绑定
+### 配置存在性与进程代次绑定
 
-Host 在 `OpenStreamAsync` 或 `SubscribeAsync` 开始时，根据配置快照检查 service 是否属于调用扩展。这个 ownership check 只发生在打开/订阅时：操作成功后，即使之后配置移除了属主关系，已返回的 stream 或 subscription 仍继续接收，直到它绑定的进程代次退出或 Host teardown；不会对每个 chunk 重新执行属主检查。
+Host 在 `OpenStreamAsync` 或 `SubscribeAsync` 开始时，根据当前完整配置快照检查 service 是否已配置。任何已加载扩展都可读取任意已配置 service 的输出。这个存在性检查只发生在打开/订阅时：操作成功后，即使之后配置移除了该 service，已返回的 stream 或 subscription 仍继续接收，直到它绑定的进程代次退出或 Host teardown；不会对每个 chunk 重新检查配置。
 
-- service ID 不存在、不是调用扩展属主，或输入 ID 不是有效的 UUID v7 → `NotFound`。
-- service 属于调用扩展但当前没有运行的进程代次 → `NotRunning`。
+- service ID 不存在于当前配置，或输入 ID 不是有效的 UUID v7 → `NotFound`。
+- service 已配置但 executor 没有对应的 live/retained output pump → `NotRunning`。
 - 成功绑定后，service 的 restart 只建立新代次；旧 stream/subscription 不会跟随迁移。
 - 在 pump 已结束但结果尚未交付的窄竞态中，成功的 open/subscribe 返回 `Opened` 并立即 EOF/完成；它不会重放旧代次的 output。
 
@@ -265,10 +265,10 @@ Host 在 `OpenStreamAsync` 或 `SubscribeAsync` 开始时，根据配置快照�
 | `ExtensionServiceOutputCode` | 含义 |
 | --- | --- |
 | `Opened` | 已打开 stream 或已建立 sink subscription；`Succeeded` 为 `true`。 |
-| `NotFound` | service 不存在、不属于调用扩展，或 service ID 无效。 |
-| `NotRunning` | service 属于调用扩展，但当前没有可绑定的运行进程。 |
+| `NotFound` | service 未配置，或 service ID 无效。 |
+| `NotRunning` | service 已配置，但 executor 没有可绑定的 live/retained output pump。 |
 | `Unsupported` | 协商版本、Host 能力或当前 executor 不支持服务输出。 |
-| `Failed` | Host 在 ownership 检查之后执行打开/订阅时发生其他运行时失败。 |
+| `Failed` | Host 在配置存在性检查之后执行打开/订阅时发生其他运行时失败。 |
 | `None` | 枚举的默认/保留值，不表示成功的打开或订阅。 |
 
 这些结果码属于业务结果，不应通过异常控制正常的不存在、未运行或不支持分支。

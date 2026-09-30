@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
@@ -21,45 +20,94 @@ public sealed class ExtensionServiceOutputFacadeTests
         new("0198a1af-6e94-7b25-9732-59c9075b14f6");
 
     [Fact]
-    public async Task OwnershipMatrixFailsClosedWithoutThrowing()
+    public async Task InvalidAndUnconfiguredServiceIdsReturnNotFound()
     {
-        var invalid = await CreateFacade(owned: true, executor: null)
-            .OpenStreamAsync(Guid.Empty, ExtensionServiceOutputStream.Stdout, TestContext.Current.CancellationToken);
+        await using var facade = CreateFacade(configured: false, executor: null);
+
+        var invalid = await facade.OpenStreamAsync(
+            Guid.Empty,
+            ExtensionServiceOutputStream.Stdout,
+            TestContext.Current.CancellationToken);
         Assert.False(invalid.Succeeded);
         Assert.Equal(ExtensionServiceOutputCode.NotFound, invalid.Code);
         Assert.NotEqual(Guid.Empty, invalid.ServiceId);
         Assert.True(UuidV7.IsVersion7(invalid.ServiceId));
 
-        await using (var unowned = CreateFacade(owned: false, executor: null))
-        {
-            var result = await unowned.OpenStreamAsync(
-                ServiceId,
-                ExtensionServiceOutputStream.Stdout,
-                TestContext.Current.CancellationToken);
-            Assert.False(result.Succeeded);
-            Assert.Equal(ExtensionServiceOutputCode.NotFound, result.Code);
-        }
+        var open = await facade.OpenStreamAsync(
+            ServiceId,
+            ExtensionServiceOutputStream.Stdout,
+            TestContext.Current.CancellationToken);
+        Assert.False(open.Succeeded);
+        Assert.Equal(ExtensionServiceOutputCode.NotFound, open.Code);
 
-        await using (var nonPosix = CreateFacade(owned: true, executor: null))
+        var subscription = await facade.SubscribeAsync(
+            ServiceId,
+            ExtensionServiceOutputStream.Stdout,
+            new RecordingSink(),
+            TestContext.Current.CancellationToken);
+        Assert.False(subscription.Succeeded);
+        Assert.Equal(ExtensionServiceOutputCode.NotFound, subscription.Code);
+    }
+
+    [Fact]
+    public async Task ConfiguredServiceWithoutExecutorReturnsUnsupported()
+    {
+        await using var facade = CreateFacade(configured: true, executor: null);
+
+        var result = await facade.SubscribeAsync(
+            ServiceId,
+            ExtensionServiceOutputStream.Stdout,
+            new RecordingSink(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(ExtensionServiceOutputCode.Unsupported, result.Code);
+    }
+
+    [Fact]
+    public async Task ForeignConfiguredServiceCanBeOpened()
+    {
+        var helperPath = RequireNativeHelperPath();
+        var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
+        await using var facade = CreateFacade(
+            configured: true,
+            executor: executor,
+            serviceOwnerExtensionId: "another.extension");
+
+        try
         {
-            var result = await nonPosix.SubscribeAsync(
+            var start = await executor.StartAsync(
+                CreateLaunch("sleep 3"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(ProcessOperationStatus.Accepted, start.Status);
+
+            var result = await facade.OpenStreamAsync(
                 ServiceId,
                 ExtensionServiceOutputStream.Stdout,
-                new RecordingSink(),
                 TestContext.Current.CancellationToken);
-            Assert.False(result.Succeeded);
-            Assert.Equal(ExtensionServiceOutputCode.Unsupported, result.Code);
+            Assert.True(result.Succeeded);
+            Assert.Equal(ExtensionServiceOutputCode.Opened, result.Code);
+            Assert.NotNull(result.Stream);
+            await result.Stream!.DisposeAsync();
+        }
+        finally
+        {
+            await executor.StopAsync(ServiceId, TimeSpan.FromSeconds(2), CancellationToken.None);
+            await executor.CleanupAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
         }
     }
 
     [Fact]
-    public async Task OwnedStoppedServiceReturnsNotRunning()
+    public async Task ConfiguredStoppedServiceReturnsNotRunning()
     {
         var helperPath = RequireNativeHelperPath();
         var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        await using var facade = CreateFacade(owned: true, executor);
+        await using var facade = CreateFacade(configured: true, executor: executor);
 
-        var result = await facade.OpenStreamAsync(ServiceId, ExtensionServiceOutputStream.Stdout, TestContext.Current.CancellationToken);
+        var result = await facade.OpenStreamAsync(
+            ServiceId,
+            ExtensionServiceOutputStream.Stdout,
+            TestContext.Current.CancellationToken);
 
         Assert.False(result.Succeeded);
         Assert.Equal(ExtensionServiceOutputCode.NotRunning, result.Code);
@@ -70,7 +118,7 @@ public sealed class ExtensionServiceOutputFacadeTests
     {
         var helperPath = RequireNativeHelperPath();
         var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        await using var facade = CreateFacade(owned: true, executor);
+        await using var facade = CreateFacade(configured: true, executor: executor);
         var fifoPath = CreateFifo();
         var captureStarted = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -146,7 +194,7 @@ public sealed class ExtensionServiceOutputFacadeTests
     {
         var helperPath = RequireNativeHelperPath();
         var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        await using var facade = CreateFacade(owned: true, executor);
+        await using var facade = CreateFacade(configured: true, executor: executor);
         var resources = typeof(ExtensionServiceOutputFacade).GetField(
             "_resources",
             BindingFlags.Instance | BindingFlags.NonPublic);
@@ -179,7 +227,7 @@ public sealed class ExtensionServiceOutputFacadeTests
     {
         var helperPath = RequireNativeHelperPath();
         var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        await using var facade = CreateFacade(owned: true, executor);
+        await using var facade = CreateFacade(configured: true, executor: executor);
         var pending = typeof(ExtensionServiceOutputFacade).GetField(
             "_pendingDisposals",
             BindingFlags.Instance | BindingFlags.NonPublic);
@@ -261,7 +309,7 @@ public sealed class ExtensionServiceOutputFacadeTests
     [Fact]
     public async Task QuiescedSyncDisposedSubscriptionStaysPrunedAcrossRepeatedAsyncDispose()
     {
-        var facade = CreateFacade(owned: true, executor: null);
+        var facade = CreateFacade(configured: true, executor: null);
         var pending = typeof(ExtensionServiceOutputFacade).GetField(
             "_pendingDisposals",
             BindingFlags.Instance | BindingFlags.NonPublic);
@@ -315,23 +363,31 @@ public sealed class ExtensionServiceOutputFacadeTests
     }
 
     private static ExtensionServiceOutputFacade CreateFacade(
-        bool owned,
-        PosixProcessExecutor? executor)
+        bool configured,
+        PosixProcessExecutor? executor,
+        string? serviceOwnerExtensionId = "fixture.extension.deterministic")
     {
-        var store = new OwnedConfigurationStore(owned);
-        var scopeFactory = new SingleScopeFactory(store);
+        var services = configured
+            ? ImmutableArray.Create(CreateServiceConfiguration())
+            : ImmutableArray<Nekolla.Nekostick.Contracts.ServiceConfiguration>.Empty;
+        var snapshot = new HostConfigurationSnapshot(
+            1,
+            new GlobalSettingsConfiguration(version: 1),
+            ImmutableArray<RouteConfiguration>.Empty,
+            services,
+            ImmutableArray<ExtensionRecordConfiguration>.Empty,
+            ImmutableArray<ExtensionSettingsConfiguration>.Empty);
+        var holder = new HostConfigurationSnapshotHolder();
+        var serviceOwners = configured
+            ? ImmutableDictionary<Guid, string?>.Empty.Add(ServiceId, serviceOwnerExtensionId)
+            : ImmutableDictionary<Guid, string?>.Empty;
+        Assert.True(holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
         var runtimeState = new HostRuntimeState(
-            new HostConfigurationSnapshotHolder(),
+            holder,
             new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));
-        var configuration = new ExtensionConfigurationFacade(
-            "fixture.extension.deterministic",
-            scopeFactory,
-            runtimeState,
-            HostApiVersion.Current,
-            static _ => true);
         return new ExtensionServiceOutputFacade(
             "fixture.extension.deterministic",
-            configuration,
+            runtimeState,
             executor,
             NullLogger.Instance);
     }
@@ -505,86 +561,21 @@ public sealed class ExtensionServiceOutputFacadeTests
         internal void Release() => release.TrySetResult(null);
     }
 
-    private sealed class OwnedConfigurationStore : IExtensionOwnedConfigurationApi
-    {
-        private readonly ConfigurationReadResult<ExtensionConfigurationSnapshot> _result;
-
-        public OwnedConfigurationStore(bool owned)
-        {
-            var services = owned
-                ? ImmutableArray.Create(CreateServiceConfiguration())
-                : ImmutableArray<ExtensionServiceConfiguration>.Empty;
-            _result = ConfigurationReadResult<ExtensionConfigurationSnapshot>.Success(
-                new ExtensionConfigurationSnapshot(0, [], services, null));
-        }
-
-        public ValueTask<ConfigurationReadResult<ExtensionConfigurationSnapshot>> ReadOwnedAsync(
-            string extensionId,
-            CancellationToken cancellationToken = default) => ValueTask.FromResult(_result);
-
-        public ValueTask<ConfigurationWriteResult> ApplyOwnedAsync(
-            string extensionId,
-            long expectedVersion,
-            ExtensionConfigurationChangeSet changes,
-            Func<string, bool>? handlerIsOwned = null,
-            CancellationToken cancellationToken = default) => UnsupportedWrite();
-
-        public ValueTask<ConfigurationReadResult<ExtensionSettingsConfiguration>> ReadOwnedSettingsAsync(
-            string extensionId,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.NoSettings)));
-
-        public ValueTask<ConfigurationWriteResult> WriteOwnedSettingsAsync(
-            string extensionId,
-            long expectedVersion,
-            ExtensionSettingsConfiguration settings,
-            CancellationToken cancellationToken = default) => UnsupportedWrite();
-
-        private static ValueTask<ConfigurationWriteResult> UnsupportedWrite() =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported)));
-    }
-
-    private static ExtensionServiceConfiguration CreateServiceConfiguration() =>
+    private static Nekolla.Nekostick.Contracts.ServiceConfiguration CreateServiceConfiguration() =>
         new(
             ServiceId,
             enabled: true,
-            "/bin/sh",
-            ImmutableArray.Create("-c", "sleep 3"),
-            "/tmp",
-            ServiceStartMode.Lazy,
-            ContractRestartPolicy.Never,
-            new ServiceHealthCheckConfiguration(ServiceHealthCheckType.Process, null, TimeSpan.FromSeconds(1)),
-            DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow,
-            0);
-
-    private sealed class SingleScopeFactory : IServiceScopeFactory
-    {
-        private readonly IExtensionOwnedConfigurationApi _store;
-
-        public SingleScopeFactory(IExtensionOwnedConfigurationApi store) => _store = store;
-
-        public IServiceScope CreateScope() => new Scope(_store);
-    }
-
-    private sealed class Scope : IServiceScope
-    {
-        public Scope(IExtensionOwnedConfigurationApi store) => ServiceProvider = new Provider(store);
-
-        public IServiceProvider ServiceProvider { get; }
-
-        public void Dispose() { }
-    }
-
-    private sealed class Provider : IServiceProvider
-    {
-        private readonly IExtensionOwnedConfigurationApi _store;
-
-        public Provider(IExtensionOwnedConfigurationApi store) => _store = store;
-
-        public object? GetService(Type serviceType) =>
-            serviceType == typeof(IExtensionOwnedConfigurationApi) ? _store : null;
-    }
+            fileName: "/bin/sh",
+            argumentList: ImmutableArray<string>.Empty,
+            workingDirectory: "/tmp",
+            environment: ImmutableDictionary<string, string>.Empty,
+            startMode: ServiceStartMode.Lazy,
+            restartPolicy: ContractRestartPolicy.Never,
+            healthCheck: new ServiceHealthCheckConfiguration(
+                ServiceHealthCheckType.Process,
+                httpPath: null,
+                timeout: TimeSpan.FromSeconds(1)),
+            createdAt: DateTimeOffset.UnixEpoch,
+            updatedAt: DateTimeOffset.UnixEpoch,
+            version: 1);
 }

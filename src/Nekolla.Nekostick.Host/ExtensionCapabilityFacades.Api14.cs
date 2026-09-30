@@ -10,7 +10,7 @@ namespace Nekolla.Nekostick.Host;
 internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi, IExtensionServiceOutputCleanup
 {
     private readonly string _extensionId;
-    private readonly ExtensionConfigurationFacade _configuration;
+    private readonly HostRuntimeState _runtimeState;
     private readonly PosixProcessExecutor? _executor;
     private readonly ILogger _logger;
     private readonly object _gate = new();
@@ -21,19 +21,19 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
 
     internal ExtensionServiceOutputFacade(
         string extensionId,
-        ExtensionConfigurationFacade configuration,
+        HostRuntimeState runtimeState,
         PosixProcessExecutor? executor,
         ILogger? logger = null)
     {
         _extensionId = string.IsNullOrWhiteSpace(extensionId)
             ? throw new ArgumentException("An extension identifier is required.", nameof(extensionId))
             : extensionId;
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
         _executor = executor;
         _logger = logger ?? NullLogger.Instance;
     }
 
-    public async ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
+    public ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
         Guid serviceId,
         ExtensionServiceOutputStream stream,
         CancellationToken cancellationToken = default)
@@ -43,21 +43,24 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
             return OpenFailure(Guid.CreateVersion7(), ExtensionServiceOutputCode.NotFound);
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return ValueTask.FromCanceled<ExtensionServiceOutputStreamResult>(cancellationToken);
+        }
+
         if (!TryMapStream(stream, out var processStream))
         {
             return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
         }
 
-        var ownership = await CheckOwnershipAsync(serviceId, cancellationToken).ConfigureAwait(false);
-        if (ownership == OwnershipCheck.NotFound)
+        if (cancellationToken.IsCancellationRequested)
         {
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.NotFound);
+            return ValueTask.FromCanceled<ExtensionServiceOutputStreamResult>(cancellationToken);
         }
 
-        if (ownership == OwnershipCheck.Failed)
+        if (!IsConfigured(serviceId))
         {
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
+            return OpenFailure(serviceId, ExtensionServiceOutputCode.NotFound);
         }
 
         if (IsDisposed())
@@ -84,15 +87,15 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
                 return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
             }
 
-            return new ExtensionServiceOutputStreamResult(
+            return ValueTask.FromResult(new ExtensionServiceOutputStreamResult(
                 true,
                 ExtensionServiceOutputCode.Opened,
                 serviceId,
-                trackedOutput);
+                trackedOutput));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw;
+            return ValueTask.FromCanceled<ExtensionServiceOutputStreamResult>(cancellationToken);
         }
         catch (Exception exception)
         {
@@ -118,15 +121,10 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
             return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Failed);
         }
 
-        var ownership = await CheckOwnershipAsync(serviceId, cancellationToken).ConfigureAwait(false);
-        if (ownership == OwnershipCheck.NotFound)
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsConfigured(serviceId))
         {
             return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.NotFound);
-        }
-
-        if (ownership == OwnershipCheck.Failed)
-        {
-            return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Failed);
         }
 
         if (IsDisposed())
@@ -264,32 +262,6 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         }
     }
 
-    private async ValueTask<OwnershipCheck> CheckOwnershipAsync(
-        Guid serviceId,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var owned = await _configuration.ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (!owned.IsSuccess || owned.Value is not { } snapshot)
-            {
-                return OwnershipCheck.Failed;
-            }
-
-            return snapshot.Services.Any(service => service.Id == serviceId)
-                ? OwnershipCheck.Owned
-                : OwnershipCheck.NotFound;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            LogCapabilityFailure(exception, nameof(CheckOwnershipAsync), serviceId);
-            return OwnershipCheck.Failed;
-        }
-    }
 
     private bool TryTrack(IDisposable resource)
     {
@@ -358,6 +330,25 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         }
     }
 
+    private bool IsConfigured(Guid serviceId)
+    {
+        var snapshot = _runtimeState.CurrentSnapshot;
+        if (snapshot is null)
+        {
+            return false;
+        }
+
+        foreach (var service in snapshot.Services)
+        {
+            if (service.Id == serviceId)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool TryMapStream(
         ExtensionServiceOutputStream stream,
         out ProcessOutputStream processStream)
@@ -376,22 +367,16 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         }
     }
 
-    private static ExtensionServiceOutputStreamResult OpenFailure(
+    private static ValueTask<ExtensionServiceOutputStreamResult> OpenFailure(
         Guid serviceId,
         ExtensionServiceOutputCode code) =>
-        new(false, code, serviceId, null);
+        ValueTask.FromResult(new ExtensionServiceOutputStreamResult(false, code, serviceId, null));
 
     private static ExtensionServiceOutputSubscriptionResult SubscriptionFailure(
         Guid serviceId,
         ExtensionServiceOutputCode code) =>
         new(false, code, serviceId, null);
 
-    private enum OwnershipCheck
-    {
-        Owned,
-        NotFound,
-        Failed
-    }
 
     private sealed class TrackingStream : Stream
     {
