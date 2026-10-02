@@ -389,7 +389,8 @@ public sealed class PostgresExtensionManagementTests
             NullLogger<HostConfigurationPublisher>.Instance,
             factory);
 
-        Assert.True(
+        Assert.Equal(
+            PublishOutcome.Published,
             await publisher.PublishAsync(initial.Value, cancellationToken: cancellationToken));
 
         var status = manager.GetStatus(fixture.ExtensionId);

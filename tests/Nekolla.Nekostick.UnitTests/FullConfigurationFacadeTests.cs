@@ -122,7 +122,14 @@ public sealed class FullConfigurationFacadeTests
             ImmutableArray<ServiceConfiguration>.Empty,
             ImmutableArray<ExtensionRecordConfiguration>.Empty,
             ImmutableArray<ExtensionSettingsConfiguration>.Empty);
-        Assert.True(staged ? holder.TryStage(snapshot) : holder.TryReplace(snapshot));
+        if (staged)
+        {
+            Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(snapshot));
+        }
+        else
+        {
+            Assert.True(holder.TryReplace(snapshot));
+        }
 
         var state = new HostRuntimeState(
             holder,

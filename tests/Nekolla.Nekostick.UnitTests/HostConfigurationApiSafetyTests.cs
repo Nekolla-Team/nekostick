@@ -126,7 +126,7 @@ public sealed class HostConfigurationSafetyTests
             default,
             default,
             default);
-        Assert.True(holder.TryStage(candidate));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(candidate));
 
         var state = CreateRuntimeState(holder, readOnly: false);
         state.BeginStagedConfigurationWrites();
@@ -150,7 +150,7 @@ public sealed class HostConfigurationSafetyTests
     public void StagedRuntimeAuthorizationIsRevokedByCleanupAndFailure()
     {
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryStage(new HostConfigurationSnapshot(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(new HostConfigurationSnapshot(
             1,
             new GlobalSettingsConfiguration(version: 1),
             default,
@@ -178,7 +178,7 @@ public sealed class HostConfigurationSafetyTests
     public void ReadOnlyStagedRuntimeDoesNotAuthorizeExtensionConfigurationWrites()
     {
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryStage(new HostConfigurationSnapshot(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(new HostConfigurationSnapshot(
             1,
             new GlobalSettingsConfiguration(version: 1),
             default,

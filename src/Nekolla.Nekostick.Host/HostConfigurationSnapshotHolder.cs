@@ -282,6 +282,17 @@ internal sealed class HostRoutingSnapshotAccessor : IHostRoutingSnapshotAccessor
     public HostRoutingSnapshotLease? TryAcquireLease() => _holder.TryAcquireRoutingLease();
 }
 
+/// <summary>Describes how the holder admitted a staged or replacement snapshot.</summary>
+internal enum SnapshotAdmission
+{
+    /// <summary>The snapshot was staged or published.</summary>
+    Accepted,
+    /// <summary>A strictly newer snapshot version is already staged or published; the goal is achieved.</summary>
+    Superseded,
+    /// <summary>The snapshot was rejected (validation failure, disposed holder, missing dispatch generation, ...).</summary>
+    Rejected
+}
+
 /// <summary>Holds complete immutable configuration and replaces it atomically after validation.</summary>
 public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshotAccessor, IHostRoutingSnapshotLeaseAccessor, IAsyncDisposable
 {
@@ -322,37 +333,38 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
     }
 
     /// <inheritdoc />
-    public bool TryReplace(HostConfigurationSnapshot snapshot) => TryReplace(snapshot, null, null);
+    public bool TryReplace(HostConfigurationSnapshot snapshot) =>
+        TryReplace(snapshot, null, null) == SnapshotAdmission.Accepted;
     /// <summary>Stages a validated snapshot for capability admission before runtime publication.</summary>
-    internal bool TryStage(HostConfigurationSnapshot snapshot)
+    internal SnapshotAdmission TryStage(HostConfigurationSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         if (!HostConfigurationSnapshotValidator.IsComplete(snapshot, _logger) ||
             !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger))
         {
-            return false;
+            return SnapshotAdmission.Rejected;
         }
         lock (_replacementGate)
         {
             if (_disposed)
             {
-                return false;
+                return SnapshotAdmission.Rejected;
             }
 
             var published = Volatile.Read(ref _published);
             if (published is not null && snapshot.Version < published.Configuration.Version)
             {
-                return false;
+                return SnapshotAdmission.Superseded;
             }
 
             var staged = Volatile.Read(ref _staged);
             if (staged is not null && snapshot.Version < staged.Version)
             {
-                return false;
+                return SnapshotAdmission.Superseded;
             }
 
             Volatile.Write(ref _staged, snapshot);
-            return true;
+            return SnapshotAdmission.Accepted;
         }
     }
 
@@ -368,12 +380,12 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             }
         }
     }
-    internal bool TryReplace(
+    internal SnapshotAdmission TryReplace(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? dispatchGeneration) =>
         TryReplace(snapshot, dispatchGeneration, null);
 
-    internal bool TryReplace(
+    internal SnapshotAdmission TryReplace(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? dispatchGeneration,
         ImmutableDictionary<Guid, string?>? serviceOwners)
@@ -382,7 +394,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         if (!HostConfigurationSnapshotValidator.IsComplete(snapshot, _logger) ||
             !HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger))
         {
-            return false;
+            return SnapshotAdmission.Rejected;
         }
 
         serviceOwners ??= snapshot.Services.ToImmutableDictionary(
@@ -397,13 +409,13 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         catch (Exception exception)
         {
             HostLogMessages.SnapshotValidationFailed(_logger, exception, "RouteSnapshotBuild");
-            return false;
+            return SnapshotAdmission.Rejected;
         }
 
         if (!routeBuild.IsSuccess || routeBuild.Snapshot is null ||
             !ExecutableRouteBuilder.TryBuild(snapshot, out var executableRoutes, _logger))
         {
-            return false;
+            return SnapshotAdmission.Rejected;
         }
 
         var publication = new HostRoutingSnapshot(
@@ -418,18 +430,18 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
         {
             if (_disposed)
             {
-                return false;
+                return SnapshotAdmission.Rejected;
             }
 
             previous = Volatile.Read(ref _published);
             if (previous is not null && snapshot.Version < previous.Configuration.Version)
             {
-                return false;
+                return SnapshotAdmission.Superseded;
             }
 
             if (previous?.DispatchGeneration is not null && dispatchGeneration is null)
             {
-                return false;
+                return SnapshotAdmission.Rejected;
             }
 
             previous?.Publication.BeginRetirement(
@@ -442,7 +454,7 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
             }
         }
 
-        return true;
+        return SnapshotAdmission.Accepted;
     }
 
 

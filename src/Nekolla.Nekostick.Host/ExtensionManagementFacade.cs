@@ -857,13 +857,17 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             return;
         }
 
-        if (await _publisher.PublishAsync(snapshot, cancellationToken: cancellationToken).ConfigureAwait(false))
+        var outcome = await _publisher.PublishAsync(
+            snapshot,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (outcome != PublishOutcome.Failed)
         {
             _runtimeState.MarkSnapshotAccepted();
         }
         else
         {
             _runtimeState.MarkSnapshotRejected();
+            HostLogMessages.ConfigurationSnapshotRejected(_logger, "PublishFailed");
         }
     }
 

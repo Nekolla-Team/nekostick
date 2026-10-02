@@ -171,7 +171,7 @@ public sealed class HostConfigurationSnapshotTests
         var holder = new HostConfigurationSnapshotHolder();
         var candidate = CreateCompleteSnapshot(4);
 
-        Assert.True(holder.TryStage(candidate));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(candidate));
 
         Assert.False(holder.HasSnapshot);
         Assert.Null(holder.Current);
@@ -186,14 +186,14 @@ public sealed class HostConfigurationSnapshotTests
         var older = CreateCompleteSnapshot(4);
         var newer = CreateCompleteSnapshot(6);
 
-        Assert.True(holder.TryStage(staged));
-        Assert.False(holder.TryStage(older));
-        Assert.True(holder.TryStage(newer));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(staged));
+        Assert.Equal(SnapshotAdmission.Superseded, holder.TryStage(older));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(newer));
         Assert.False(holder.HasSnapshot);
 
         holder.ClearStaged(staged);
         Assert.False(holder.HasSnapshot);
-        Assert.False(holder.TryStage(older));
+        Assert.Equal(SnapshotAdmission.Superseded, holder.TryStage(older));
 
         holder.ClearStaged(newer);
         Assert.False(holder.HasSnapshot);
@@ -207,7 +207,7 @@ public sealed class HostConfigurationSnapshotTests
         var staged = CreateCompleteSnapshot(2);
 
         Assert.True(holder.TryReplace(published));
-        Assert.True(holder.TryStage(staged));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(staged));
 
         await holder.DisposeAsync();
 
@@ -223,7 +223,7 @@ public sealed class HostConfigurationSnapshotTests
 
         await holder.DisposeAsync();
 
-        Assert.False(holder.TryStage(CreateCompleteSnapshot(2)));
+        Assert.Equal(SnapshotAdmission.Rejected, holder.TryStage(CreateCompleteSnapshot(2)));
         Assert.False(holder.TryReplace(CreateCompleteSnapshot(3)));
         Assert.False(holder.HasSnapshot);
         Assert.Null(holder.Current);

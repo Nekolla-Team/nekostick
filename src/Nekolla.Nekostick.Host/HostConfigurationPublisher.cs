@@ -7,6 +7,17 @@ using Nekolla.Nekostick.Extensions;
 
 namespace Nekolla.Nekostick.Host;
 
+/// <summary>Describes the outcome of a configuration publication attempt.</summary>
+internal enum PublishOutcome
+{
+    /// <summary>The snapshot is live and every requested force reload was satisfied.</summary>
+    Published,
+    /// <summary>The attempt did not complete, but the holder already runs an equal-or-newer committed version.</summary>
+    Superseded,
+    /// <summary>The publication genuinely failed.</summary>
+    Failed
+}
+
 /// <summary>Serializes configuration publication with staged extension generation handoff.</summary>
 public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 {
@@ -55,7 +66,17 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         _hostApiVersion = hostApiVersion ?? runtimeManager.ApiVersion;
     }
 
-    internal async ValueTask<bool> PublishAsync(
+    /// <summary>Attempts to publish a host configuration snapshot.</summary>
+    /// <param name="snapshot">The configuration snapshot to publish.</param>
+    /// <param name="forceReloadIds">The optional extension identifiers whose runtime instances must be reloaded.</param>
+    /// <param name="scheduleRecovery">Whether a failed generation handoff schedules one recovery publication.</param>
+    /// <param name="cancellationToken">The publication cancellation token.</param>
+    /// <returns>
+    /// <see cref="PublishOutcome.Published"/> when publication and requested force reloads complete,
+    /// <see cref="PublishOutcome.Superseded"/> when an equal-or-newer committed snapshot already satisfies the goal,
+    /// or <see cref="PublishOutcome.Failed"/> when publication genuinely fails.
+    /// </returns>
+    internal async ValueTask<PublishOutcome> PublishAsync(
         HostConfigurationSnapshot snapshot,
         ImmutableHashSet<string>? forceReloadIds = null,
         bool scheduleRecovery = true,
@@ -63,26 +84,29 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         var requestedForceReloadIds = forceReloadIds ?? EmptyForceReloadIds;
+        var outcome = PublishOutcome.Failed;
         if (Volatile.Read(ref _disposed) != 0)
         {
-            return false;
+            return outcome = PublishOutcome.Failed;
         }
 
         await _publicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var staged = false;
-        var published = false;
         var stagedSnapshot = snapshot;
         ExtensionGenerationPreparation? activePreparation = null;
         try
         {
             if (Volatile.Read(ref _disposed) != 0)
             {
-                return false;
+                return outcome = PublishOutcome.Failed;
             }
 
-            if (!_snapshotHolder.TryStage(snapshot))
+            var stageAdmission = _snapshotHolder.TryStage(snapshot);
+            if (stageAdmission != SnapshotAdmission.Accepted)
             {
-                return false;
+                return outcome = stageAdmission == SnapshotAdmission.Superseded
+                    ? PublishOutcome.Superseded
+                    : PublishOutcome.Failed;
             }
 
             staged = true;
@@ -103,9 +127,12 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 !HasRunningContentDrift(previousGeneration, desiredSet.Descriptors) &&
                 CanReusePriorLoadedIdentities(previousSnapshot!, snapshot))
             {
-                if (!_snapshotHolder.TryReplace(snapshot, previousGeneration, serviceOwners))
+                var reuseAdmission = _snapshotHolder.TryReplace(snapshot, previousGeneration, serviceOwners);
+                if (reuseAdmission != SnapshotAdmission.Accepted)
                 {
-                    return false;
+                    return outcome = reuseAdmission == SnapshotAdmission.Superseded
+                        ? PublishOutcome.Superseded
+                        : PublishOutcome.Failed;
                 }
                 HostLogMessages.PriorGenerationReused(
                     _logger,
@@ -117,10 +144,11 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 staged = false;
                 DeliverPublicationEvents(snapshot, previousSnapshot!.Configuration);
                 await ReportNodeStatesAsync(desiredSet.NodeStates, cancellationToken).ConfigureAwait(false);
-                published = true;
                 // Reusing the prior generation cannot satisfy a forced reload;
                 // keep the live publication but report the reload as unsuccessful.
-                return requestedForceReloadIds.Count == 0;
+                return outcome = requestedForceReloadIds.Count == 0
+                    ? PublishOutcome.Published
+                    : PublishOutcome.Superseded;
             }
 
             var desired = desiredSet.Descriptors;
@@ -133,7 +161,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 .ConfigureAwait(false);
             if (!preparedResult.Succeeded || preparedResult.Preparation is null)
             {
-                return false;
+                return outcome = PublishOutcome.Failed;
             }
 
             var preparation = preparedResult.Preparation;
@@ -142,7 +170,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             {
                 await preparation.AbortAsync().ConfigureAwait(false);
                 activePreparation = null;
-                var fallbackPublished = await PublishWithPreviousOrEmptyAsync(
+                var fallbackOutcome = await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
                         desiredSet.NodeStates,
@@ -156,12 +184,18 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 HostLogMessages.UnsafeUnavailableBindingFallback(
                     _logger,
                     preparation.Generation.GenerationId,
-                    fallbackPublished,
+                    fallbackOutcome != PublishOutcome.Failed,
                     unavailableBindings);
-                // Fallback publishes the snapshot without forcing the requested
-                // reload; preserve publication cleanup while reporting failure.
-                published = fallbackPublished;
-                return requestedForceReloadIds.Count == 0 && fallbackPublished;
+                // Fallback publishes the snapshot without forcing the requested reload;
+                // report Superseded when it cannot satisfy the forced reload.
+                if (fallbackOutcome == PublishOutcome.Failed)
+                {
+                    return outcome = PublishOutcome.Failed;
+                }
+
+                return outcome = requestedForceReloadIds.Count == 0
+                    ? PublishOutcome.Published
+                    : PublishOutcome.Superseded;
             }
 
             var ready = await preparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
@@ -169,7 +203,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             {
                 await preparation.AbortAsync().ConfigureAwait(false);
                 activePreparation = null;
-                var fallbackPublished = await PublishWithPreviousOrEmptyAsync(
+                var fallbackOutcome = await PublishWithPreviousOrEmptyAsync(
                         snapshot,
                         previousGeneration,
                         desiredSet.NodeStates,
@@ -178,22 +212,35 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 HostLogMessages.GenerationReadyFallback(
                     _logger,
                     ready.FailureCode.ToString(),
-                    fallbackPublished);
-                published = fallbackPublished;
+                    fallbackOutcome != PublishOutcome.Failed);
                 if (scheduleRecovery)
                 {
                     ScheduleRecoveryPublication(snapshot);
                 }
 
-                return requestedForceReloadIds.Count == 0 && fallbackPublished;
+                if (fallbackOutcome == PublishOutcome.Failed)
+                {
+                    return outcome = PublishOutcome.Failed;
+                }
+
+                return outcome = requestedForceReloadIds.Count == 0
+                    ? PublishOutcome.Published
+                    : PublishOutcome.Superseded;
             }
 
             var publicationSnapshot = await ReadLatestSnapshotAsync(snapshot, cancellationToken)
                 .ConfigureAwait(false);
-            if (publicationSnapshot is null ||
-                !_snapshotHolder.TryStage(publicationSnapshot))
+            if (publicationSnapshot is null)
             {
-                return false;
+                return outcome = PublishOutcome.Failed;
+            }
+
+            var publicationStageAdmission = _snapshotHolder.TryStage(publicationSnapshot);
+            if (publicationStageAdmission != SnapshotAdmission.Accepted)
+            {
+                return outcome = publicationStageAdmission == SnapshotAdmission.Superseded
+                    ? PublishOutcome.Superseded
+                    : PublishOutcome.Failed;
             }
 
             stagedSnapshot = publicationSnapshot;
@@ -205,12 +252,15 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     publicationSnapshot,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!_snapshotHolder.TryReplace(
-                    publicationSnapshot,
-                    ready.Generation,
-                    publicationServiceOwners))
+            var publicationAdmission = _snapshotHolder.TryReplace(
+                publicationSnapshot,
+                ready.Generation,
+                publicationServiceOwners);
+            if (publicationAdmission != SnapshotAdmission.Accepted)
             {
-                return false;
+                return outcome = publicationAdmission == SnapshotAdmission.Superseded
+                    ? PublishOutcome.Superseded
+                    : PublishOutcome.Failed;
             }
 
             // TryReplace makes the prepared generation the live publication. It
@@ -221,14 +271,15 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             if (!await preparation.CompletePublicationAsync().ConfigureAwait(false))
             {
                 HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);
-                return false;
+                // TryReplace already made the snapshot live; completion failure
+                // does not undo the publication, so the goal is achieved.
+                return outcome = PublishOutcome.Superseded;
             }
 
             HostLogMessages.ConfigurationSnapshotApplied(_logger, publicationSnapshot.Version);
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot?.Configuration);
             await ReportNodeStatesAsync(desiredSet.NodeStates, cancellationToken).ConfigureAwait(false);
-            published = true;
-            return true;
+            return outcome = PublishOutcome.Published;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -238,7 +289,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(PublishAsync));
             HostLogMessages.ConfigurationSnapshotRejected(_logger, "PublishException");
-            return false;
+            return outcome = PublishOutcome.Failed;
         }
         finally
         {
@@ -264,7 +315,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 if (staged)
                 {
                     _snapshotHolder.ClearStaged(stagedSnapshot);
-                    if (!published && !ReferenceEquals(_snapshotHolder.Current, stagedSnapshot))
+                    if (outcome == PublishOutcome.Failed)
                     {
                         _runtimeState?.MarkSnapshotRejected();
                     }
@@ -293,7 +344,8 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             try
             {
-                var succeeded = await PublishAsync(snapshot, scheduleRecovery: false).ConfigureAwait(false);
+                var outcome = await PublishAsync(snapshot, scheduleRecovery: false).ConfigureAwait(false);
+                var succeeded = outcome != PublishOutcome.Failed;
                 HostLogMessages.ConfigurationRecoveryPublicationCompleted(
                     _logger,
                     succeeded ? LogLevel.Information : LogLevel.Warning,
@@ -316,7 +368,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     /// <param name="snapshot">The durable Host configuration snapshot to publish.</param>
     /// <param name="extensionId">The extension identifier that must be reloaded.</param>
     /// <param name="cancellationToken">The publication cancellation token.</param>
-    /// <returns>The publication outcome plus the committed snapshot version when accepted.</returns>
+    /// <returns>The published result with the committed version when the forced reload completes; otherwise a failure result.</returns>
     internal async ValueTask<ExtensionReloadPublication> RequestExtensionReloadAsync(
         HostConfigurationSnapshot snapshot,
         string extensionId,
@@ -349,12 +401,12 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         var forceReloadIds = EmptyForceReloadIds
             .Add(extensionId)
             .Union(_runtimeManager.GetCascadeReloadSet(extensionId));
-        var published = await PublishAsync(
+        var outcome = await PublishAsync(
                 latest,
                 forceReloadIds,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        return published
+        return outcome == PublishOutcome.Published
             ? new ExtensionReloadPublication(ExtensionReloadPublicationStatus.Published, latest.Version)
             : ExtensionReloadPublication.Failed;
     }
@@ -386,7 +438,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         Published
     }
 
-    private async ValueTask<bool> PublishWithPreviousOrEmptyAsync(
+    private async ValueTask<PublishOutcome> PublishWithPreviousOrEmptyAsync(
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? previousGeneration,
         ImmutableArray<ExtensionNodeStateWrite> nodeStates,
@@ -396,7 +448,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             .ConfigureAwait(false);
         if (publicationSnapshot is null)
         {
-            return false;
+            return PublishOutcome.Failed;
         }
 
         var publicationServiceOwners = await ReadServiceOwnersAsync(
@@ -410,12 +462,15 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         var previousSnapshot = _snapshotHolder.Current;
         if (previousGeneration is not null)
         {
-            if (!_snapshotHolder.TryReplace(
-                    publicationSnapshot,
-                    previousGeneration,
-                    publicationServiceOwners))
+            var previousReplacementAdmission = _snapshotHolder.TryReplace(
+                publicationSnapshot,
+                previousGeneration,
+                publicationServiceOwners);
+            if (previousReplacementAdmission != SnapshotAdmission.Accepted)
             {
-                return false;
+                return previousReplacementAdmission == SnapshotAdmission.Superseded
+                    ? PublishOutcome.Superseded
+                    : PublishOutcome.Failed;
             }
             HostLogMessages.ConfigurationFallbackPublished(
                 _logger,
@@ -424,7 +479,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
             await ReportNodeStatesAsync(nodeStates, cancellationToken).ConfigureAwait(false);
-            return true;
+            return PublishOutcome.Published;
         }
 
         var emptyResult = await _runtimeManager
@@ -435,7 +490,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             .ConfigureAwait(false);
         if (!emptyResult.Succeeded || emptyResult.Preparation is null)
         {
-            return false;
+            return PublishOutcome.Failed;
         }
 
         var emptyPreparation = emptyResult.Preparation;
@@ -443,10 +498,20 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         try
         {
             var ready = await emptyPreparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
-            if (!ready.Succeeded || ready.Generation is null ||
-                !_snapshotHolder.TryReplace(publicationSnapshot, ready.Generation, publicationServiceOwners))
+            if (!ready.Succeeded || ready.Generation is null)
             {
-                return false;
+                return PublishOutcome.Failed;
+            }
+
+            var emptyGenerationAdmission = _snapshotHolder.TryReplace(
+                publicationSnapshot,
+                ready.Generation,
+                publicationServiceOwners);
+            if (emptyGenerationAdmission != SnapshotAdmission.Accepted)
+            {
+                return emptyGenerationAdmission == SnapshotAdmission.Superseded
+                    ? PublishOutcome.Superseded
+                    : PublishOutcome.Failed;
             }
 
             // TryReplace makes the prepared generation the live publication. It
@@ -456,7 +521,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             if (!await emptyPreparation.CompletePublicationAsync().ConfigureAwait(false))
             {
                 HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);
-                return false;
+                return PublishOutcome.Superseded;
             }
             HostLogMessages.ConfigurationFallbackPublished(
                 _logger,
@@ -465,7 +530,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot);
             await ReportNodeStatesAsync(nodeStates, cancellationToken).ConfigureAwait(false);
-            return true;
+            return PublishOutcome.Published;
         }
         finally
         {

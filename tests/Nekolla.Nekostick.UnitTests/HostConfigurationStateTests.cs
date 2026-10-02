@@ -266,7 +266,7 @@ public sealed class HostConfigurationStateTests
             NullLogger<HostConfigurationPublisher>.Instance,
             snapshotReader: reader);
 
-        Assert.True(await publisher.PublishAsync(initial, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(initial, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal(1, reader.ReadCalls);
         Assert.Same(latest, holder.Current);
@@ -279,6 +279,75 @@ public sealed class HostConfigurationStateTests
             RouteMatchStatus.NoMatch,
             holder.RoutingSnapshot.Matcher.Match(
                 new RouteMatchInput("/initial", "integration.test", "GET")).Status);
+    }
+
+    [Fact]
+    public async Task SupersededPublishKeepsExtensionConfigurationWritesAllowed()
+    {
+        var current = CreateSnapshot(version: 1);
+        var stagedNewer = CreateSnapshot(version: 2);
+        await using var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(current));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryStage(stagedNewer));
+
+        var nodeOptions = new HostNodeOptions(skipExtensions: true, disableSupervisor: false, readOnly: false);
+        var runtimeState = new HostRuntimeState(holder, nodeOptions);
+        runtimeState.MarkSnapshotAccepted();
+        Assert.True(runtimeState.ExtensionConfigurationWritesAllowed);
+
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            manager,
+            nodeOptions,
+            NullLogger<HostConfigurationPublisher>.Instance,
+            runtimeState: runtimeState);
+
+        var outcome = await publisher.PublishAsync(
+            current,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(PublishOutcome.Superseded, outcome);
+        Assert.True(runtimeState.ExtensionConfigurationWritesAllowed);
+    }
+
+    [Fact]
+    public async Task RejectedLatestSnapshotFailsPublicationAndMarksSnapshotRejected()
+    {
+        var initial = CreateSnapshot(version: 1);
+        var invalidLatest = CreateSnapshot(
+            version: 2,
+            globalSettings: new GlobalSettingsConfiguration(
+                version: 2,
+                trustedProxyCidrs: ImmutableArray.Create("192.0.2.0/33")));
+        Assert.True(HostConfigurationSnapshotValidator.IsComplete(invalidLatest));
+        Assert.False(HostConfigurationSemanticValidator.TryValidateSnapshot(invalidLatest));
+
+        await using var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(initial));
+        Assert.Equal(SnapshotAdmission.Rejected, holder.TryStage(invalidLatest));
+
+        var nodeOptions = new HostNodeOptions(skipExtensions: true, disableSupervisor: false, readOnly: false);
+        var runtimeState = new HostRuntimeState(holder, nodeOptions);
+        runtimeState.MarkSnapshotAccepted();
+        Assert.True(runtimeState.ExtensionConfigurationWritesAllowed);
+
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            manager,
+            nodeOptions,
+            NullLogger<HostConfigurationPublisher>.Instance,
+            runtimeState: runtimeState,
+            snapshotReader: new LatestSnapshotReader(invalidLatest));
+
+        var outcome = await publisher.PublishAsync(
+            initial,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(PublishOutcome.Failed, outcome);
+        Assert.False(runtimeState.ExtensionConfigurationWritesAllowed);
+        Assert.Same(initial, holder.Current);
     }
 
     [Fact]

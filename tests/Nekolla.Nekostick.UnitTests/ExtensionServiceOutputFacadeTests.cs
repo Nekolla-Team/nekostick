@@ -381,7 +381,7 @@ public sealed class ExtensionServiceOutputFacadeTests
         var serviceOwners = configured
             ? ImmutableDictionary<Guid, string?>.Empty.Add(ServiceId, serviceOwnerExtensionId)
             : ImmutableDictionary<Guid, string?>.Empty;
-        Assert.True(holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
         var runtimeState = new HostRuntimeState(
             holder,
             new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));

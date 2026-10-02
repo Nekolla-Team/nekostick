@@ -26,7 +26,7 @@ public sealed class HostRouteTargetExecutorHookIntegrationTests
         using var extension = StagedExtension.Create();
         var generation = await PrepareGenerationAsync(manager, extension.Manifest, routeId);
         await using var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             CreateSnapshot(
                 CreateRoute(routeId, "/extension", new ExtensionHandlerRouteTargetConfiguration(HandlerId))),
             generation));
@@ -54,7 +54,7 @@ public sealed class HostRouteTargetExecutorHookIntegrationTests
         using var extension = StagedExtension.Create();
         var generation = await PrepareGenerationAsync(manager, extension.Manifest, routeId);
         await using var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             CreateSnapshot(CreateRoute(routeId, "/microservice", new MicroserviceRouteTargetConfiguration(serviceId)), serviceId),
             generation));
 

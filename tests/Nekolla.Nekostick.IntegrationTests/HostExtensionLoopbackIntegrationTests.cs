@@ -268,7 +268,12 @@ public sealed class HostExtensionLoopbackIntegrationTests
                     && parameters.Length == 2
                     && parameters[1].ParameterType == typeof(ExtensionDispatchGeneration);
             });
-        return (bool)method.Invoke(holder, [snapshot, generation])!;
+        // The internal TryReplace returns SnapshotAdmission; integration tests reach it via
+        // reflection, so compare against the enum member name instead of casting.
+        return string.Equals(
+            method.Invoke(holder, [snapshot, generation])?.ToString(),
+            "Accepted",
+            StringComparison.Ordinal);
     }
 
     private static string CreateFixtureRoot()

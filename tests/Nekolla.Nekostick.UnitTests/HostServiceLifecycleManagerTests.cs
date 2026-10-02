@@ -249,7 +249,7 @@ public sealed class HostServiceLifecycleManagerTests
             owner,
             Contracts.ExtensionLoadState.Loaded);
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             loadedSnapshot,
             dispatchGeneration: null,
             ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner)));
@@ -277,7 +277,7 @@ public sealed class HostServiceLifecycleManagerTests
             service,
             owner,
             Contracts.ExtensionLoadState.Disabled);
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             disabledSnapshot,
             dispatchGeneration: null,
             ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner)));
@@ -295,7 +295,7 @@ public sealed class HostServiceLifecycleManagerTests
             service,
             owner,
             Contracts.ExtensionLoadState.Loaded);
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             enabledSnapshot,
             dispatchGeneration: null,
             ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner)));

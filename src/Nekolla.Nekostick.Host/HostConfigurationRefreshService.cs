@@ -229,7 +229,10 @@ public sealed class HostConfigurationRefreshService : BackgroundService
             return;
         }
 
-        if (await _publisher.PublishAsync(loaded.Value, cancellationToken: cancellationToken).ConfigureAwait(false))
+        var outcome = await _publisher.PublishAsync(
+            loaded.Value,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (outcome != PublishOutcome.Failed)
         {
             _runtimeState.MarkSnapshotAccepted();
         }

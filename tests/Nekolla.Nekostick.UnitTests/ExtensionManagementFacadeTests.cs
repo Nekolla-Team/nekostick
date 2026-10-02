@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Host;
@@ -333,7 +335,7 @@ public sealed class ExtensionManagementFacadeTests
                 1)),
             ImmutableArray.Create(settings));
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(snapshot, oldGeneration));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(snapshot, oldGeneration));
         await using var publisher = new HostConfigurationPublisher(
             holder,
             manager,
@@ -369,6 +371,87 @@ public sealed class ExtensionManagementFacadeTests
         }
 
         Assert.NotSame(oldGeneration, holder.RoutingSnapshot?.DispatchGeneration);
+    }
+
+    [Fact]
+    public async Task PublishTriggerTreatsSupersededAsAcceptedAndLogsGenuineRejection()
+    {
+        // Version 0 is semantically invalid, so the committed snapshot is version 2 and
+        // the losing-race candidate is version 1.
+        var committed = new HostConfigurationSnapshot(
+            2,
+            new GlobalSettingsConfiguration(version: 2),
+            default,
+            default,
+            default,
+            default);
+        var older = new HostConfigurationSnapshot(
+            1,
+            new GlobalSettingsConfiguration(version: 1),
+            default,
+            default,
+            default,
+            default);
+        var invalid = new HostConfigurationSnapshot(
+            2,
+            new GlobalSettingsConfiguration(
+                version: 2,
+                trustedProxyCidrs: ImmutableArray.Create("192.0.2.0/33")),
+            default,
+            default,
+            default,
+            default);
+        await using var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(committed));
+        var nodeOptions = new HostNodeOptions(skipExtensions: true, disableSupervisor: false, readOnly: false);
+        var runtimeState = new HostRuntimeState(holder, nodeOptions);
+        runtimeState.MarkSnapshotAccepted();
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+        await using var publisher = new HostConfigurationPublisher(
+            holder,
+            manager,
+            nodeOptions,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<HostConfigurationPublisher>.Instance,
+            runtimeState: runtimeState);
+        var logger = new RecordingLogger();
+        var staleServices = new SingleServiceProvider(
+            new SnapshotHostConfigApi(committed),
+            publisher,
+            new SnapshotReader(older));
+        var staleFacade = new ExtensionManagementFacade(
+            "caller.extension",
+            new SingleScopeFactory(staleServices),
+            runtimeState,
+            manager,
+            staleServices,
+            logger);
+
+        await InvokePublishTriggerAsync(staleFacade, TestContext.Current.CancellationToken);
+
+        Assert.True(runtimeState.ExtensionConfigurationWritesAllowed);
+        Assert.DoesNotContain(
+            logger.Entries,
+            entry => entry.EventId.Id == HostEventIds.ConfigurationSnapshotRejected.Id);
+
+        var invalidServices = new SingleServiceProvider(
+            new SnapshotHostConfigApi(committed),
+            publisher,
+            new SnapshotReader(invalid));
+        var invalidFacade = new ExtensionManagementFacade(
+            "caller.extension",
+            new SingleScopeFactory(invalidServices),
+            runtimeState,
+            manager,
+            invalidServices,
+            logger);
+
+        await InvokePublishTriggerAsync(invalidFacade, TestContext.Current.CancellationToken);
+
+        Assert.False(runtimeState.ExtensionConfigurationWritesAllowed);
+        Assert.Contains(
+            logger.Entries,
+            entry => entry.EventId.Id == HostEventIds.ConfigurationSnapshotRejected.Id &&
+                entry.Message.Contains("Reason: PublishFailed", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -673,4 +756,37 @@ public sealed class ExtensionManagementFacadeTests
             serviceType == typeof(IHostConfigurationSnapshotReader) ? snapshotReader :
             null;
     }
+    private static async Task InvokePublishTriggerAsync(
+        ExtensionManagementFacade facade,
+        CancellationToken cancellationToken)
+    {
+        var method = typeof(ExtensionManagementFacade).GetMethod(
+            "TriggerPublishAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(CancellationToken) },
+            modifiers: null) ?? throw new InvalidOperationException("The facade publication trigger is unavailable.");
+        var invocation = method.Invoke(facade, new object?[] { cancellationToken })
+            ?? throw new InvalidOperationException("The facade publication trigger returned no value.");
+        await (ValueTask)invocation;
+    }
+
+    private sealed class RecordingLogger : ILogger
+    {
+        internal List<(EventId EventId, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((eventId, formatter(state, exception)));
+    }
+
 }

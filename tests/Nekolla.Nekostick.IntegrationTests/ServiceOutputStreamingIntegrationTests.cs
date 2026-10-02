@@ -126,7 +126,7 @@ public sealed class ServiceOutputStreamingIntegrationTests
         var holder = new HostConfigurationSnapshotHolder();
         var serviceOwners = ImmutableDictionary<Guid, string?>.Empty
             .Add(ServiceId, "another.extension");
-        Assert.True(holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
         var runtimeState = new HostRuntimeState(holder, new HostNodeOptions(false, false, false));
         return new ExtensionServiceOutputFacade(
             "fixture.extension.deterministic",

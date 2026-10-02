@@ -40,7 +40,7 @@ public sealed class HostExtensionEvidenceTests
                 NullLogger<HostConfigurationPublisher>.Instance);
             var snapshot = CreatePublisherSnapshot(1, ImmutableArray<ExtensionRecordConfiguration>.Empty);
 
-            Assert.True(await publisher.PublishAsync(
+            Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(
                 snapshot,
                 cancellationToken: TestContext.Current.CancellationToken));
 
@@ -80,7 +80,7 @@ public sealed class HostExtensionEvidenceTests
                     new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId)),
                 FixtureExtensionId,
                 settings);
-            Assert.True(holder.TryReplace(first, oldGeneration));
+            Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(first, oldGeneration));
 
             await using var publisher = new HostConfigurationPublisher(
                 holder,
@@ -149,7 +149,7 @@ public sealed class HostExtensionEvidenceTests
                 new ExtensionHandlerRouteTargetConfiguration(extensionId)),
             extensionId,
             settings);
-        Assert.True(holder.TryReplace(first, oldGeneration));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(first, oldGeneration));
 
         await using var publisher = new HostConfigurationPublisher(
             holder,
@@ -274,7 +274,7 @@ public sealed class HostExtensionEvidenceTests
                 1,
                 ImmutableArray.Create(record));
 
-            Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
             Assert.Same(snapshot, holder.Current);
             Assert.Single(holder.Current!.ExtensionRecords);
@@ -325,7 +325,7 @@ public sealed class HostExtensionEvidenceTests
                 ImmutableArray.Create(record),
                 ImmutableArray.Create(Settings(FixtureExtensionId, "non-loaded")));
 
-            Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
             Assert.Same(snapshot, holder.Current);
             Assert.Single(holder.Current!.ExtensionRecords);
@@ -354,7 +354,7 @@ public sealed class HostExtensionEvidenceTests
                 "/normal",
                 new StaticFileRouteTargetConfiguration(Path.GetTempPath())));
 
-        Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Same(snapshot, holder.Current);
         Assert.NotNull(holder.RoutingSnapshot);
@@ -407,8 +407,8 @@ public sealed class HostExtensionEvidenceTests
             manifest,
             settings,
             previous: null);
-        Assert.True(holder.TryReplace(first, generation));
-        Assert.True(await publisher.PublishAsync(second, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(first, generation));
+        Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(second, cancellationToken: TestContext.Current.CancellationToken));
         var status = manager.GetStatus(FixtureExtensionId);
         Assert.NotNull(status);
         Assert.Equal(1, status!.HandlerCount);
@@ -504,7 +504,7 @@ public sealed class HostExtensionEvidenceTests
             previous: null);
 
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             CreateExtensionSnapshot(
                 1,
                 CreateRoute(
@@ -536,7 +536,7 @@ public sealed class HostExtensionEvidenceTests
                 new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId)),
             FixtureExtensionId,
             newSettings);
-        Assert.True(holder.TryReplace(replacement, ready.Generation));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(replacement, ready.Generation));
         Assert.True(await preparation.CompletePublicationAsync());
 
         var followUp = await manager.PrepareGenerationAsync(ImmutableArray.Create(
@@ -609,7 +609,7 @@ public sealed class HostExtensionEvidenceTests
             oldSettings,
             previous: null);
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             CreateExtensionSnapshot(
                 1,
                 CreateRoute(
@@ -641,7 +641,7 @@ public sealed class HostExtensionEvidenceTests
             newSettings,
             recordVersion: 2);
 
-        Assert.True(await publisher.PublishAsync(replacement, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(replacement, cancellationToken: TestContext.Current.CancellationToken));
         Assert.Same(replacement, holder.Current);
         Assert.NotSame(oldGeneration, holder.RoutingSnapshot!.DispatchGeneration);
         Assert.Empty(holder.RoutingSnapshot.DispatchGeneration!.Bindings);
@@ -673,7 +673,7 @@ public sealed class HostExtensionEvidenceTests
             new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
             NullLogger<HostConfigurationPublisher>.Instance);
 
-        Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Same(snapshot, holder.Current);
         Assert.NotNull(holder.RoutingSnapshot);
@@ -705,7 +705,7 @@ public sealed class HostExtensionEvidenceTests
             new ExtensionRuntimeManager(HostApiVersion.Current),
             new HostNodeOptions(skipExtensions: true, disableSupervisor: false, readOnly: false),
             NullLogger<HostConfigurationPublisher>.Instance);
-        Assert.True(await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(PublishOutcome.Published, await publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
 
         using var services = CreateProxyServices();
         var targetExecutor = new HostRouteTargetExecutor(
@@ -733,7 +733,7 @@ public sealed class HostExtensionEvidenceTests
             oldSettings,
             previous: null);
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             CreateSnapshot(
                 1,
                 CreateRoute(
@@ -760,7 +760,7 @@ public sealed class HostExtensionEvidenceTests
                 "/extension",
                 new ExtensionHandlerRouteTargetConfiguration(FixtureExtensionId)),
             FixtureExtensionId);
-        Assert.True(holder.TryReplace(replacement, newGeneration));
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(replacement, newGeneration));
 
         var retirement = oldGeneration.RetireAsync(TestContext.Current.CancellationToken).AsTask();
         Assert.True(oldGeneration.IsRetiring);
@@ -935,7 +935,7 @@ public sealed class HostExtensionEvidenceTests
                 previous: null,
                 includeFallback: true);
             var holder = new HostConfigurationSnapshotHolder();
-            Assert.True(holder.TryReplace(
+            Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
                 CreateSnapshot(
                     1,
                     CreateRoute(
@@ -1045,7 +1045,7 @@ public sealed class HostExtensionEvidenceTests
         ExtensionDispatchGeneration generation)
     {
         var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(
+        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(
             CreateSnapshot(
                 1,
                 CreateRoute(
