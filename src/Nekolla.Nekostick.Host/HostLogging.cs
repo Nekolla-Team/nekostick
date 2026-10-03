@@ -692,7 +692,7 @@ internal static partial class HostLogMessages
 
     [LoggerMessage(
         EventId = 1070,
-        Level = LogLevel.Debug,
+        Level = LogLevel.Trace,
         Message = "Node heartbeat updated. NodeId: {NodeId}. ConfigurationVersion: {ConfigurationVersion}.")]
     internal static partial void NodeHeartbeatUpdated(
         ILogger logger,
