@@ -201,7 +201,7 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
     }
 
     
-    private ExtensionServiceRuntimeSnapshot ToContract(HostServiceRuntimeSnapshot value)
+    internal ExtensionServiceRuntimeSnapshot ToContract(HostServiceRuntimeSnapshot value)
     {
         var forwarding = _forwarding?.Read(value.ServiceId) ?? default;
         return new ExtensionServiceRuntimeSnapshot(
@@ -215,7 +215,15 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
             forwarding.ActiveForwardedRequestCount,
             value.LastUpdatedAt,
             value.LastHealthAt,
-            value.OwnerExtensionId);
+            value.OwnerExtensionId,
+            value.FailureStage,
+            value.FailureCode,
+            value.FailureReason,
+            value.LastProbe,
+            value.ProcessExitCode,
+            value.RestartCount,
+            value.StateEnteredAt,
+            value.RetryAt);
     }
 }
 

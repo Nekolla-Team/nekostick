@@ -90,6 +90,8 @@ internal sealed class EfHostConfigEntityOperations
         foreach (var route in changes.Routes)
         {
             var entity = routes.FirstOrDefault(value => value.Id == route.Id);
+            var entityIsNew = entity is null;
+            var routeChanged = false;
             if (entity is null)
             {
                 entity = ToRouteEntity(route, now);
@@ -98,13 +100,20 @@ internal sealed class EfHostConfigEntityOperations
             }
             else
             {
-                changed |= UpdateRoute(entity, route, now);
+                routeChanged = UpdateRoute(entity, route, now);
+                changed |= routeChanged;
             }
 
             if (ownerExtensionId is not null && ownedRouteIds?.Contains(route.Id) == true &&
                 !string.Equals(entity.OwnerExtensionId, ownerExtensionId, StringComparison.Ordinal))
             {
                 entity.OwnerExtensionId = ownerExtensionId;
+                if (!entityIsNew && !routeChanged)
+                {
+                    entity.Version = EfHostConfigRevisionHelper.IncrementVersion(entity.Version);
+                    entity.UpdatedAt = now;
+                }
+
                 changed = true;
             }
         }
@@ -112,6 +121,8 @@ internal sealed class EfHostConfigEntityOperations
         foreach (var service in changes.Services)
         {
             var entity = services.FirstOrDefault(value => value.Id == service.Id);
+            var entityIsNew = entity is null;
+            var serviceChanged = false;
             if (entity is null)
             {
                 entity = ToServiceEntity(service, now);
@@ -120,13 +131,20 @@ internal sealed class EfHostConfigEntityOperations
             }
             else
             {
-                changed |= UpdateService(entity, service, now);
+                serviceChanged = UpdateService(entity, service, now);
+                changed |= serviceChanged;
             }
 
             if (ownerExtensionId is not null && ownedServiceIds?.Contains(service.Id) == true &&
                 !string.Equals(entity.OwnerExtensionId, ownerExtensionId, StringComparison.Ordinal))
             {
                 entity.OwnerExtensionId = ownerExtensionId;
+                if (!entityIsNew && !serviceChanged)
+                {
+                    entity.Version = EfHostConfigRevisionHelper.IncrementVersion(entity.Version);
+                    entity.UpdatedAt = now;
+                }
+
                 changed = true;
             }
         }
@@ -174,7 +192,7 @@ internal sealed class EfHostConfigEntityOperations
         {
             revision.CommittedAt = now;
             revision.UpdatedAt = now;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
         }
 
         return changed;

@@ -870,3 +870,21 @@ BEGIN
 END $EF$;
 COMMIT;
 
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261003052213_WidenCommittedBy') THEN
+    ALTER TABLE nekostick.configuration_revisions ALTER COLUMN committed_by TYPE character varying(256);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261003052213_WidenCommittedBy') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20261003052213_WidenCommittedBy', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
+

@@ -403,7 +403,7 @@ public sealed class EfExtensionRecordContentPersistence
             revision.Version = committedVersion;
             revision.CommittedAt = now;
             revision.UpdatedAt = now;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             await _revisionHelper.PublishConfigurationChangedAsync(committedVersion).ConfigureAwait(false);

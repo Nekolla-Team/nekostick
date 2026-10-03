@@ -239,6 +239,8 @@ public sealed record HostConfigurationSnapshot
 
     /// <summary>Gets the global snapshot version.</summary>
     public long Version { get; }
+    /// <summary>Gets the identity attributed to this configuration revision, or <see langword="null"/> when it is unknown or unattributed.</summary>
+    public string? CommittedBy { get; init; }
 
     /// <summary>Gets the immutable global settings.</summary>
     public GlobalSettingsConfiguration GlobalSettings { get; }

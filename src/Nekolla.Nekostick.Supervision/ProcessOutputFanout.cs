@@ -48,6 +48,7 @@ internal sealed class ProcessOutputFanout : IDisposable
     private readonly ILogger logger;
     private readonly object gate = new();
     private OutputSubscriber[] subscribers = Array.Empty<OutputSubscriber>();
+    private Action<ReadOnlyMemory<byte>, DateTimeOffset>[] taps = Array.Empty<Action<ReadOnlyMemory<byte>, DateTimeOffset>>();
     private readonly TaskCompletionSource<bool> completion =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool started;
@@ -85,6 +86,26 @@ internal sealed class ProcessOutputFanout : IDisposable
         Attach(buffer);
         subscriber.Start();
         return new Subscription(this, buffer, subscriber);
+    }
+    internal IDisposable SubscribeTap(Action<ReadOnlyMemory<byte>, DateTimeOffset> tap)
+    {
+        ArgumentNullException.ThrowIfNull(tap);
+        var subscription = new TapSubscription(this, tap);
+        lock (gate)
+        {
+            if (!completed && !disposed)
+            {
+                var current = taps;
+                var updated = new Action<ReadOnlyMemory<byte>, DateTimeOffset>[current.Length + 1];
+                current.CopyTo(updated, 0);
+                updated[^1] = tap;
+                taps = updated;
+                return subscription;
+            }
+        }
+
+        subscription.Dispose();
+        return subscription;
     }
 
     internal void Start()
@@ -204,6 +225,31 @@ internal sealed class ProcessOutputFanout : IDisposable
 
         subscriber.Detach();
     }
+    private void DetachTap(Action<ReadOnlyMemory<byte>, DateTimeOffset> tap)
+    {
+        lock (gate)
+        {
+            var current = taps;
+            var index = Array.IndexOf(current, tap);
+            if (index < 0)
+            {
+                return;
+            }
+
+            var updated = new Action<ReadOnlyMemory<byte>, DateTimeOffset>[current.Length - 1];
+            if (index > 0)
+            {
+                Array.Copy(current, 0, updated, 0, index);
+            }
+
+            if (index < updated.Length)
+            {
+                Array.Copy(current, index + 1, updated, index, updated.Length - index);
+            }
+
+            taps = updated;
+        }
+    }
 
     private void Complete(ProcessOutputCompletion reason)
     {
@@ -251,13 +297,26 @@ internal sealed class ProcessOutputFanout : IDisposable
 
                 var timestamp = DateTimeOffset.UtcNow;
                 var snapshot = Volatile.Read(ref subscribers);
+                var tapSnapshot = Volatile.Read(ref taps);
 
-                if (snapshot.Length == 0)
+                if (snapshot.Length == 0 && tapSnapshot.Length == 0)
                 {
                     continue;
                 }
 
                 var chunk = buffer.AsMemory(0, read);
+                foreach (var tap in tapSnapshot)
+                {
+                    try
+                    {
+                        tap(chunk, timestamp);
+                    }
+                    catch (Exception exception)
+                    {
+                        LogSubscriberFailure(exception, "Tap");
+                    }
+                }
+
                 foreach (var subscriber in snapshot)
                 {
                     try
@@ -269,6 +328,7 @@ internal sealed class ProcessOutputFanout : IDisposable
                         LogSubscriberFailure(exception, "Offer");
                     }
                 }
+
             }
         }
         catch (Exception exception)
@@ -291,6 +351,30 @@ internal sealed class ProcessOutputFanout : IDisposable
             operation,
             stream.ToString(),
             serviceId);
+
+    private sealed class TapSubscription : IDisposable
+    {
+        private ProcessOutputFanout? owner;
+        private Action<ReadOnlyMemory<byte>, DateTimeOffset>? tap;
+
+        internal TapSubscription(
+            ProcessOutputFanout owner,
+            Action<ReadOnlyMemory<byte>, DateTimeOffset> tap)
+        {
+            this.owner = owner;
+            this.tap = tap;
+        }
+
+        public void Dispose()
+        {
+            var owner = Interlocked.Exchange(ref this.owner, null);
+            var tap = Interlocked.Exchange(ref this.tap, null);
+            if (owner is not null && tap is not null)
+            {
+                owner.DetachTap(tap);
+            }
+        }
+    }
 
     private sealed class Subscription : IDisposable, IAsyncDisposable
     {

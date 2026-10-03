@@ -99,6 +99,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly HostRuntimeOptions _options;
     private readonly IMicroserviceDrainTracker _drainTracker;
     private readonly ExtensionRuntimeManager? _runtimeManager;
+    private readonly HostServiceRuntimeRegistry _runtimeRegistry;
+    private readonly HostServiceLogBufferRegistry _serviceLogBufferRegistry;
     private readonly ILogger _logger;
     private readonly NodeIdentifier _nodeId;
     private readonly ConcurrentDictionary<ServiceGeneration, RetiringGenerationState> _retiringGenerations = new();
@@ -111,6 +113,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly CancellationTokenSource _shutdownCts = new();
     private IDisposable? _processExitSubscription;
     private int _stopping;
+    internal HostServiceLogBufferRegistry ServiceLogBufferRegistry => _serviceLogBufferRegistry;
     private sealed class ServiceRuntimeEnvironmentEntry
     {
         internal ServiceGeneration Generation;
@@ -177,6 +180,36 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         IMicroserviceDrainTracker drainTracker,
         HostNodeOptions nodeOptions,
         ExtensionRuntimeManager? runtimeManager = null)
+        : this(
+            processExecutor,
+            healthProbe,
+            leaseStore,
+            snapshotHolder,
+            endpointPublisher,
+            runtimeState,
+            options,
+            logger,
+            drainTracker,
+            nodeOptions,
+            runtimeManager,
+            null)
+    {
+    }
+
+    /// <summary>Creates the Host lifecycle composition service with an explicit runtime registry.</summary>
+    internal HostServiceLifecycleManager(
+        IProcessExecutor processExecutor,
+        IServiceHealthProbe healthProbe,
+        IPortLeaseStore leaseStore,
+        HostConfigurationSnapshotHolder snapshotHolder,
+        HostServiceEndpointSnapshotPublisher endpointPublisher,
+        HostRuntimeState runtimeState,
+        HostRuntimeOptions options,
+        ILogger<HostServiceLifecycleManager> logger,
+        IMicroserviceDrainTracker drainTracker,
+        HostNodeOptions nodeOptions,
+        ExtensionRuntimeManager? runtimeManager,
+        HostServiceRuntimeRegistry? runtimeRegistry)
     {
         _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
         _healthProbe = healthProbe ?? throw new ArgumentNullException(nameof(healthProbe));
@@ -188,6 +221,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         _drainTracker = drainTracker ?? throw new ArgumentNullException(nameof(drainTracker));
         _dataDirectory = nodeOptions?.DataDirectory ?? throw new ArgumentNullException(nameof(nodeOptions));
         _runtimeManager = runtimeManager;
+        _runtimeRegistry = runtimeRegistry ?? new HostServiceRuntimeRegistry();
+        _serviceLogBufferRegistry = new HostServiceLogBufferRegistry(options, processExecutor as PosixProcessExecutor);
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _nodeId = new NodeIdentifier(options.NodeId);
         if (processExecutor is IProcessExitObserver observer)
@@ -206,6 +241,38 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 _processExitSubscription = null;
             }
         }
+    }
+    private void SynchronizePublishedRuntimeConfiguration(HostConfigurationSnapshot? publishedSnapshot = null)
+    {
+        var snapshot = publishedSnapshot ?? _snapshotHolder.Current;
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        var enabledServices = snapshot.Services
+            .Where(service => service.Enabled && IsServiceEnabledForSnapshot(snapshot, service.Id))
+            .Select(static service => service.Id)
+            .ToImmutableHashSet();
+        var lifecycleWork = ImmutableHashSet.CreateBuilder<Guid>();
+        foreach (var pair in _slots)
+        {
+            lock (pair.Value.Gate)
+            {
+                if (pair.Value.Active is not null || pair.Value.Starting is not null || pair.Value.Startup is not null)
+                {
+                    lifecycleWork.Add(pair.Key);
+                }
+            }
+        }
+
+        _runtimeRegistry.SynchronizeConfiguration(
+            snapshot,
+            enabledServices,
+            lifecycleWork.ToImmutableHashSet(),
+            _snapshotHolder.RoutingSnapshot?.ServiceOwners,
+            DateTimeOffset.UtcNow);
+        _serviceLogBufferRegistry.SynchronizeConfiguration(snapshot, enabledServices);
     }
 
     /// <inheritdoc />
@@ -362,6 +429,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         }
 
         await QuiesceStartupsAsync(startups, _logger).ConfigureAwait(false);
+        _serviceLogBufferRegistry.TerminateAll(ExtensionServiceLogTerminationReason.HostShutdown);
         foreach (var slot in _slots.Values)
         {
             ServiceGeneration? generation;
@@ -401,6 +469,14 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 // Cleanup is best effort; endpoint publication remains fail-closed.
                 HostLogMessages.LifecycleShutdownCleanupSkipped(_logger, exception, "ProcessExecutorCleanup");
             }
+        }
+        try
+        {
+            _serviceLogBufferRegistry.Dispose();
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.LifecycleShutdownCleanupSkipped(_logger, exception, "DisposeServiceLogBufferRegistry");
         }
 
         try
@@ -473,6 +549,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         var configured = snapshot.Services
             .Where(value => value.Enabled && IsServiceEnabledForSnapshot(snapshot, value.Id))
             .ToImmutableDictionary(value => value.Id);
+        SynchronizePublishedRuntimeConfiguration(snapshot);
         foreach (var slotPair in _slots)
         {
             if (!configured.ContainsKey(slotPair.Key))
@@ -480,6 +557,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 await WithdrawAsync(slotPair.Key, cancellationToken).ConfigureAwait(false);
             }
         }
+        SynchronizePublishedRuntimeConfiguration(snapshot);
 
         var eagerServices = configured.Values
             .Where(value => value.StartMode == ContractStartMode.Eager)
@@ -586,6 +664,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                         slot.Startup = null;
                     }
                 }
+                SynchronizePublishedRuntimeConfiguration();
             }
         }
     }
@@ -597,6 +676,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         CancellationToken cancellationToken)
     {
         await Task.Yield();
+        PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
         SupervisorOperationResult started;
         try
         {
@@ -611,9 +691,21 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(RetryWaitingGenerationAsync));
+            var failedState = generation.Supervisor.Snapshot;
+            var failureCode = MapFailureCode(failedState.Reason);
+            PublishRuntimeSnapshot(
+                generation,
+                failedState,
+                ExtensionServiceLifecycleState.Failed,
+                ExtensionServiceFailureStage.Spawn,
+                failureCode == ExtensionServiceFailureCode.None
+                    ? ExtensionServiceFailureCode.Unknown
+                    : failureCode);
             await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
             return new(generation.Configuration.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable, generation.Supervisor.Snapshot);
         }
+        slot.ObserveStartAttemptNumber(generation.Supervisor.StartAttemptNumber);
+
         if (started.Reason == ServiceStateReasonCode.MissingHostEnvironment &&
             started.FailureMessage is { } placeholder)
         {
@@ -631,6 +723,13 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
         {
             _runtimeState.MarkDatabaseUnavailable();
+            PublishRuntimeSnapshot(
+                generation,
+                started.Snapshot,
+                ExtensionServiceLifecycleState.Waiting,
+                ExtensionServiceFailureStage.Spawn,
+                ExtensionServiceFailureCode.RuntimeUnavailable,
+                retryAt: started.Snapshot.Deadline?.At);
             return new(
                 generation.Configuration.Id,
                 snapshot.Version,
@@ -641,6 +740,16 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
         if (started.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
         {
+            var failureCode = MapFailureCode(started.Reason);
+            PublishRuntimeSnapshot(
+                generation,
+                started.Snapshot,
+                ExtensionServiceLifecycleState.Waiting,
+                ExtensionServiceFailureStage.Spawn,
+                failureCode == ExtensionServiceFailureCode.None
+                    ? ExtensionServiceFailureCode.Unknown
+                    : failureCode,
+                retryAt: started.Snapshot.Deadline?.At);
             PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "waiting");
             return new(
                 generation.Configuration.Id,
@@ -661,6 +770,15 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                     started.Snapshot);
             }
 
+            var failureCode = MapFailureCode(started.Reason);
+            PublishRuntimeSnapshot(
+                generation,
+                started.Snapshot,
+                ExtensionServiceLifecycleState.Failed,
+                ExtensionServiceFailureStage.Spawn,
+                failureCode == ExtensionServiceFailureCode.None
+                    ? ExtensionServiceFailureCode.StartRejected
+                    : failureCode);
             await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
             return new(
                 generation.Configuration.Id,
@@ -668,14 +786,20 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 HostServiceReadinessStatus.Unavailable,
                 started.Snapshot);
         }
+        if (!_serviceLogBufferRegistry.HasOutputTap &&
+            generation.Supervisor.ActiveProcessInstance is { } processInstanceId)
+        {
+            _serviceLogBufferRegistry.OnGenerationStarted(
+                generation.Configuration.Id,
+                processInstanceId,
+                generation.Supervisor.StartAttemptNumber,
+                started.Snapshot.ChangedAt);
+        }
 
         (PortLease Lease, HealthRetryState Retry)? healthy;
         try
         {
-            healthy = await WaitForHealthyAsync(
-                generation.Supervisor,
-                generation.Configuration.Id,
-                cancellationToken).ConfigureAwait(false);
+            healthy = await WaitForHealthyAsync(slot, snapshot, generation, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -685,6 +809,32 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
         if (healthy is not { } ready)
         {
+            var failedState = generation.Supervisor.Snapshot;
+            bool processExited;
+            int? processExitCode;
+            lock (slot.Gate)
+            {
+                processExited = generation.ProcessExitRecorded;
+                processExitCode = generation.ProcessExitCode;
+            }
+
+            var failureCode = processExited
+                ? ExtensionServiceFailureCode.ProcessExited
+                : failedState.LastHealthObservation is { } observation
+                    ? MapProbeFailure(observation.Status, failedState.Reason)
+                    : ExtensionServiceFailureCode.HealthTimeout;
+            if (failureCode == ExtensionServiceFailureCode.None)
+            {
+                failureCode = ExtensionServiceFailureCode.HealthTimeout;
+            }
+
+            PublishRuntimeSnapshot(
+                generation,
+                failedState,
+                ExtensionServiceLifecycleState.Failed,
+                processExited ? ExtensionServiceFailureStage.ProcessExit : ExtensionServiceFailureStage.HealthProbe,
+                failureCode,
+                processExitCode: processExitCode);
             await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -713,6 +863,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
         HostLogMessages.ServiceReady(_logger, generation.Configuration.Id, generation.SnapshotVersion);
+        PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Running);
         PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "ready");
         return new(
             generation.Configuration.Id,
@@ -802,18 +953,40 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             {
                 lock (slot.Gate)
                 {
+                    if (!ReferenceEquals(slot.Active, generation))
+                    {
+                        continue;
+                    }
+
+                    generation.Ready = false;
+                }
+
+                PublishRuntimeSnapshot(
+                    generation,
+                    result.Snapshot,
+                    ExtensionServiceLifecycleState.Failed,
+                    ExtensionServiceFailureStage.Spawn,
+                    ExtensionServiceFailureCode.PortLeaseUnavailable,
+                    preserveServiceVersion: true);
+                lock (slot.Gate)
+                {
                     if (ReferenceEquals(slot.Active, generation))
                     {
                         slot.Active = null;
                     }
-
-                    generation.Ready = false;
                 }
 
                 await StopOrReleaseGenerationAfterExitAsync(
                     slot,
                     generation,
                     CancellationToken.None).ConfigureAwait(false);
+                PublishRuntimeSnapshot(
+                    generation,
+                    generation.Supervisor.Snapshot,
+                    ExtensionServiceLifecycleState.Failed,
+                    ExtensionServiceFailureStage.Spawn,
+                    ExtensionServiceFailureCode.PortLeaseUnavailable,
+                    preserveServiceVersion: true);
                 PublishServiceState(
                     generation.Configuration.Id,
                     generation.SnapshotVersion,

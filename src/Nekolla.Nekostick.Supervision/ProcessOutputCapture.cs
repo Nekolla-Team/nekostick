@@ -33,6 +33,49 @@ public interface IProcessOutputSink
     /// <param name="droppedBytes">The positive number of raw bytes omitted from the capture.</param>
     void OnGap(Guid serviceId, ProcessOutputStream stream, long droppedBytes) { }
 }
+/// <summary>Receives generation lifecycle and raw output events from every supervised process generation.</summary>
+public interface IProcessOutputTap
+{
+    /// <summary>Receives notification that a process generation has started.</summary>
+    /// <param name="serviceId">The service identifier.</param>
+    /// <param name="instanceId">The opaque process generation identifier.</param>
+    /// <param name="attemptNumber">The one-based start attempt number.</param>
+    /// <param name="startedAt">The UTC process start timestamp.</param>
+    void OnGenerationStarted(
+        Guid serviceId,
+        ProcessInstanceId instanceId,
+        int attemptNumber,
+        DateTimeOffset startedAt);
+
+    /// <summary>Receives one raw output chunk from a process generation.</summary>
+    /// <param name="serviceId">The service identifier.</param>
+    /// <param name="instanceId">The opaque process generation identifier.</param>
+    /// <param name="attemptNumber">The one-based start attempt number.</param>
+    /// <param name="stream">The output stream.</param>
+    /// <param name="chunk">The chunk, valid only for the duration of this callback.</param>
+    /// <param name="capturedAt">The UTC time at which the fanout read the chunk.</param>
+    void OnOutputChunk(
+        Guid serviceId,
+        ProcessInstanceId instanceId,
+        int attemptNumber,
+        ProcessOutputStream stream,
+        ReadOnlyMemory<byte> chunk,
+        DateTimeOffset capturedAt);
+
+    /// <summary>Receives notification that a process generation exited after its output streams drained.</summary>
+    /// <param name="serviceId">The service identifier.</param>
+    /// <param name="instanceId">The opaque process generation identifier.</param>
+    /// <param name="attemptNumber">The one-based start attempt number.</param>
+    /// <param name="exitCode">The process exit code when available.</param>
+    /// <param name="exitedAt">The UTC process exit timestamp.</param>
+    void OnGenerationExited(
+        Guid serviceId,
+        ProcessInstanceId instanceId,
+        int attemptNumber,
+        int? exitCode,
+        DateTimeOffset exitedAt);
+}
+
 
 /// <summary>Represents one bounded line of supervised child output.</summary>
 /// <param name="ServiceId">The service that emitted the output.</param>

@@ -25,7 +25,10 @@ public enum ExtensionServiceLifecycleState
     Failed,
 
     /// <summary>The service is waiting for its content or another startup prerequisite.</summary>
-    Waiting
+    Waiting,
+
+    /// <summary>The service is configured but has not been started.</summary>
+    Stopped
 }
 
 /// <summary>Identifies the safe health state of a supervised service.</summary>
@@ -61,6 +64,14 @@ public sealed record ExtensionServiceRuntimeSnapshot
     /// <param name="lastUpdatedAt">The UTC time at which this telemetry was last updated.</param>
     /// <param name="lastHealthAt">The UTC time of the latest health observation.</param>
     /// <param name="ownerExtensionId">The owning extension identifier, when the service is extension-owned.</param>
+    /// <param name="failureStage">The lifecycle stage where the current failure occurred.</param>
+    /// <param name="failureCode">The safe machine-readable failure reason.</param>
+    /// <param name="failureReason">A bounded, human-readable failure explanation.</param>
+    /// <param name="lastProbe">The latest health probe result and safe details.</param>
+    /// <param name="processExitCode">The process exit code, when an exit was observed.</param>
+    /// <param name="restartCount">The number of restart attempts recorded for the service.</param>
+    /// <param name="stateEnteredAt">The UTC time at which the current lifecycle state began.</param>
+    /// <param name="retryAt">The UTC time of the next scheduled startup or restart attempt.</param>
     public ExtensionServiceRuntimeSnapshot(
         Guid serviceId,
         int? processId,
@@ -72,7 +83,15 @@ public sealed record ExtensionServiceRuntimeSnapshot
         long activeForwardedRequestCount,
         DateTimeOffset? lastUpdatedAt,
         DateTimeOffset? lastHealthAt,
-        string? ownerExtensionId)
+        string? ownerExtensionId,
+        ExtensionServiceFailureStage failureStage = ExtensionServiceFailureStage.None,
+        ExtensionServiceFailureCode failureCode = ExtensionServiceFailureCode.None,
+        string? failureReason = null,
+        ExtensionServiceProbeSnapshot? lastProbe = null,
+        int? processExitCode = null,
+        int restartCount = 0,
+        DateTimeOffset? stateEnteredAt = null,
+        DateTimeOffset? retryAt = null)
     {
         ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
         if (processId is <= 0)
@@ -88,16 +107,29 @@ public sealed record ExtensionServiceRuntimeSnapshot
         ArgumentOutOfRangeException.ThrowIfNegative(forwardedRequestCount);
         ArgumentOutOfRangeException.ThrowIfNegative(activeForwardedRequestCount);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(activeForwardedRequestCount, forwardedRequestCount);
+        ArgumentOutOfRangeException.ThrowIfNegative(restartCount);
 
         var startedAtUtc = startedAt?.ToUniversalTime();
         var lastUpdatedAtUtc = lastUpdatedAt?.ToUniversalTime();
         var lastHealthAtUtc = lastHealthAt?.ToUniversalTime();
+        var stateEnteredAtUtc = stateEnteredAt?.ToUniversalTime() ?? lastUpdatedAtUtc;
+        var retryAtUtc = retryAt?.ToUniversalTime();
         if (startedAtUtc is { } started && lastUpdatedAtUtc is { } updated && started > updated)
         {
             throw new ArgumentException("The service telemetry timestamps are inconsistent.");
         }
 
         if (lastHealthAtUtc is { } health && lastUpdatedAtUtc is { } updatedAtHealth && health > updatedAtHealth)
+        {
+            throw new ArgumentException("The service telemetry timestamps are inconsistent.");
+        }
+
+        if (stateEnteredAtUtc is { } stateEntered && lastUpdatedAtUtc is { } updatedAtState && stateEntered > updatedAtState)
+        {
+            throw new ArgumentException("The service telemetry timestamps are inconsistent.");
+        }
+
+        if (lastProbe is not null && lastUpdatedAtUtc is { } updatedAtProbe && lastProbe.ObservedAt > updatedAtProbe)
         {
             throw new ArgumentException("The service telemetry timestamps are inconsistent.");
         }
@@ -116,6 +148,14 @@ public sealed record ExtensionServiceRuntimeSnapshot
             : string.IsNullOrWhiteSpace(ownerExtensionId)
                 ? throw new ArgumentException("An owner extension identifier is required when supplied.", nameof(ownerExtensionId))
                 : ownerExtensionId;
+        FailureStage = failureStage;
+        FailureCode = failureCode;
+        FailureReason = failureReason;
+        LastProbe = lastProbe;
+        ProcessExitCode = processExitCode;
+        RestartCount = restartCount;
+        StateEnteredAt = stateEnteredAtUtc;
+        RetryAt = retryAtUtc;
     }
 
     /// <summary>Gets the stable service identifier.</summary>
@@ -150,6 +190,30 @@ public sealed record ExtensionServiceRuntimeSnapshot
 
     /// <summary>Gets the owning extension identifier when the service is extension-owned.</summary>
     public string? OwnerExtensionId { get; }
+
+    /// <summary>Gets the lifecycle stage where the current failure occurred.</summary>
+    public ExtensionServiceFailureStage FailureStage { get; }
+
+    /// <summary>Gets the safe machine-readable failure reason.</summary>
+    public ExtensionServiceFailureCode FailureCode { get; }
+
+    /// <summary>Gets the bounded, human-readable failure explanation.</summary>
+    public string? FailureReason { get; }
+
+    /// <summary>Gets the latest health probe result and safe details.</summary>
+    public ExtensionServiceProbeSnapshot? LastProbe { get; }
+
+    /// <summary>Gets the process exit code, when an exit was observed.</summary>
+    public int? ProcessExitCode { get; }
+
+    /// <summary>Gets the number of restart attempts recorded for the service.</summary>
+    public int RestartCount { get; }
+
+    /// <summary>Gets the UTC time at which the current lifecycle state began, when known.</summary>
+    public DateTimeOffset? StateEnteredAt { get; }
+
+    /// <summary>Gets the UTC time of the next scheduled startup or restart attempt.</summary>
+    public DateTimeOffset? RetryAt { get; }
 }
 
 /// <summary>Provides global, read-only supervisor telemetry to an extension.</summary>

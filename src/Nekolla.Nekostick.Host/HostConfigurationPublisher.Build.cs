@@ -674,13 +674,16 @@ public sealed partial class HostConfigurationPublisher
                 .CreateDbContextAsync(cancellationToken)
                 .ConfigureAwait(false);
             await using var api = new EfHostConfigApi(db, logger: _logger);
-            return await api
-                .PersistDiscoveredExtensionRecordsAsync(
-                    initialState,
-                    snapshot.Version,
-                    records,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            using (HostConfigurationWriteContext.EnterHostComponent("config-publisher"))
+            {
+                return await api
+                    .PersistDiscoveredExtensionRecordsAsync(
+                        initialState,
+                        snapshot.Version,
+                        records,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -763,6 +766,58 @@ public sealed partial class HostConfigurationPublisher
 
         return false;
     }
+
+    internal bool HasRunningContentHashDrift(
+        HostConfigurationSnapshot snapshot,
+        IReadOnlyDictionary<string, string?> observedContentHashes)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(observedContentHashes);
+
+        var generation = _snapshotHolder.RoutingSnapshot?.DispatchGeneration;
+        if (generation is null)
+        {
+            return false;
+        }
+
+        foreach (var context in generation.Contexts)
+        {
+            var extensionId = context.Instance.Manifest.Id;
+            var isLoaded = false;
+            foreach (var record in snapshot.ExtensionRecords)
+            {
+                if (record.LoadState == ExtensionLoadState.Loaded &&
+                    string.Equals(record.ExtensionId, extensionId, StringComparison.Ordinal))
+                {
+                    isLoaded = true;
+                    break;
+                }
+            }
+
+            if (!isLoaded ||
+                !observedContentHashes.TryGetValue(extensionId, out var observedHash) ||
+                observedHash is null)
+            {
+                continue;
+            }
+
+            if (!string.Equals(context.ContentHash, observedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
+    private static bool HasSameDispatchGeneration(
+        ExtensionDispatchGeneration? previous,
+        ExtensionDispatchGeneration candidate) =>
+        previous is not null &&
+        previous.Contexts.Length == candidate.Contexts.Length &&
+        previous.Bindings.Length == candidate.Bindings.Length &&
+        candidate.Bindings.All(static binding => binding.Reused);
 
     private static bool CanReusePriorLoadedIdentities(HostRoutingSnapshot previousSnapshot, HostConfigurationSnapshot nextSnapshot)
     {

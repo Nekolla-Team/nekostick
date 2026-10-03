@@ -241,8 +241,23 @@ internal static partial class HostLogMessages
     [LoggerMessage(
         EventId = 1109,
         Level = LogLevel.Information,
-        Message = "Configuration snapshot applied. Version: {Version}.")]
-    internal static partial void ConfigurationSnapshotApplied(ILogger logger, long version);
+        Message = "Configuration snapshot applied. Version: {Version}. CommittedBy: {CommittedBy}. Changes: {Changes}. ForcedReloadRequested: {ForcedReloadRequested}. GenerationChanged: {GenerationChanged}.")]
+    internal static partial void ConfigurationSnapshotApplied(
+        ILogger logger,
+        long version,
+        string committedBy,
+        string changes,
+        bool forcedReloadRequested,
+        bool generationChanged);
+
+    [LoggerMessage(
+        EventId = 1110,
+        Level = LogLevel.Information,
+        Message = "Duplicate configuration snapshot publication suppressed. Version: {Version}. Reason: {Reason}.")]
+    internal static partial void ConfigurationSnapshotDuplicateSuppressed(
+        ILogger logger,
+        long version,
+        string reason);
 
     [LoggerMessage(
         EventId = 1015,
@@ -589,14 +604,17 @@ internal static partial class HostLogMessages
     [LoggerMessage(
         EventId = 1062,
         Level = LogLevel.Information,
-        Message = "Extension refresh completed. CallerExtensionId: {CallerExtensionId}. Added: {Added}. VersionUpdated: {VersionUpdated}. Missing: {Missing}. Skipped: {Skipped}.")]
+        Message = "Extension refresh completed. CallerExtensionId: {CallerExtensionId}. Added: {Added}. VersionUpdated: {VersionUpdated}. ContentHashUpdated: {ContentHashUpdated}. Missing: {Missing}. Skipped: {Skipped}. PublishTriggered: {PublishTriggered}. PublishReason: {PublishReason}.")]
     internal static partial void ExtensionRefreshCompleted(
         ILogger logger,
         string callerExtensionId,
         int added,
         int versionUpdated,
+        int contentHashUpdated,
         int missing,
-        int skipped);
+        int skipped,
+        bool publishTriggered,
+        string publishReason);
 
     [LoggerMessage(
         EventId = 1063,

@@ -110,6 +110,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     private readonly TimeSpan stopGracePeriod;
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
     private long lifecycleEpoch;
+    private int startAttemptNumber;
     private ServiceRuntimeSnapshot snapshot;
     private PortLease? lease;
     private bool initialLeasePending;
@@ -151,6 +152,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         this.healthProbe = healthProbe ?? throw new ArgumentNullException(nameof(healthProbe));
         this.leaseStore = leaseStore ?? throw new ArgumentNullException(nameof(leaseStore));
         this.launchSpecification = launchSpecification ?? throw new ArgumentNullException(nameof(launchSpecification));
+        startAttemptNumber = launchSpecification.AttemptNumber - 1;
         this.healthRequest = healthRequest ?? throw new ArgumentNullException(nameof(healthRequest));
         this.leaseRequest = leaseRequest ?? throw new ArgumentNullException(nameof(leaseRequest));
         _logger = logger ?? NullLogger.Instance;
@@ -202,6 +204,26 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
 
     /// <summary>Gets the latest lease only when it has been safely acquired.</summary>
     public PortLease? Lease => Volatile.Read(ref lease);
+    /// <summary>Gets the latest one-based start attempt number.</summary>
+    public int StartAttemptNumber => Volatile.Read(ref startAttemptNumber);
+
+    private int NextStartAttemptNumber()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref startAttemptNumber);
+            if (current == int.MaxValue)
+            {
+                return current;
+            }
+
+            var next = current + 1;
+            if (Interlocked.CompareExchange(ref startAttemptNumber, next, current) == current)
+            {
+                return next;
+            }
+        }
+    }
 
     /// <summary>Changes desired state without performing adapter I/O.</summary>
     /// <param name="desired">The new desired lifecycle state.</param>
@@ -254,6 +276,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref lifecycleEpoch);
+        var attemptNumber = NextStartAttemptNumber();
         var current = Snapshot;
         if (current.Desired != DesiredServiceState.Running)
         {
@@ -361,7 +384,9 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         ProcessOperationResult processResult;
         try
         {
-            processResult = await processExecutor.StartAsync(launchSpecification, cancellationToken).ConfigureAwait(false);
+            processResult = await processExecutor.StartAsync(
+                launchSpecification.WithAttemptNumber(attemptNumber),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -546,7 +571,11 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 HealthObservationStatus.Unavailable,
                 now,
                 TimeSpan.Zero,
-                retryState.Attempt);
+                retryState.Attempt,
+                target: ServiceHealthProbe.DescribeTarget(healthRequest),
+                errorMessage: leaseFailure == ServiceStateReasonCode.PortLeaseExpired
+                    ? "The service health check port lease expired."
+                    : "The service health check port lease is unavailable.");
         }
         else
         {
@@ -557,12 +586,28 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 SupervisionLogMessages.OperationCancelled(_logger, "ObserveHealth", launchSpecification.ServiceId);
-                observation = new HealthObservationResult(launchSpecification.ServiceId, HealthObservationStatus.Cancelled, now, TimeSpan.Zero, retryState.Attempt);
+                observation = new HealthObservationResult(
+                    launchSpecification.ServiceId,
+                    HealthObservationStatus.Cancelled,
+                    now,
+                    TimeSpan.Zero,
+                    retryState.Attempt,
+                    target: ServiceHealthProbe.DescribeTarget(healthRequest),
+                    errorMessage: "The health check was cancelled.");
             }
             catch (Exception exception)
             {
                 SupervisionLogMessages.HealthProbeFailed(_logger, exception, launchSpecification.ServiceId);
-                observation = new HealthObservationResult(launchSpecification.ServiceId, HealthObservationStatus.Unavailable, now, TimeSpan.Zero, retryState.Attempt);
+                observation = new HealthObservationResult(
+                    launchSpecification.ServiceId,
+                    HealthObservationStatus.Unavailable,
+                    now,
+                    TimeSpan.Zero,
+                    retryState.Attempt,
+                    target: ServiceHealthProbe.DescribeTarget(healthRequest),
+                    errorMessage: ServiceHealthProbe.DescribeError(
+                        HealthObservationStatus.Unavailable,
+                        healthRequest.Definition.Kind));
             }
         }
 

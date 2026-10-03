@@ -27,7 +27,7 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
         _host.ReadExtensionSettingsAsync(extensionId, cancellationToken);
 
     /// <inheritdoc />
-    public ValueTask<ConfigurationWriteResult> WriteOwnedSettingsAsync(
+    public async ValueTask<ConfigurationWriteResult> WriteOwnedSettingsAsync(
         string extensionId,
         long expectedVersion,
         ExtensionSettingsConfiguration settings,
@@ -35,11 +35,17 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
     {
         if (settings is null || !string.Equals(extensionId, settings.ExtensionId, StringComparison.Ordinal))
         {
-            return ValueTask.FromResult(ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Validation)));
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(ConfigurationErrorCode.Validation));
         }
 
-        return _host.WriteExtensionSettingsAsync(extensionId, expectedVersion, settings, cancellationToken);
+        using var writeContext = HostConfigurationWriteContext.EnterExtension(extensionId);
+        return await _host.WriteExtensionSettingsAsync(
+                extensionId,
+                expectedVersion,
+                settings,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -165,13 +171,15 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
         ownedServiceIds.ExceptWith(removedServices);
         ownedServiceIds.UnionWith(changes.ServiceUpserts.Select(value => value.Id));
 
+        using var writeContext = HostConfigurationWriteContext.EnterExtension(extensionId);
         return await _host.WriteExtensionOwnedSnapshotAsync(
-            extensionId,
-            expectedVersion,
-            hostChanges,
-            ownedRouteIds,
-            ownedServiceIds,
-            cancellationToken).ConfigureAwait(false);
+                extensionId,
+                expectedVersion,
+                hostChanges,
+                ownedRouteIds,
+                ownedServiceIds,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static RouteConfiguration ToHostRoute(

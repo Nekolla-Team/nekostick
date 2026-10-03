@@ -35,8 +35,8 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnName("committed_at");
 
                     b.Property<string>("CommittedBy")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
                         .HasColumnName("committed_by");
 
                     b.Property<DateTimeOffset>("CreatedAt")

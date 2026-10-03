@@ -27,22 +27,43 @@ public sealed partial class HostServiceLifecycleManager
 
     /// <summary>Records a process-exit observation for the identified process generation.</summary>
     public void NotifyProcessExit(Guid serviceId, ProcessInstanceId instanceId, bool successfulExit) =>
+        NotifyProcessExit(serviceId, instanceId, successfulExit, exitCode: null);
+
+    /// <summary>Records an identity-aware process exit with its internal exit code.</summary>
+    internal void NotifyProcessExit(
+        Guid serviceId,
+        ProcessInstanceId instanceId,
+        bool successfulExit,
+        int? exitCode) =>
         ObserveBackgroundTask(
-            NotifyProcessExitAsync(serviceId, instanceId, successfulExit),
+            NotifyProcessExitAsync(serviceId, instanceId, successfulExit, exitCode),
             nameof(NotifyProcessExitAsync),
             serviceId);
 
     /// <summary>Completes the identity-aware process-exit handoff.</summary>
-    internal Task NotifyProcessExitAsync(Guid serviceId, ProcessInstanceId instanceId, bool successfulExit) =>
-        HandleProcessExitAsync(serviceId, instanceId, successfulExit, DateTimeOffset.UtcNow);
+    internal Task NotifyProcessExitAsync(
+        Guid serviceId,
+        ProcessInstanceId instanceId,
+        bool successfulExit,
+        int? exitCode = null) =>
+        NotifyProcessExitAsync(serviceId, instanceId, successfulExit, DateTimeOffset.UtcNow, exitCode);
+
+    private Task NotifyProcessExitAsync(
+        Guid serviceId,
+        ProcessInstanceId instanceId,
+        bool successfulExit,
+        DateTimeOffset exitedAt,
+        int? exitCode) =>
+        HandleProcessExitAsync(serviceId, instanceId, successfulExit, exitedAt, exitCode);
 
     private void HandleProcessExitObservation(ProcessExitObservation observation) =>
         ObserveBackgroundTask(
-            HandleProcessExitAsync(
+            NotifyProcessExitAsync(
                 observation.ServiceId,
                 observation.InstanceId,
                 observation.SuccessfulExit,
-                observation.ExitedAt),
+                observation.ExitedAt,
+                observation.ExitCode),
             nameof(HandleProcessExitAsync),
             observation.ServiceId);
 
@@ -134,6 +155,7 @@ public sealed partial class HostServiceLifecycleManager
                     slot.Startup = null;
                 }
             }
+            SynchronizePublishedRuntimeConfiguration();
         }
     }
 
@@ -151,11 +173,22 @@ public sealed partial class HostServiceLifecycleManager
             {
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
+            var attemptNumber = slot.ReserveStartAttemptNumber();
 
             if (!_runtimeState.NewServicesAllowed)
             {
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    service,
+                    null,
+                    null,
+                    ExtensionServiceLifecycleState.Waiting,
+                    ExtensionServiceFailureStage.Spawn,
+                    ExtensionServiceFailureCode.RuntimeUnavailable);
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.DatabaseUnavailable);
             }
+            PublishConfiguredRuntimeTransition(slot, snapshot, service, ExtensionServiceLifecycleState.Starting);
             await Task.Yield();
             var dependencies = ServiceLaunchTemplate.ExtractDependencies(
                 service.ArgumentList.Cast<string?>().Concat(service.Environment.Values));
@@ -168,6 +201,15 @@ public sealed partial class HostServiceLifecycleManager
                         service.Id,
                         snapshot.Version,
                         dependencyId);
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.DependencyUnavailable);
                     PublishServiceState(service.Id, snapshot.Version, "unavailable");
                     return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
                 }
@@ -187,6 +229,15 @@ public sealed partial class HostServiceLifecycleManager
                         service.Id,
                         snapshot.Version,
                         dependencyId);
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.DependencyUnavailable);
                     PublishServiceState(service.Id, snapshot.Version, "unavailable");
                     return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
                 }
@@ -205,6 +256,15 @@ public sealed partial class HostServiceLifecycleManager
                             service.Id,
                             snapshot.Version,
                             dependencyId);
+                        PublishRuntimeFailure(
+                            slot,
+                            snapshot,
+                            service,
+                            null,
+                            null,
+                            ExtensionServiceLifecycleState.Waiting,
+                            ExtensionServiceFailureStage.Spawn,
+                            ExtensionServiceFailureCode.DependencyUnavailable);
                         PublishServiceState(service.Id, snapshot.Version, "unavailable");
                         return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
                     }
@@ -226,17 +286,60 @@ public sealed partial class HostServiceLifecycleManager
                         service.Id,
                         snapshot.Version,
                         dependencyId);
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.DependencyUnavailable);
                     PublishServiceState(service.Id, snapshot.Version, "unavailable");
                     return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
                 }
             }
 
 
-            var candidate = await StartGenerationAsync(snapshot, service, _shutdownCts.Token).ConfigureAwait(false);
+            var candidate = await StartGenerationAsync(
+                slot,
+                snapshot,
+                service,
+                attemptNumber,
+                _shutdownCts.Token).ConfigureAwait(false);
             if (candidate is null)
             {
                 if (!IsStopping)
                 {
+                    var latest = _snapshotHolder.Current;
+                    var stillConfigured = latest is null || latest.Version < snapshot.Version ||
+                        latest.Services.Any(value =>
+                            value.Id == service.Id &&
+                            value.Version == service.Version &&
+                            value.Enabled) &&
+                        IsServiceEnabledForSnapshot(latest, service.Id);
+                    if (!stillConfigured)
+                    {
+                        SynchronizePublishedRuntimeConfiguration(latest);
+                        PublishActiveRuntimeState(slot, latest ?? snapshot);
+                        return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
+                    }
+
+                    if (!_runtimeRegistry.TryGet(service.Id, out var current) ||
+                        current.FailureCode == ExtensionServiceFailureCode.None &&
+                        current.FailureStage == ExtensionServiceFailureStage.None)
+                    {
+                        PublishRuntimeFailure(
+                            slot,
+                            snapshot,
+                            service,
+                            null,
+                            null,
+                            ExtensionServiceLifecycleState.Failed,
+                            ExtensionServiceFailureStage.Spawn,
+                            ExtensionServiceFailureCode.StartRejected);
+                    }
+
                     HostLogMessages.ServiceLaunchRejected(_logger, service.Id, snapshot.Version);
                     PublishServiceState(service.Id, snapshot.Version, "unavailable");
                 }
@@ -250,16 +353,27 @@ public sealed partial class HostServiceLifecycleManager
             var accepted = false;
             lock (_lifecycleGate)
             {
-                if (!IsStopping)
+                var latest = _snapshotHolder.Current;
+                var stillConfigured = latest is null || latest.Version < snapshot.Version ||
+                    latest.Services.Any(value =>
+                        value.Id == service.Id &&
+                        value.Version == service.Version &&
+                        value.Enabled) &&
+                    IsServiceEnabledForSnapshot(latest, service.Id);
+                if (!IsStopping && stillConfigured)
                 {
                     lock (slot.Gate)
                     {
                         old = slot.Active;
                         slot.Active = candidate;
+                        if (ReferenceEquals(slot.Starting, candidate))
+                        {
+                            slot.Starting = null;
+                        }
                     }
+
                     _runtimeEnvironments[service.Id] =
                         new ServiceRuntimeEnvironmentEntry(candidate, candidate.ResolvedEnvironment);
-
                     accepted = true;
                 }
             }
@@ -267,6 +381,16 @@ public sealed partial class HostServiceLifecycleManager
             if (!accepted)
             {
                 await StopGenerationAsync(slot, candidate, CancellationToken.None).ConfigureAwait(false);
+                lock (slot.Gate)
+                {
+                    if (ReferenceEquals(slot.Starting, candidate))
+                    {
+                        slot.Starting = null;
+                    }
+                }
+
+                SynchronizePublishedRuntimeConfiguration();
+                PublishActiveRuntimeState(slot, _snapshotHolder.Current ?? snapshot);
                 PublishServiceState(service.Id, snapshot.Version, "stopped");
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
@@ -274,6 +398,7 @@ public sealed partial class HostServiceLifecycleManager
             if (!candidate.Ready)
             {
                 await PublishReadyEndpointsAsync().ConfigureAwait(false);
+                PublishRuntimeSnapshot(candidate, lifecycleState: ExtensionServiceLifecycleState.Waiting);
                 PublishServiceState(service.Id, candidate.SnapshotVersion, "waiting");
                 if (old is not null && !ReferenceEquals(old, candidate) && stopReplacedGeneration)
                 {
@@ -290,6 +415,7 @@ public sealed partial class HostServiceLifecycleManager
 
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
             HostLogMessages.ServiceReady(_logger, service.Id, candidate.SnapshotVersion);
+            PublishRuntimeSnapshot(candidate, lifecycleState: ExtensionServiceLifecycleState.Running);
             PublishServiceState(service.Id, candidate.SnapshotVersion, "ready");
             if (old is not null && !ReferenceEquals(old, candidate) && stopReplacedGeneration)
             {
@@ -315,202 +441,490 @@ public sealed partial class HostServiceLifecycleManager
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(StartOrSwitchAsync));
             HostLogMessages.ServiceLaunchRejected(_logger, service.Id, snapshot.Version);
+            PublishRuntimeFailure(
+                slot,
+                snapshot,
+                service,
+                null,
+                null,
+                ExtensionServiceLifecycleState.Failed,
+                ExtensionServiceFailureStage.Spawn,
+                ExtensionServiceFailureCode.Unknown);
             PublishServiceState(service.Id, snapshot.Version, "unavailable");
             return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
         }
     }
 
     private async Task<ServiceGeneration?> StartGenerationAsync(
+        ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
+        int attemptNumber,
         CancellationToken cancellationToken)
     {
-        var rangeStart = snapshot.GlobalSettings.AutoPortRangeStart;
-        var rangeEnd = snapshot.GlobalSettings.AutoPortRangeEnd;
-        if (rangeStart < 1 || rangeEnd > 65535 || rangeStart > rangeEnd)
-        {
-            return null;
-        }
-
-        var request = PortLeaseRequest.Automatic(
-            _nodeId,
-            service.Id,
-            LeasePolicy.TimeToLive,
-            rangeStart,
-            rangeEnd);
-        var now = DateTimeOffset.UtcNow;
-        PortLeaseOperationResult leaseResult;
+        ServiceGeneration? candidate = null;
+        var keepStartingCandidate = false;
         try
         {
-            leaseResult = await _leaseStore.ApplyAsync(
-                PortLeaseIntent.Acquire(request),
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
-            _runtimeState.MarkDatabaseUnavailable();
-            return null;
-        }
-
-        var acquired = leaseResult.Lease;
-        if (leaseResult.Status != PortLeaseOperationStatus.Applied || acquired is null)
-        {
-            if (leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable)
+            var rangeStart = snapshot.GlobalSettings.AutoPortRangeStart;
+            var rangeEnd = snapshot.GlobalSettings.AutoPortRangeEnd;
+            if (rangeStart < 1 || rangeEnd > 65535 || rangeStart > rangeEnd)
             {
-                _runtimeState.MarkDatabaseUnavailable();
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    service,
+                    null,
+                    null,
+                    ExtensionServiceLifecycleState.Failed,
+                    ExtensionServiceFailureStage.Spawn,
+                    ExtensionServiceFailureCode.InvalidLaunchSpecification);
+                return null;
             }
 
-            return null;
-        }
-
-        if (IsStopping ||
-            acquired.NodeId != request.NodeId ||
-            acquired.ServiceId != request.ServiceId ||
-            acquired.Port < rangeStart ||
-            acquired.Port > rangeEnd ||
-            acquired.IsExpired(now))
-        {
-            await ReleaseAutomaticLeaseBestEffortAsync(request, acquired).ConfigureAwait(false);
-            return null;
-        }
-
-        ServiceSupervisor? supervisor = null;
-        Task<SupervisorOperationResult>? startTask = null;
-        var resolvedEnvironment = ImmutableDictionary<string, string>.Empty;
-        // Re-validate against the freshest known snapshot only when it is newer than the
-        // decision snapshot; an empty/lagging holder must not veto a legitimate launch.
-        var gateSnapshot = _snapshotHolder.Current is { } latestSnapshot &&
-            latestSnapshot.Version > snapshot.Version
-                ? latestSnapshot
-                : snapshot;
-        lock (_lifecycleGate)
-        {
-            if (!IsStopping &&
-                gateSnapshot.Services.Any(value =>
-                    value.Id == service.Id &&
-                    value.Version == service.Version &&
-                    value.Enabled) &&
-                IsServiceEnabledForSnapshot(gateSnapshot, service.Id))
+            var request = PortLeaseRequest.Automatic(
+                _nodeId,
+                service.Id,
+                LeasePolicy.TimeToLive,
+                rangeStart,
+                rangeEnd);
+            var now = DateTimeOffset.UtcNow;
+            PortLeaseOperationResult leaseResult;
+            try
             {
+                leaseResult = await _leaseStore.ApplyAsync(
+                    PortLeaseIntent.Acquire(request),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
+                _runtimeState.MarkDatabaseUnavailable();
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.RuntimeUnavailable);
+
+                }
+                return null;
+            }
+
+            var acquired = leaseResult.Lease;
+            if (leaseResult.Status != PortLeaseOperationStatus.Applied || acquired is null)
+            {
+                if (leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable)
+                {
+                    _runtimeState.MarkDatabaseUnavailable();
+                }
+
+                if (leaseResult.Status != PortLeaseOperationStatus.Cancelled || !cancellationToken.IsCancellationRequested)
+                {
+                    var failureCode = leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable
+                        ? ExtensionServiceFailureCode.RuntimeUnavailable
+                        : ExtensionServiceFailureCode.PortLeaseUnavailable;
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        failureCode);
+
+                }
+                return null;
+            }
+
+            if (IsStopping ||
+                acquired.NodeId != request.NodeId ||
+                acquired.ServiceId != request.ServiceId ||
+                acquired.Port < rangeStart ||
+                acquired.Port > rangeEnd ||
+                acquired.IsExpired(now))
+            {
+                await ReleaseAutomaticLeaseBestEffortAsync(request, acquired).ConfigureAwait(false);
+                if (!IsStopping)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.PortLeaseUnavailable);
+                }
+
+                return null;
+            }
+
+            ServiceSupervisor? supervisor = null;
+            Task<SupervisorOperationResult>? startTask = null;
+            var resolvedEnvironment = ImmutableDictionary<string, string>.Empty;
+            var gateSnapshot = _snapshotHolder.Current is { } latestSnapshot &&
+                latestSnapshot.Version > snapshot.Version
+                    ? latestSnapshot
+                    : snapshot;
+            lock (_lifecycleGate)
+            {
+                if (!IsStopping &&
+                    gateSnapshot.Services.Any(value =>
+                        value.Id == service.Id &&
+                        value.Version == service.Version &&
+                        value.Enabled) &&
+                    IsServiceEnabledForSnapshot(gateSnapshot, service.Id))
+                {
+                    try
+                    {
+                        var created = CreateSupervisor(service, acquired.Port, attemptNumber, acquired, now);
+                        supervisor = created.Supervisor;
+                        resolvedEnvironment = created.ResolvedEnvironment;
+                        var ownerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
+                            service.Id,
+                            out var owner)
+                            == true
+                            ? owner
+                            : null;
+                        candidate = new ServiceGeneration(
+                            service,
+                            supervisor,
+                            acquired,
+                            snapshot.Version,
+                            HealthRetryState.Start(service.Id, now, HealthPolicy.StartupTimeout),
+                            ownerExtensionId,
+                            resolvedEnvironment,
+                            ready: false);
+                        lock (slot.Gate)
+                        {
+                            slot.Starting = candidate;
+                        }
+
+                    }
+                    catch (Exception exception)
+                    {
+                        HostLogMessages.FailureDetails(_logger, exception, nameof(CreateSupervisor));
+                        PublishRuntimeFailure(
+                            slot,
+                            snapshot,
+                            service,
+                            null,
+                            null,
+                            ExtensionServiceLifecycleState.Failed,
+                            ExtensionServiceFailureStage.Spawn,
+                            ExtensionServiceFailureCode.InvalidLaunchSpecification);
+                    }
+                }
+            }
+
+            if (supervisor is null)
+            {
+                await ReleaseAutomaticLeaseBestEffortAsync(request, acquired).ConfigureAwait(false);
+                return null;
+            }
+
+            if (candidate is not null)
+            {
+                PublishConfiguredRuntimeTransition(slot, snapshot, service, ExtensionServiceLifecycleState.Starting);
                 try
                 {
-                    var created = CreateSupervisor(service, acquired.Port, acquired, now);
-                    supervisor = created.Supervisor;
-                    resolvedEnvironment = created.ResolvedEnvironment;
-                    startTask = supervisor.StartAsync(now, _shutdownCts.Token).AsTask();
+                    startTask = candidate.Supervisor.StartAsync(now, _shutdownCts.Token).AsTask();
                 }
                 catch (Exception exception)
                 {
-                    HostLogMessages.FailureDetails(_logger, exception, nameof(CreateSupervisor));
-                    startTask = null;
+                    HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
                 }
             }
-        }
 
-        if (supervisor is null)
-        {
-            await ReleaseAutomaticLeaseBestEffortAsync(request, acquired).ConfigureAwait(false);
-            return null;
-        }
-
-        if (startTask is null)
-        {
-            await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-            return null;
-        }
-
-        SupervisorOperationResult started;
-        try
-        {
-            started = await startTask.ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
-            await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-            return null;
-        }
-
-        if (started.Reason == ServiceStateReasonCode.MissingHostEnvironment &&
-            started.FailureMessage is { } placeholder)
-        {
-            HostLogMessages.ServiceLaunchMissingHostEnvironment(
-                _logger,
-                service.Id,
-                snapshot.Version,
-                placeholder);
-        }
-
-        if (started.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
-        {
-            var waitingOwnerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
-                service.Id,
-                out var waitingOwner)
-                == true
-                ? waitingOwner
-                : null;
-            return new ServiceGeneration(
-                service,
-                supervisor,
-                null,
-                snapshot.Version,
-                HealthRetryState.Start(service.Id, DateTimeOffset.UtcNow, HealthPolicy.StartupTimeout),
-                waitingOwnerExtensionId,
-                resolvedEnvironment,
-                ready: false);
-        }
-
-        if (started.Status != SupervisorOperationStatus.Applied || supervisor.Lease is null)
-        {
-            if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
+            if (startTask is null)
             {
-                _runtimeState.MarkDatabaseUnavailable();
+                var failedState = supervisor.Snapshot;
+                if (candidate is not null)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        candidate,
+                        failedState,
+                        ExtensionServiceLifecycleState.Failed,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.InvalidLaunchSpecification);
+                }
+
+                await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                if (candidate is not null)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        candidate,
+                        failedState,
+                        ExtensionServiceLifecycleState.Failed,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.InvalidLaunchSpecification,
+                        updatedAt: DateTimeOffset.UtcNow);
+                }
+
+                return null;
             }
 
-            return null;
-        }
+            SupervisorOperationResult started;
+            try
+            {
+                started = await startTask.ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
+                var failedState = supervisor.Snapshot;
+                if (candidate is not null)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        candidate,
+                        failedState,
+                        ExtensionServiceLifecycleState.Failed,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.Unknown);
+                }
 
-        if (IsStopping)
+                await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                if (candidate is not null)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        candidate,
+                        failedState,
+                        ExtensionServiceLifecycleState.Failed,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.Unknown,
+                        updatedAt: DateTimeOffset.UtcNow);
+                }
+
+                return null;
+            }
+
+            if (started.Reason == ServiceStateReasonCode.MissingHostEnvironment &&
+                started.FailureMessage is { } placeholder)
+            {
+                HostLogMessages.ServiceLaunchMissingHostEnvironment(
+                    _logger,
+                    service.Id,
+                    snapshot.Version,
+                    placeholder);
+            }
+
+            if (candidate is null)
+            {
+                await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                return null;
+            }
+
+            if (started.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
+            {
+                candidate.Lease = null;
+                candidate.Ready = false;
+                var failureCode = MapFailureCode(started.Reason);
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    service,
+                    candidate,
+                    started.Snapshot,
+                    ExtensionServiceLifecycleState.Waiting,
+                    ExtensionServiceFailureStage.Spawn,
+                    failureCode == ExtensionServiceFailureCode.None
+                        ? ExtensionServiceFailureCode.Unknown
+                        : failureCode,
+                    retryAt: started.Snapshot.Deadline?.At);
+                keepStartingCandidate = true;
+                return candidate;
+            }
+
+            if (started.Status != SupervisorOperationStatus.Applied || supervisor.Lease is null)
+            {
+                if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
+                {
+                    _runtimeState.MarkDatabaseUnavailable();
+                }
+
+                var failureCode = MapFailureCode(started.Reason);
+                if (failureCode == ExtensionServiceFailureCode.None)
+                {
+                    failureCode = ExtensionServiceFailureCode.StartRejected;
+                }
+
+                var failureLifecycle = failureCode is ExtensionServiceFailureCode.RuntimeUnavailable or
+                    ExtensionServiceFailureCode.PortLeaseUnavailable
+                    ? ExtensionServiceLifecycleState.Waiting
+                    : ExtensionServiceLifecycleState.Failed;
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    service,
+                    candidate,
+                    started.Snapshot,
+                    failureLifecycle,
+                    ExtensionServiceFailureStage.Spawn,
+                    failureCode);
+                return null;
+            }
+            if (!_serviceLogBufferRegistry.HasOutputTap &&
+                started.Status == SupervisorOperationStatus.Applied &&
+                candidate.Supervisor.ActiveProcessInstance is { } processInstanceId)
+            {
+                _serviceLogBufferRegistry.OnGenerationStarted(
+                    service.Id,
+                    processInstanceId,
+                    attemptNumber,
+                    started.Snapshot.ChangedAt);
+            }
+
+            if (IsStopping)
+            {
+                await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                return null;
+            }
+
+            var healthy = await WaitForHealthyAsync(slot, snapshot, candidate, cancellationToken).ConfigureAwait(false);
+            if (healthy is not { } ready)
+            {
+                if (IsStopping || cancellationToken.IsCancellationRequested)
+                {
+                    await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                    return null;
+                }
+
+                var failedState = supervisor.Snapshot;
+                bool processExited;
+                int? processExitCode;
+                lock (slot.Gate)
+                {
+                    processExited = candidate.ProcessExitRecorded;
+                    processExitCode = candidate.ProcessExitCode;
+                }
+
+                var failureCode = processExited
+                    ? ExtensionServiceFailureCode.ProcessExited
+                    : failedState.LastHealthObservation is { } observation
+                        ? MapProbeFailure(observation.Status, failedState.Reason)
+                        : ExtensionServiceFailureCode.HealthTimeout;
+                if (failureCode == ExtensionServiceFailureCode.None)
+                {
+                    failureCode = ExtensionServiceFailureCode.HealthTimeout;
+                }
+
+                var failureStage = processExited
+                    ? ExtensionServiceFailureStage.ProcessExit
+                    : ExtensionServiceFailureStage.HealthProbe;
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    service,
+                    candidate,
+                    failedState,
+                    ExtensionServiceLifecycleState.Failed,
+                    failureStage,
+                    failureCode,
+                    processExitCode: processExitCode);
+                await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                failedState = supervisor.Snapshot;
+                lock (slot.Gate)
+                {
+                    processExited = candidate.ProcessExitRecorded;
+                    processExitCode = candidate.ProcessExitCode;
+                }
+
+                failureCode = processExited
+                    ? ExtensionServiceFailureCode.ProcessExited
+                    : failedState.LastHealthObservation is { } stoppedObservation
+                        ? MapProbeFailure(stoppedObservation.Status, failedState.Reason)
+                        : ExtensionServiceFailureCode.HealthTimeout;
+                if (failureCode == ExtensionServiceFailureCode.None)
+                {
+                    failureCode = ExtensionServiceFailureCode.HealthTimeout;
+                }
+
+                failureStage = processExited
+                    ? ExtensionServiceFailureStage.ProcessExit
+                    : ExtensionServiceFailureStage.HealthProbe;
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    service,
+                    candidate,
+                    failedState,
+                    ExtensionServiceLifecycleState.Failed,
+                    failureStage,
+                    failureCode,
+                    processExitCode: processExitCode,
+                    updatedAt: DateTimeOffset.UtcNow);
+                return null;
+            }
+
+            candidate.Lease = ready.Lease;
+            candidate.HealthRetryState = ready.Retry;
+            candidate.Ready = true;
+            keepStartingCandidate = true;
+            return candidate;
+        }
+        finally
         {
-            await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-            return null;
-        }
+            if (!keepStartingCandidate && candidate is not null)
+            {
+                lock (slot.Gate)
+                {
+                    if (ReferenceEquals(slot.Starting, candidate))
+                    {
+                        slot.Starting = null;
+                    }
+                }
 
-        var healthy = await WaitForHealthyAsync(supervisor, service.Id, cancellationToken).ConfigureAwait(false);
-        if (healthy is not { } ready)
-        {
-            await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-            return null;
+                SynchronizePublishedRuntimeConfiguration();
+            }
         }
-
-        var ownerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
-            service.Id,
-            out var owner)
-            == true
-            ? owner
-            : null;
-        return new ServiceGeneration(
-            service,
-            supervisor,
-            ready.Lease,
-            snapshot.Version,
-            ready.Retry,
-            ownerExtensionId,
-            resolvedEnvironment);
-     }
+    }
 
     private async Task<(PortLease Lease, HealthRetryState Retry)?> WaitForHealthyAsync(
-        ServiceSupervisor supervisor,
-        Guid serviceId,
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceGeneration generation,
         CancellationToken cancellationToken)
     {
-        var retry = HealthRetryState.Start(serviceId, DateTimeOffset.UtcNow, HealthPolicy.StartupTimeout);
+        var supervisor = generation.Supervisor;
+        var retry = HealthRetryState.Start(
+            generation.Configuration.Id,
+            DateTimeOffset.UtcNow,
+            HealthPolicy.StartupTimeout);
         while (!IsStopping)
         {
             var observationAt = DateTimeOffset.UtcNow;
             var health = await supervisor.ObserveHealthAsync(retry, observationAt, cancellationToken).ConfigureAwait(false);
             var decision = health.Health;
+            var observedState = supervisor.Snapshot;
+            generation.LastHealthProbeReason = observedState.Reason;
+            PublishCandidateRuntimeObservation(
+                slot,
+                snapshot,
+                generation,
+                observedState,
+                ExtensionServiceLifecycleState.Starting,
+                observedState.Reason);
+
             if (decision?.Action == HealthRetryAction.Healthy &&
                 supervisor.Lease is { } readyLease &&
                 !readyLease.IsExpired(observationAt))

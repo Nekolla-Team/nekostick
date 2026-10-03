@@ -209,7 +209,58 @@ public sealed class BootstrapOptionsTests
         Assert.Equal(BootstrapDefaults.DefaultListenAddress, result.Options!.ListenAddress);
         Assert.Equal(BootstrapDefaults.DefaultListenPort, result.Options.ListenPort);
         Assert.Equal(BootstrapDefaults.DefaultNodeId, result.Options.NodeId);
+        Assert.Equal(BootstrapDefaults.DefaultServiceLogBufferByteBudget, result.Options.ServiceLogBufferByteBudget);
     }
+
+    [Fact]
+    public void ServiceLogBufferByteBudgetCanBeConfiguredByCliAndEnvironment()
+    {
+        var environment = new Dictionary<string, string?>
+        {
+            [BootstrapDefaults.ServiceLogBufferByteBudgetEnvironmentVariable] = "4096"
+        };
+        var environmentResult = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            environment);
+        var cliResult = BootstrapOptionsParser.Parse(
+            [
+                "--connection-string", "database-secret",
+                BootstrapDefaults.ServiceLogBufferByteBudgetOption, "8192"
+            ],
+            environment);
+
+        Assert.True(environmentResult.IsSuccess);
+        Assert.Equal(4096, environmentResult.Options!.ServiceLogBufferByteBudget);
+        Assert.True(cliResult.IsSuccess);
+        Assert.Equal(8192, cliResult.Options!.ServiceLogBufferByteBudget);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("not-an-integer")]
+    [InlineData("2147483648")]
+    public void InvalidServiceLogBufferByteBudgetIsRejected(string value)
+    {
+        var environmentResult = BootstrapOptionsParser.Parse(
+            ["--connection-string", "database-secret"],
+            new Dictionary<string, string?>
+            {
+                [BootstrapDefaults.ServiceLogBufferByteBudgetEnvironmentVariable] = value
+            });
+        var cliResult = BootstrapOptionsParser.Parse(
+            [
+                "--connection-string", "database-secret",
+                BootstrapDefaults.ServiceLogBufferByteBudgetOption, value
+            ],
+            new Dictionary<string, string?>());
+
+        Assert.False(environmentResult.IsSuccess);
+        Assert.Equal(BootstrapErrorCode.InvalidServiceLogBufferByteBudget, environmentResult.Error!.Code);
+        Assert.False(cliResult.IsSuccess);
+        Assert.Equal(BootstrapErrorCode.InvalidServiceLogBufferByteBudget, cliResult.Error!.Code);
+    }
+
     [Fact]
     public void IncludeEfLogsDefaultsToDisabled()
     {

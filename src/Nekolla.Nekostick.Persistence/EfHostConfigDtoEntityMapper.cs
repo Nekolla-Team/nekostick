@@ -51,7 +51,10 @@ internal static class EfHostConfigDtoEntityMapper
                     value.Version,
                     value.ContentHash))
                 .ToImmutableArray(),
-            mappedSettings);
+            mappedSettings)
+        {
+            CommittedBy = revision.CommittedBy
+        };
     }
 
     private static GlobalSettingsConfiguration MapGlobalSettings(GlobalSettings value) =>

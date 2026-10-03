@@ -7,7 +7,7 @@ using Nekolla.Nekostick.Supervision;
 
 namespace Nekolla.Nekostick.Host;
 
-internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi, IExtensionServiceOutputCleanup
+internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputCleanup
 {
     private readonly string _extensionId;
     private readonly HostRuntimeState _runtimeState;
@@ -15,7 +15,6 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
     private readonly ILogger _logger;
     private readonly object _gate = new();
     private readonly List<IDisposable> _resources = [];
-    private readonly List<IDisposable> _pendingDisposals = [];
     private bool _disposed;
     private Task? _disposeTask;
 
@@ -104,75 +103,6 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         }
     }
 
-    public async ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
-        Guid serviceId,
-        ExtensionServiceOutputStream stream,
-        IExtensionServiceOutputSink sink,
-        CancellationToken cancellationToken = default)
-    {
-        if (!UuidV7.IsVersion7(serviceId))
-        {
-            return SubscriptionFailure(Guid.CreateVersion7(), ExtensionServiceOutputCode.NotFound);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        if (sink is null || !TryMapStream(stream, out var processStream))
-        {
-            return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Failed);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!IsConfigured(serviceId))
-        {
-            return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.NotFound);
-        }
-
-        if (IsDisposed())
-        {
-            return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Failed);
-        }
-
-        if (_executor is null)
-        {
-            return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Unsupported);
-        }
-
-        try
-        {
-            var adapter = new OutputSinkAdapter(serviceId, stream, sink, _logger);
-            var subscription = _executor.TrySubscribeOutput(serviceId, processStream, adapter);
-            if (subscription is null)
-            {
-                return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.NotRunning);
-            }
-
-            var resultSubscription = new ExtensionServiceOutputSubscription(
-                subscription,
-                _logger,
-                MarkDetached,
-                Untrack);
-            if (!TryTrack(resultSubscription))
-            {
-                await resultSubscription.DisposeAsync().ConfigureAwait(false);
-                return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Failed);
-            }
-
-            return new ExtensionServiceOutputSubscriptionResult(
-                true,
-                ExtensionServiceOutputCode.Opened,
-                serviceId,
-                resultSubscription);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            LogCapabilityFailure(exception, nameof(SubscribeAsync), serviceId);
-            return SubscriptionFailure(serviceId, ExtensionServiceOutputCode.Failed);
-        }
-    }
 
     public ValueTask DisposeAsync()
     {
@@ -285,24 +215,12 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         }
     }
 
-    private void MarkDetached(IDisposable resource)
-    {
-        lock (_gate)
-        {
-            _resources.Remove(resource);
-            if (!_pendingDisposals.Contains(resource))
-            {
-                _pendingDisposals.Add(resource);
-            }
-        }
-    }
 
     private void Untrack(IDisposable resource)
     {
         lock (_gate)
         {
             _resources.Remove(resource);
-            _pendingDisposals.Remove(resource);
         }
     }
 
@@ -310,7 +228,7 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
     {
         lock (_gate)
         {
-            return _resources.Concat(_pendingDisposals).Distinct().ToArray();
+            return _resources.ToArray();
         }
     }
 
@@ -372,10 +290,6 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         ExtensionServiceOutputCode code) =>
         ValueTask.FromResult(new ExtensionServiceOutputStreamResult(false, code, serviceId, null));
 
-    private static ExtensionServiceOutputSubscriptionResult SubscriptionFailure(
-        Guid serviceId,
-        ExtensionServiceOutputCode code) =>
-        new(false, code, serviceId, null);
 
 
     private sealed class TrackingStream : Stream
@@ -498,114 +412,288 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         }
     }
 
-    private sealed class OutputSinkAdapter : IProcessOutputChunkSink
+}
+
+internal sealed class ExtensionServiceRuntimeStateFacade :
+    IExtensionServiceRuntimeStateApi,
+    IExtensionServiceRuntimeStateCleanup
+{
+    private readonly string _extensionId;
+    private readonly IHostServiceRuntimeSnapshotAccessor _runtimeAccessor;
+    private readonly IHostServiceRuntimeStateSource _stateSource;
+    private readonly Func<HostServiceRuntimeSnapshot, ExtensionServiceRuntimeSnapshot> _toContract;
+    private readonly ILogger _logger;
+    private readonly object _gate = new();
+    private readonly List<IDisposable> _resources = [];
+    private readonly List<IDisposable> _pendingDisposals = [];
+    private bool _disposed;
+    private Task? _disposeTask;
+
+    internal ExtensionServiceRuntimeStateFacade(
+        string extensionId,
+        IHostServiceRuntimeSnapshotAccessor runtimeAccessor,
+        IHostServiceRuntimeStateSource stateSource,
+        Func<HostServiceRuntimeSnapshot, ExtensionServiceRuntimeSnapshot> toContract,
+        ILogger? logger = null)
     {
-        private readonly Guid _serviceId;
-        private readonly ExtensionServiceOutputStream _stream;
-        private readonly IExtensionServiceOutputSink _sink;
-        private readonly ILogger _logger;
+        _extensionId = string.IsNullOrWhiteSpace(extensionId)
+            ? throw new ArgumentException("An extension identifier is required.", nameof(extensionId))
+            : extensionId;
+        _runtimeAccessor = runtimeAccessor ?? throw new ArgumentNullException(nameof(runtimeAccessor));
+        _stateSource = stateSource ?? throw new ArgumentNullException(nameof(stateSource));
+        _toContract = toContract ?? throw new ArgumentNullException(nameof(toContract));
+        _logger = logger ?? NullLogger.Instance;
+    }
 
-        internal OutputSinkAdapter(
-            Guid serviceId,
-            ExtensionServiceOutputStream stream,
-            IExtensionServiceOutputSink sink,
-            ILogger logger)
+    public async ValueTask<ExtensionServiceRuntimeStateSubscriptionResult> SubscribeStatesAsync(
+        IExtensionServiceRuntimeStateSink sink,
+        CancellationToken cancellationToken = default)
+    {
+        if (sink is null)
         {
-            _serviceId = serviceId;
-            _stream = stream;
-            _sink = sink;
-            _logger = logger;
+            return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.InvalidArgument);
         }
 
-        public void OnChunk(ReadOnlyMemory<byte> chunk, DateTimeOffset timestamp)
+        cancellationToken.ThrowIfCancellationRequested();
+        if (IsDisposed())
+        {
+            return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.Failed);
+        }
+
+        try
+        {
+            _runtimeAccessor.ReadCurrent();
+            cancellationToken.ThrowIfCancellationRequested();
+            var adapter = new RuntimeStateSinkAdapter(this, sink, _toContract);
+            var underlying = _stateSource.Subscribe(adapter.OnStateChanged);
+            var subscription = new ExtensionServiceRuntimeStateSubscription(underlying, this);
+            if (!TryTrack(subscription))
+            {
+                await subscription.DisposeAsync().ConfigureAwait(false);
+                return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.Failed);
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                await subscription.DisposeAsync().ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            return new ExtensionServiceRuntimeStateSubscriptionResult(
+                true,
+                ExtensionServiceRuntimeStateSubscriptionCode.Subscribed,
+                subscription);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            LogCapabilityFailure(exception, nameof(SubscribeStatesAsync), null);
+            return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.Failed);
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        TaskCompletionSource<object?> completion;
+        IDisposable[] resources;
+        lock (_gate)
+        {
+            if (_disposeTask is { } existing)
+            {
+                return new ValueTask(existing);
+            }
+
+            _disposed = true;
+            resources = SnapshotResources();
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            _disposeTask = completion.Task;
+        }
+
+        _ = DisposeResourcesAsync(resources, completion);
+        return new ValueTask(completion.Task);
+    }
+
+    public void DetachAll()
+    {
+        foreach (var resource in SnapshotResources())
         {
             try
             {
-                var outputChunk = new ExtensionServiceOutputChunk(
-                    _serviceId,
-                    _stream,
-                    timestamp,
-                    chunk.ToArray());
-                using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.ServiceOutput))
-                {
-                    _sink.OnChunk(outputChunk);
-                }
+                resource.Dispose();
             }
             catch (Exception exception)
             {
-                LogSinkFailure(exception, nameof(OnChunk));
-            }
-        }
-
-        public void OnCompleted(ProcessOutputCompletion completion)
-        {
-            try
-            {
-                var reason = completion switch
-                {
-                    ProcessOutputCompletion.Completed => ExtensionServiceOutputCompletionReason.ProcessExited,
-                    ProcessOutputCompletion.Faulted => ExtensionServiceOutputCompletionReason.Faulted,
-                    ProcessOutputCompletion.Teardown => ExtensionServiceOutputCompletionReason.HostTeardown,
-                    _ => ExtensionServiceOutputCompletionReason.Faulted
-                };
-                using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.ServiceOutput))
-                {
-                    _sink.OnCompleted(reason);
-                }
-            }
-            catch (Exception exception)
-            {
-                LogSinkFailure(exception, nameof(OnCompleted));
-            }
-        }
-
-        public void OnDropped(long byteCount)
-        {
-            try
-            {
-                using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.ServiceOutput))
-                {
-                    _sink.OnDropped(byteCount);
-                }
-            }
-            catch (Exception exception)
-            {
-                LogSinkFailure(exception, nameof(OnDropped));
-            }
-        }
-
-        private void LogSinkFailure(Exception exception, string operation)
-        {
-            try
-            {
-                HostLogMessages.ProcessOutputSinkFailure(_logger, exception, operation);
-            }
-            catch
-            {
+                LogCapabilityFailure(exception, nameof(DetachAll), null);
             }
         }
     }
 
-    private sealed class ExtensionServiceOutputSubscription : IExtensionServiceOutputSubscription
+    private async Task DisposeResourcesAsync(
+        IDisposable[] resources,
+        TaskCompletionSource<object?> completion)
+    {
+        await Task.WhenAll(resources.Select(DisposeResourceAsync)).ConfigureAwait(false);
+        foreach (var resource in resources)
+        {
+            Untrack(resource);
+        }
+
+        completion.TrySetResult(null);
+    }
+
+    private async Task DisposeResourceAsync(IDisposable resource)
+    {
+        try
+        {
+            if (resource is IAsyncDisposable asynchronous)
+            {
+                await asynchronous.DisposeAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                resource.Dispose();
+            }
+        }
+        catch (Exception exception)
+        {
+            LogCapabilityFailure(exception, nameof(DisposeAsync), null);
+        }
+        finally
+        {
+            Untrack(resource);
+        }
+    }
+
+    private bool TryTrack(IDisposable resource)
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            _resources.Add(resource);
+            return true;
+        }
+    }
+
+    private bool IsDisposed()
+    {
+        lock (_gate)
+        {
+            return _disposed;
+        }
+    }
+
+    private void MarkDetached(IDisposable resource)
+    {
+        lock (_gate)
+        {
+            _resources.Remove(resource);
+            if (!_pendingDisposals.Contains(resource))
+            {
+                _pendingDisposals.Add(resource);
+            }
+        }
+    }
+
+    private void Untrack(IDisposable resource)
+    {
+        lock (_gate)
+        {
+            _resources.Remove(resource);
+            _pendingDisposals.Remove(resource);
+        }
+    }
+
+    private IDisposable[] SnapshotResources()
+    {
+        lock (_gate)
+        {
+            return _resources.Concat(_pendingDisposals).Distinct().ToArray();
+        }
+    }
+
+    private void LogCapabilityFailure(Exception exception, string operation, Guid? serviceId)
+    {
+        try
+        {
+            HostLogMessages.ExtensionCapabilityReadFailed(
+                _logger,
+                exception,
+                operation,
+                _extensionId,
+                serviceId);
+        }
+        catch
+        {
+        }
+    }
+
+    private static ExtensionServiceRuntimeStateSubscriptionResult SubscriptionFailure(
+        ExtensionServiceRuntimeStateSubscriptionCode code) =>
+        new(false, code, null);
+
+    private sealed class RuntimeStateSinkAdapter
+    {
+        private readonly ExtensionServiceRuntimeStateFacade _owner;
+        private readonly IExtensionServiceRuntimeStateSink _sink;
+        private readonly Func<HostServiceRuntimeSnapshot, ExtensionServiceRuntimeSnapshot> _toContract;
+
+        internal RuntimeStateSinkAdapter(
+            ExtensionServiceRuntimeStateFacade owner,
+            IExtensionServiceRuntimeStateSink sink,
+            Func<HostServiceRuntimeSnapshot, ExtensionServiceRuntimeSnapshot> toContract)
+        {
+            _owner = owner;
+            _sink = sink;
+            _toContract = toContract;
+        }
+
+        internal void OnStateChanged(HostServiceRuntimeStateChange change)
+        {
+            try
+            {
+                var snapshot = change.Snapshot is { } current
+                    ? _toContract(current)
+                    : null;
+                var contractChange = new ExtensionServiceRuntimeStateChange(
+                    change.ServiceId,
+                    change.Sequence,
+                    change.Kind,
+                    snapshot,
+                    change.IsInitialSnapshot,
+                    change.OwnerExtensionId);
+                using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.ServiceRuntimeState))
+                {
+                    _sink.OnStateChanged(contractChange);
+                }
+            }
+            catch (Exception exception)
+            {
+                _owner.LogCapabilityFailure(exception, nameof(OnStateChanged), change.ServiceId);
+            }
+        }
+    }
+
+    private sealed class ExtensionServiceRuntimeStateSubscription : IExtensionServiceRuntimeStateSubscription
     {
         private readonly IDisposable _underlying;
-        private readonly ILogger _logger;
-        private readonly Action<IDisposable> _onDetached;
-        private readonly Action<IDisposable> _onQuiesced;
+        private readonly ExtensionServiceRuntimeStateFacade _owner;
         private int _disposed;
         private int _detached;
         private int _quiesced;
 
-        internal ExtensionServiceOutputSubscription(
+        internal ExtensionServiceRuntimeStateSubscription(
             IDisposable underlying,
-            ILogger logger,
-            Action<IDisposable> onDetached,
-            Action<IDisposable> onQuiesced)
+            ExtensionServiceRuntimeStateFacade owner)
         {
             _underlying = underlying;
-            _logger = logger;
-            _onDetached = onDetached;
-            _onQuiesced = onQuiesced;
+            _owner = owner;
         }
 
         public void Dispose()
@@ -615,21 +703,20 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
                 return;
             }
 
-            var asynchronous = _underlying is IAsyncDisposable;
             try
             {
                 _underlying.Dispose();
             }
             catch (Exception exception)
             {
-                LogDisposeFailure(exception, nameof(Dispose));
+                _owner.LogCapabilityFailure(exception, nameof(Dispose), null);
             }
             finally
             {
-                if (asynchronous)
+                if (_underlying is IAsyncDisposable asynchronous)
                 {
                     MarkDetached();
-                    _ = AwaitQuiescenceAsync((IAsyncDisposable)_underlying);
+                    _ = AwaitQuiescenceAsync(asynchronous);
                 }
                 else
                 {
@@ -655,7 +742,7 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
             }
             catch (Exception exception)
             {
-                LogDisposeFailure(exception, nameof(DisposeAsync));
+                _owner.LogCapabilityFailure(exception, nameof(DisposeAsync), null);
             }
             finally
             {
@@ -671,7 +758,7 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
             }
             catch (Exception exception)
             {
-                LogDisposeFailure(exception, nameof(DisposeAsync));
+                _owner.LogCapabilityFailure(exception, nameof(DisposeAsync), null);
             }
             finally
             {
@@ -683,7 +770,7 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         {
             if (Interlocked.Exchange(ref _detached, 1) == 0)
             {
-                _onDetached(this);
+                _owner.MarkDetached(this);
             }
         }
 
@@ -691,18 +778,7 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputApi,
         {
             if (Interlocked.Exchange(ref _quiesced, 1) == 0)
             {
-                _onQuiesced(this);
-            }
-        }
-
-        private void LogDisposeFailure(Exception exception, string operation)
-        {
-            try
-            {
-                HostLogMessages.ProcessOutputSinkCleanupFailure(_logger, exception, operation);
-            }
-            catch
-            {
+                _owner.Untrack(this);
             }
         }
     }

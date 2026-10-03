@@ -12,16 +12,16 @@ namespace Nekolla.Nekostick.UnitTests;
 public sealed partial class ExtensionRuntimeTests
 {
     [Fact]
-    public async Task ReleaseBoundsBlockedServiceOutputCleanupAndLogsTimeout()
+    public async Task ReleaseBoundsBlockedServiceLogCleanupAndLogsTimeout()
     {
         using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
         var manifest = Discover(fixture.RootPath);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var blockPort = ((IPEndPoint)listener.LocalEndpoint).Port;
-        var output = new BlockingServiceOutput();
+        var log = new BlockingServiceLog();
         var logger = new TimeoutLogger();
-        var factory = new BlockingCapabilityFactory(output);
+        var factory = new BlockingCapabilityFactory(log);
         await using var manager = new ExtensionRuntimeManager(
             new HostApiVersion(1, 4, 0),
             capabilityFactory: factory,
@@ -62,19 +62,19 @@ public sealed partial class ExtensionRuntimeTests
                 TestContext.Current.CancellationToken);
             stopwatch.Stop();
 
-            Assert.Equal(2052, timeout.EventId.Id);
+            Assert.Equal(2019, timeout.EventId.Id);
             Assert.Equal(LogLevel.Warning, timeout.Level);
+            Assert.IsType<TimeoutException>(timeout.Exception);
             Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(7));
 
             var unload = await unloadTask.WaitAsync(
                 TimeSpan.FromSeconds(2),
                 TestContext.Current.CancellationToken);
             Assert.NotEqual(ExtensionFailureCode.Cancelled, unload.FailureCode);
-            Assert.Equal(1, logger.TimeoutEventCount);
-            Assert.Equal(1, output.DetachAllCount);
+            Assert.Equal(1, log.DetachAllCount);
 
             callbackStream.WriteByte(1);
-            output.ReleaseCleanup();
+            log.ReleaseCleanup();
         }
         finally
         {
@@ -94,7 +94,7 @@ public sealed partial class ExtensionRuntimeTests
                 callbackClient.Dispose();
             }
 
-            output.ReleaseCleanup();
+            log.ReleaseCleanup();
             if (unloadTask is not null)
             {
                 try
@@ -112,9 +112,9 @@ public sealed partial class ExtensionRuntimeTests
 
     private sealed class BlockingCapabilityFactory : IExtensionCapabilityFactory
     {
-        private readonly BlockingServiceOutput _output;
+        private readonly BlockingServiceLog _log;
 
-        public BlockingCapabilityFactory(BlockingServiceOutput output) => _output = output;
+        public BlockingCapabilityFactory(BlockingServiceLog log) => _log = log;
 
         public ExtensionCapabilitySet Create(string extensionId, Func<string, bool> handlerIsOwned)
         {
@@ -130,17 +130,19 @@ public sealed partial class ExtensionRuntimeTests
                 unsupported.LogWriter,
                 unsupported.ExtensionManagement,
                 unsupported.HostInfo,
-                _output);
+                _log,
+                null);
         }
     }
 
-    private sealed class BlockingServiceOutput :
+
+    private sealed class BlockingServiceLog :
         IExtensionServiceOutputApi,
-        IExtensionServiceOutputCleanup
+        IExtensionServiceOutputCleanup,
+        IExtensionServiceLogCleanup
     {
         private readonly TaskCompletionSource<object?> _cleanupRelease = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
-
         public ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
             Guid serviceId,
             ExtensionServiceOutputStream stream,
@@ -151,21 +153,22 @@ public sealed partial class ExtensionRuntimeTests
                 serviceId,
                 new MemoryStream()));
 
-        public ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
+        public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
             Guid serviceId,
-            ExtensionServiceOutputStream stream,
-            IExtensionServiceOutputSink sink,
+            IExtensionServiceLogSink sink,
+            long? sinceSequence = null,
             CancellationToken cancellationToken = default)
         {
-            var chunk = new ExtensionServiceOutputChunk(
+            var currentState = new ExtensionServiceLogEntry(
+                ExtensionServiceLogEntryKind.CurrentState,
                 serviceId,
-                stream,
+                sequence: null,
                 DateTimeOffset.UtcNow,
-                [1]);
-            _ = Task.Run(() => sink.OnChunk(chunk), CancellationToken.None);
-            return ValueTask.FromResult(new ExtensionServiceOutputSubscriptionResult(
+                lifecycleState: ExtensionServiceLifecycleState.Unknown);
+            _ = Task.Run(() => sink.OnEntry(currentState), CancellationToken.None);
+            return ValueTask.FromResult(new ExtensionServiceLogSubscriptionResult(
                 true,
-                ExtensionServiceOutputCode.Opened,
+                ExtensionServiceLogCode.Subscribed,
                 serviceId,
                 new CompletedSubscription()));
         }
@@ -177,16 +180,16 @@ public sealed partial class ExtensionRuntimeTests
 
         public void DetachAll() => Interlocked.Increment(ref detachAllCount);
 
-
         public void ReleaseCleanup() => _cleanupRelease.TrySetResult(null);
     }
 
-    private sealed class CompletedSubscription : IExtensionServiceOutputSubscription
+    private sealed class CompletedSubscription : IExtensionServiceLogSubscription
     {
         public void Dispose() { }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
+
 
     private sealed class TimeoutLogger : ILogger
     {
@@ -208,7 +211,7 @@ public sealed partial class ExtensionRuntimeTests
             Func<TState, Exception?, string> formatter)
         {
             var captured = new CapturedLog(logLevel, eventId, exception);
-            if (eventId.Id == 2052)
+            if (eventId.Id == 2019)
             {
                 Interlocked.Increment(ref timeoutEventCount);
                 TimeoutEvent.TrySetResult(captured);

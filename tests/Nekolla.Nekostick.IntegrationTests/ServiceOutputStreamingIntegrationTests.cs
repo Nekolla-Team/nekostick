@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -19,7 +18,7 @@ public sealed class ServiceOutputStreamingIntegrationTests
         new("01900000-0000-7000-8000-000000000715");
 
     [Fact]
-    public async Task FixtureExtensionSubscriptionReceivesServiceBytesWithoutHelperMarker()
+    public async Task FixtureExtensionLogSubscriptionReceivesServiceBytesWithoutHelperMarker()
     {
         var helperPath = RequireArtifact(
             "Nekolla.Nekostick.NativeHelper",
@@ -35,9 +34,9 @@ public sealed class ServiceOutputStreamingIntegrationTests
         Assert.True(manifestResult.Succeeded, manifestResult.FailureCode.ToString());
         var manifest = manifestResult.Manifest!;
         var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        var outputFacade = CreateOutputFacade(executor);
-        var recordingOutput = new RecordingOutputApi(outputFacade);
-        var capabilityFactory = new RecordingCapabilityFactory(recordingOutput);
+        var (logBufferRegistry, logFacade) = CreateServiceLogFacade(executor);
+        var recordingLogs = new RecordingServiceLogApi(logFacade);
+        var capabilityFactory = new RecordingCapabilityFactory(recordingLogs);
         await using var manager = new ExtensionRuntimeManager(
             new HostApiVersion(1, 4, 0),
             capabilityFactory: capabilityFactory);
@@ -78,7 +77,7 @@ public sealed class ServiceOutputStreamingIntegrationTests
                 "ready",
                 TestContext.Current.CancellationToken);
 
-            var stderr = await recordingOutput.Stderr.Task.WaitAsync(
+            var stderr = await recordingLogs.Stderr.Task.WaitAsync(
                 TimeSpan.FromSeconds(8),
                 TestContext.Current.CancellationToken);
             Assert.Equal("FIXTURE_STDERR_LINE\n", Encoding.UTF8.GetString(stderr));
@@ -94,12 +93,35 @@ public sealed class ServiceOutputStreamingIntegrationTests
             await executor.CleanupAsync(
                 TimeSpan.FromSeconds(2),
                 TestContext.Current.CancellationToken);
-            await outputFacade.DisposeAsync();
+            await recordingLogs.DisposeAsync();
+            await logBufferRegistry.DisposeAsync();
             File.Delete(outputGate);
         }
     }
 
-    private static ExtensionServiceOutputFacade CreateOutputFacade(PosixProcessExecutor executor)
+    private static (HostServiceLogBufferRegistry Registry, ExtensionServiceLogFacade Facade)
+        CreateServiceLogFacade(PosixProcessExecutor executor)
+    {
+        var registry = new HostServiceLogBufferRegistry(
+            new HostRuntimeOptions("Host=integration-test", "test-node", readOnly: false),
+            executor);
+        var runtimeState = CreateRuntimeState();
+        var outputFacade = new ExtensionServiceOutputFacade(
+            "fixture.extension.deterministic",
+            runtimeState,
+            executor,
+            NullLogger.Instance);
+        var facade = new ExtensionServiceLogFacade(
+            "fixture.extension.deterministic",
+            runtimeState,
+            registry,
+            runtimeAccessor: null,
+            serviceOutput: outputFacade,
+            logger: NullLogger.Instance);
+        return (registry, facade);
+    }
+
+    private static HostRuntimeState CreateRuntimeState()
     {
         var snapshot = new HostConfigurationSnapshot(
             1,
@@ -126,14 +148,12 @@ public sealed class ServiceOutputStreamingIntegrationTests
         var holder = new HostConfigurationSnapshotHolder();
         var serviceOwners = ImmutableDictionary<Guid, string?>.Empty
             .Add(ServiceId, "another.extension");
-        Assert.Equal(SnapshotAdmission.Accepted, holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
-        var runtimeState = new HostRuntimeState(holder, new HostNodeOptions(false, false, false));
-        return new ExtensionServiceOutputFacade(
-            "fixture.extension.deterministic",
-            runtimeState,
-            executor,
-            NullLogger.Instance);
+        Assert.Equal(
+            SnapshotAdmission.Accepted,
+            holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners: serviceOwners));
+        return new HostRuntimeState(holder, new HostNodeOptions(false, false, false));
     }
+
 
     private static string RequireArtifact(string fileName, string description)
     {
@@ -218,83 +238,76 @@ public sealed class ServiceOutputStreamingIntegrationTests
                 unsupported.LogWriter,
                 unsupported.ExtensionManagement,
                 unsupported.HostInfo,
-                _output);
+                _output,
+                null);
         }
     }
 
-    private sealed class RecordingOutputApi : IExtensionServiceOutputApi, IAsyncDisposable
+    private sealed class RecordingServiceLogApi :
+        IExtensionServiceOutputApi,
+        IExtensionServiceOutputCleanup,
+        IExtensionServiceLogCleanup
     {
-        private readonly IExtensionServiceOutputApi _inner;
+        private readonly ExtensionServiceLogFacade _inner;
 
-        public RecordingOutputApi(IExtensionServiceOutputApi inner) => _inner = inner;
-
-        internal TaskCompletionSource<byte[]> Stderr { get; } = new(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-
+        public RecordingServiceLogApi(ExtensionServiceLogFacade inner) => _inner = inner;
         public ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
             Guid serviceId,
             ExtensionServiceOutputStream stream,
             CancellationToken cancellationToken = default) =>
             _inner.OpenStreamAsync(serviceId, stream, cancellationToken);
 
-        public async ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
-            Guid serviceId,
-            ExtensionServiceOutputStream stream,
-            IExtensionServiceOutputSink sink,
-            CancellationToken cancellationToken = default)
-        {
-            var result = await _inner.SubscribeAsync(
-                serviceId,
-                stream,
-                new RecordingSink(stream, sink, Stderr),
-                cancellationToken);
-            return result;
-        }
+        internal TaskCompletionSource<byte[]> Stderr { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public ValueTask DisposeAsync() =>
-            _inner is IAsyncDisposable disposable
-                ? disposable.DisposeAsync()
-                : ValueTask.CompletedTask;
+        public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
+            Guid serviceId,
+            IExtensionServiceLogSink sink,
+            long? sinceSequence = null,
+            CancellationToken cancellationToken = default) =>
+            _inner.SubscribeAsync(
+                serviceId,
+                new RecordingLogSink(sink, Stderr),
+                sinceSequence,
+                cancellationToken);
+
+        public void DetachAll() => _inner.DetachAll();
+
+        public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }
 
-    private sealed class RecordingSink : IExtensionServiceOutputSink
+    private sealed class RecordingLogSink : IExtensionServiceLogSink
     {
-        private readonly ExtensionServiceOutputStream _stream;
-        private readonly IExtensionServiceOutputSink _inner;
+        private readonly IExtensionServiceLogSink _inner;
         private readonly TaskCompletionSource<byte[]> _stderr;
         private readonly List<byte> _stderrBytes = [];
         private readonly object _gate = new();
 
-        public RecordingSink(
-            ExtensionServiceOutputStream stream,
-            IExtensionServiceOutputSink inner,
-            TaskCompletionSource<byte[]> stderr)
+        public RecordingLogSink(IExtensionServiceLogSink inner, TaskCompletionSource<byte[]> stderr)
         {
-            _stream = stream;
             _inner = inner;
             _stderr = stderr;
         }
 
-        public void OnChunk(ExtensionServiceOutputChunk chunk)
+        public void OnEntry(ExtensionServiceLogEntry entry)
         {
-            if (_stream == ExtensionServiceOutputStream.Stderr)
+            if (entry.Kind == ExtensionServiceLogEntryKind.Output &&
+                entry.Stream == ExtensionServiceOutputStream.Stderr)
             {
                 lock (_gate)
                 {
-                    _stderrBytes.AddRange(chunk.Data);
-                    if (chunk.Data.Contains((byte)'\n'))
+                    _stderrBytes.AddRange(entry.Data);
+                    if (entry.Data.Contains((byte)'\n'))
                     {
                         _stderr.TrySetResult(_stderrBytes.ToArray());
                     }
                 }
             }
 
-            _inner.OnChunk(chunk);
+            _inner.OnEntry(entry);
         }
 
-        public void OnCompleted(ExtensionServiceOutputCompletionReason reason) => _inner.OnCompleted(reason);
-
-        public void OnDropped(long byteCount) => _inner.OnDropped(byteCount);
+        public void OnCompleted() => _inner.OnCompleted();
     }
 
 }

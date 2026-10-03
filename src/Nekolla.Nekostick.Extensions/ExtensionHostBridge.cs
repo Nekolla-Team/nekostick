@@ -62,6 +62,9 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge14
         ServiceOutput = ExtensionApiCapabilityGate.IsApi14Supported(apiVersion)
             ? capabilities.ServiceOutput ?? UnsupportedExtensionCapabilities.CreateServiceOutput()
             : UnsupportedExtensionCapabilities.CreateServiceOutput();
+        ServiceRuntimeState = ExtensionApiCapabilityGate.IsApi14Supported(apiVersion)
+            ? capabilities.ServiceRuntimeState ?? UnsupportedExtensionCapabilities.CreateServiceRuntimeState()
+            : UnsupportedExtensionCapabilities.CreateServiceRuntimeState();
 
         _hostInfo = ExtensionApiCapabilityGate.IsApi133Supported(apiVersion)
             ? capabilities.HostInfo
@@ -97,6 +100,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge14
     public IExtensionManagementApi Management { get; }
     public IExtensionDependencyApi Dependencies { get; }
     public IExtensionServiceOutputApi ServiceOutput { get; }
+    public IExtensionServiceRuntimeStateApi ServiceRuntimeState { get; }
 
     public ExtensionHostInfoSnapshot HostInfo
     {

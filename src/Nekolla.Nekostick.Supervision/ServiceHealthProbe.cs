@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -68,6 +69,7 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
         timeout.CancelAfter(request.Definition.Timeout);
 
         HealthObservationStatus status;
+        string? errorMessage = null;
         try
         {
             status = request.Definition.Kind switch
@@ -92,6 +94,10 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
         {
             SupervisionLogMessages.HealthProbeOperationFailed(_logger, exception, request.ServiceId);
             status = HealthObservationStatus.Unavailable;
+            if (IsTransportFailure(request.Definition.Kind, exception))
+            {
+                errorMessage = BoundErrorMessage(exception.Message);
+            }
         }
 
         stopwatch.Stop();
@@ -100,7 +106,9 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
             status,
             startedAt,
             stopwatch.Elapsed,
-            1);
+            1,
+            DescribeTarget(request),
+            errorMessage ?? DescribeError(status, request.Definition.Kind));
     }
 
     /// <inheritdoc />
@@ -169,6 +177,51 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
                 return false;
         }
     }
+
+    internal static string? DescribeTarget(ServiceHealthProbeRequest request)
+    {
+        if (request.Definition.Kind == ServiceHealthCheckKind.Process)
+        {
+            return "process";
+        }
+
+        if (!request.Endpoint.HasValue || !TryGetAddress(request.Endpoint.Value.Address, out var address))
+        {
+            return null;
+        }
+
+        var scheme = request.Definition.Kind switch
+        {
+            ServiceHealthCheckKind.Tcp => "tcp",
+            ServiceHealthCheckKind.Http => Uri.UriSchemeHttp,
+            _ => null
+        };
+        return scheme is null
+            ? null
+            : new UriBuilder(scheme, address.ToString(), request.Endpoint.Value.Port)
+                .Uri.GetLeftPart(UriPartial.Authority);
+    }
+
+    internal static string BoundErrorMessage(string message) =>
+        message.Length <= 512 ? message : message[..512];
+
+    private static bool IsTransportFailure(ServiceHealthCheckKind kind, Exception exception) =>
+        (kind == ServiceHealthCheckKind.Tcp || kind == ServiceHealthCheckKind.Http) &&
+        (exception is HttpRequestException or SocketException or IOException);
+
+    internal static string? DescribeError(HealthObservationStatus status, ServiceHealthCheckKind kind) => status switch
+    {
+        HealthObservationStatus.Healthy => null,
+        HealthObservationStatus.Unhealthy when kind == ServiceHealthCheckKind.Http =>
+            "The HTTP health check returned a non-success response.",
+        HealthObservationStatus.Unhealthy => "The health check target reported an unhealthy result.",
+        HealthObservationStatus.TimedOut => "The health check timed out.",
+        HealthObservationStatus.Cancelled => "The health check was cancelled.",
+        HealthObservationStatus.Unavailable when kind == ServiceHealthCheckKind.Process =>
+            "The service process is not running.",
+        HealthObservationStatus.Unavailable => "The health check target is unavailable.",
+        _ => "The health check result is unknown."
+    };
     private static bool IsSafeHttpPath(string? value, out string path)
     {
         path = value ?? string.Empty;

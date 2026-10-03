@@ -11,6 +11,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     private readonly ExtensionLoadHandle _loadHandle;
     private readonly ExtensionHostBridge _bridge;
     private readonly IAsyncDisposable? _capabilityCleanup;
+    private readonly IExtensionServiceLogCleanup? _serviceLogCapabilityCleanup;
+    private readonly IExtensionServiceRuntimeStateCleanup? _runtimeStateCapabilityCleanup;
     private IExtensionEntrypoint? _entrypoint;
     private Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>>? _reloadCallback;
     private Func<CancellationToken, ValueTask<ExtensionLifecycleOperationResult>>? _unloadCallback;
@@ -91,6 +93,8 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                     : capabilityFactory?.Create(manifest.Id, IsHandlerOwned)
                       ?? UnsupportedExtensionCapabilities.Create(hostApiVersion);
         _capabilityCleanup = capabilities.ServiceOutput as IAsyncDisposable;
+        _serviceLogCapabilityCleanup = capabilities.ServiceOutput as IExtensionServiceLogCleanup;
+        _runtimeStateCapabilityCleanup = capabilities.ServiceRuntimeState as IExtensionServiceRuntimeStateCleanup;
         _bridge = new ExtensionHostBridge(
             hostApiVersion,
             settings,
@@ -463,7 +467,9 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
     internal async ValueTask ReleaseAsync()
     {
         _routeRegistrations.Retire();
-        if (_capabilityCleanup is { } capabilityCleanup)
+        // A merged service-output capability may own both cleanup contracts; dispose it once via log cleanup.
+        if (_capabilityCleanup is { } capabilityCleanup &&
+            !ReferenceEquals(capabilityCleanup, _serviceLogCapabilityCleanup))
         {
             try
             {
@@ -500,6 +506,79 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
             }
         }
 
+        if (_runtimeStateCapabilityCleanup is { } runtimeStateCleanup)
+        {
+            try
+            {
+                await runtimeStateCleanup.DisposeAsync()
+                    .AsTask()
+                    .WaitAsync(CapabilityCleanupTimeout)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                if (_logger is { } timeoutLogger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        timeoutLogger,
+                        exception,
+                        Manifest.Id,
+                        "ServiceRuntimeStateCleanup");
+                }
+
+                DetachRuntimeStateCleanup(runtimeStateCleanup);
+            }
+            catch (Exception exception)
+            {
+                if (_logger is { } failedLogger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        failedLogger,
+                        exception,
+                        Manifest.Id,
+                        "ServiceRuntimeStateCleanup");
+                }
+
+                DetachRuntimeStateCleanup(runtimeStateCleanup);
+            }
+        }
+        if (_serviceLogCapabilityCleanup is { } serviceLogCleanup)
+        {
+            try
+            {
+                await serviceLogCleanup.DisposeAsync()
+                    .AsTask()
+                    .WaitAsync(CapabilityCleanupTimeout)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                if (_logger is { } timeoutLogger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        timeoutLogger,
+                        exception,
+                        Manifest.Id,
+                        "ServiceLogCleanup");
+                }
+
+                DetachServiceLogCleanup(serviceLogCleanup);
+            }
+            catch (Exception exception)
+            {
+                if (_logger is { } failedLogger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        failedLogger,
+                        exception,
+                        Manifest.Id,
+                        "ServiceLogCleanup");
+                }
+
+                DetachServiceLogCleanup(serviceLogCleanup);
+            }
+        }
+
         _entrypoint = null;
         _registry.Clear();
         _contracts.Dispose();
@@ -526,6 +605,43 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
                     exception,
                     Manifest.Id,
                     nameof(IExtensionServiceOutputCleanup.DetachAll));
+            }
+        }
+    }
+    private void DetachRuntimeStateCleanup(IExtensionServiceRuntimeStateCleanup cleanup)
+    {
+        try
+        {
+            cleanup.DetachAll();
+        }
+        catch (Exception exception)
+        {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                    logger,
+                    exception,
+                    Manifest.Id,
+                    nameof(IExtensionServiceRuntimeStateCleanup.DetachAll));
+            }
+        }
+    }
+
+    private void DetachServiceLogCleanup(IExtensionServiceLogCleanup cleanup)
+    {
+        try
+        {
+            cleanup.DetachAll();
+        }
+        catch (Exception exception)
+        {
+            if (_logger is { } logger)
+            {
+                ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                    logger,
+                    exception,
+                    Manifest.Id,
+                    nameof(IExtensionServiceLogCleanup.DetachAll));
             }
         }
     }

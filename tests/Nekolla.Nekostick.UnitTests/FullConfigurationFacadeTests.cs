@@ -20,6 +20,7 @@ public sealed class FullConfigurationFacadeTests
                 new HostRuntimeOptions("synthetic-storage", "test-node", readOnly: true)));
         await using var provider = services.BuildServiceProvider();
         var facade = new ExtensionFullConfigurationFacade(
+            "test-extension",
             provider.GetRequiredService<IServiceScopeFactory>(),
             CreateRuntimeState(readOnly: true));
 
@@ -45,6 +46,7 @@ public sealed class FullConfigurationFacadeTests
         services.AddScoped<IHostConfigApi>(_ => inner);
         await using var provider = services.BuildServiceProvider();
         var facade = new ExtensionFullConfigurationFacade(
+            "test-extension",
             provider.GetRequiredService<IServiceScopeFactory>(),
             CreateRuntimeState(staged: true));
 
@@ -70,6 +72,7 @@ public sealed class FullConfigurationFacadeTests
         services.AddScoped<IHostConfigApi>(_ => inner);
         await using var provider = services.BuildServiceProvider();
         var facade = new ExtensionFullConfigurationFacade(
+            "test-extension",
             provider.GetRequiredService<IServiceScopeFactory>(),
             CreateRuntimeState());
 

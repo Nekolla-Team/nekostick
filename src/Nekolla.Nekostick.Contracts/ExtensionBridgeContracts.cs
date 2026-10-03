@@ -102,7 +102,7 @@ public interface IExtensionHostBridge13 : IExtensionHostBridge
     string DataDirectory => string.Empty;
 }
 
-/// <summary>Exposes additive API 1.4 capabilities, including dependency and service-output access, while extending the 1.3 bridge contract.</summary>
+/// <summary>Exposes additive API 1.4 dependency, service-output (raw streams and ordered logs), and runtime-state capabilities while extending the 1.3 bridge contract.</summary>
 /// <remarks>
 /// An extension opts into this sibling by testing whether its <see cref="IExtensionHostBridge" /> is also an
 /// <see cref="IExtensionHostBridge14" /> and by checking <see cref="IExtensionHostBridge.ApiVersion" />.
@@ -113,8 +113,10 @@ public interface IExtensionHostBridge14 : IExtensionHostBridge13
     /// <summary>Gets the dependency resolution information for the calling extension.</summary>
     IExtensionDependencyApi Dependencies { get; }
 
-    /// <summary>Gets live stdout/stderr streaming operations for configured services.</summary>
+    /// <summary>Gets raw stdout/stderr streams and ordered output/lifecycle log subscriptions for configured services.</summary>
     IExtensionServiceOutputApi ServiceOutput { get; }
+    /// <summary>Gets ordered node-local service runtime-state notifications.</summary>
+    IExtensionServiceRuntimeStateApi ServiceRuntimeState { get; }
 }
 
 

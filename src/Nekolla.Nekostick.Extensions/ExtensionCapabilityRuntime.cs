@@ -38,8 +38,10 @@ internal enum ExtensionCallbackKind
     Scheduler,
     /// <summary>Entrypoint lifecycle callback (start/stop/previous-stopped) awaited by the runtime under the publication gate.</summary>
     Lifecycle,
-    /// <summary>Extension service-output sink callback; the invocation is isolated from lifecycle reentrancy.</summary>
-    ServiceOutput,
+    /// <summary>Extension service-log sink callback; the invocation is isolated from lifecycle reentrancy.</summary>
+    ServiceLog,
+    /// <summary>Extension runtime-state sink callback; the invocation is isolated from lifecycle reentrancy.</summary>
+    ServiceRuntimeState
 }
 
 internal static class ExtensionCallbackGuard
@@ -48,8 +50,8 @@ internal static class ExtensionCallbackGuard
     private const int EventBit = 2;
     private const int SchedulerBit = 4;
     private const int LifecycleBit = 8;
-    private const int ServiceOutputBit = 16;
-
+    private const int ServiceLogBit = 16;
+    private const int ServiceRuntimeStateBit = 32;
     private static readonly AsyncLocal<int> Bits = new();
 
     internal static bool IsActive => Bits.Value != 0;
@@ -57,8 +59,8 @@ internal static class ExtensionCallbackGuard
     /// <summary>Gets whether the current context is an entrypoint lifecycle callback awaited under the publication gate.</summary>
     internal static bool IsLifecycleActive => (Bits.Value & LifecycleBit) != 0;
 
-    /// <summary>Gets whether the current context is torn down during generation replacement of the calling extension (route lease drain, event consumer, tracked scheduler task, or service-output callback).</summary>
-    internal static bool IsSelfReplacementUnsafe => (Bits.Value & (RouteBit | EventBit | SchedulerBit | ServiceOutputBit)) != 0;
+    /// <summary>Gets whether the current context is torn down during generation replacement of the calling extension (route lease drain, event consumer, tracked scheduler task, service-log callback, or runtime-state callback).</summary>
+    internal static bool IsSelfReplacementUnsafe => (Bits.Value & (RouteBit | EventBit | SchedulerBit | ServiceLogBit | ServiceRuntimeStateBit)) != 0;
 
     internal static IDisposable Enter(ExtensionCallbackKind kind)
     {
@@ -76,7 +78,8 @@ internal static class ExtensionCallbackGuard
         ExtensionCallbackKind.Route => RouteBit,
         ExtensionCallbackKind.Event => EventBit,
         ExtensionCallbackKind.Scheduler => SchedulerBit,
-        ExtensionCallbackKind.ServiceOutput => ServiceOutputBit,
+        ExtensionCallbackKind.ServiceLog => ServiceLogBit,
+        ExtensionCallbackKind.ServiceRuntimeState => ServiceRuntimeStateBit,
         _ => LifecycleBit
     };
 
@@ -91,6 +94,16 @@ internal static class ExtensionCallbackGuard
 }
 
 internal interface IExtensionServiceOutputCleanup : IAsyncDisposable
+{
+    void DetachAll();
+}
+
+internal interface IExtensionServiceLogCleanup : IAsyncDisposable
+{
+    void DetachAll();
+}
+
+internal interface IExtensionServiceRuntimeStateCleanup : IAsyncDisposable
 {
     void DetachAll();
 }
@@ -142,7 +155,8 @@ internal static class UnsupportedExtensionCapabilities
             new UnsupportedLogWriter(),
             new UnsupportedManagementApi(negotiatedVersion),
             null,
-            CreateServiceOutput());
+            CreateServiceOutput(),
+            CreateServiceRuntimeState());
 
     internal static IExtensionSupervisorApi CreateSupervisor() => new UnsupportedSupervisorApi();
     internal static IExtensionManagementApi CreateManagement() =>
@@ -155,6 +169,7 @@ internal static class UnsupportedExtensionCapabilities
 
     internal static IExtensionLogWriter CreateLogWriter() => new UnsupportedLogWriter();
     internal static IExtensionServiceOutputApi CreateServiceOutput() => new UnsupportedServiceOutputApi();
+    internal static IExtensionServiceRuntimeStateApi CreateServiceRuntimeState() => new UnsupportedServiceRuntimeStateApi();
     internal static IExtensionLifecycleApi CreateLifecycle() => new UnsupportedLifecycleApi();
     internal static IExtensionDependencyApi CreateDependencyApi() => new UnsupportedDependencyApi();
     private static Guid SafeServiceId(Guid serviceId)
@@ -262,17 +277,28 @@ internal static class UnsupportedExtensionCapabilities
                     ExtensionServiceOutputCode.Unsupported,
                     SafeServiceId(serviceId),
                     null));
-
-        public ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
+        public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
             Guid serviceId,
-            ExtensionServiceOutputStream stream,
-            IExtensionServiceOutputSink sink,
+            IExtensionServiceLogSink sink,
+            long? sinceSequence = null,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
-                new ExtensionServiceOutputSubscriptionResult(
+                new ExtensionServiceLogSubscriptionResult(
                     false,
-                    ExtensionServiceOutputCode.Unsupported,
+                    ExtensionServiceLogCode.Unsupported,
                     SafeServiceId(serviceId),
+                    null));
+
+    }
+    private sealed class UnsupportedServiceRuntimeStateApi : IExtensionServiceRuntimeStateApi
+    {
+        public ValueTask<ExtensionServiceRuntimeStateSubscriptionResult> SubscribeStatesAsync(
+            IExtensionServiceRuntimeStateSink sink,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                new ExtensionServiceRuntimeStateSubscriptionResult(
+                    false,
+                    ExtensionServiceRuntimeStateSubscriptionCode.Unsupported,
                     null));
     }
 

@@ -127,7 +127,8 @@ public static class CliCommandParser
         BootstrapDefaults.NodeIdOption,
         BootstrapDefaults.LogLevelOption,
         BootstrapDefaults.LogColorOption,
-        BootstrapDefaults.DataDirectoryOption
+        BootstrapDefaults.DataDirectoryOption,
+        BootstrapDefaults.ServiceLogBufferByteBudgetOption
     ];
 
     /// <summary>Parses arguments against an explicit environment map.</summary>
@@ -266,6 +267,21 @@ public static class CliCommandParser
             return Failure(BootstrapErrorCode.InvalidDataDirectory, "The data directory is invalid.");
         }
 
+        var serviceLogBufferByteBudgetText = Resolve(
+            optionValues,
+            environment,
+            BootstrapDefaults.ServiceLogBufferByteBudgetOption,
+            BootstrapDefaults.ServiceLogBufferByteBudgetEnvironmentVariable) ??
+            BootstrapDefaults.DefaultServiceLogBufferByteBudget.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (!int.TryParse(serviceLogBufferByteBudgetText, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var serviceLogBufferByteBudget) ||
+            serviceLogBufferByteBudget <= 0)
+        {
+            return Failure(
+                BootstrapErrorCode.InvalidServiceLogBufferByteBudget,
+                "The service-log buffer budget is invalid.");
+        }
+
         var includeEfLogs = flags.Contains(BootstrapDefaults.IncludeEfLogsOption);
         if (!includeEfLogs && !TryParseBoolean(
                 environment.TryGetValue(BootstrapDefaults.IncludeEfLogsEnvironmentVariable, out var includeEfLogsValue)
@@ -284,7 +300,8 @@ public static class CliCommandParser
             normalizedLogLevel,
             includeEfLogs,
             dataDirectory,
-            logColorMode);
+            logColorMode,
+            serviceLogBufferByteBudget);
         var runOptions = new RunOptions(
             flags.Contains("--skip-extensions"),
             flags.Contains("--disable-supervisor"),

@@ -144,7 +144,7 @@ public sealed partial class ExtensionRuntimeTests
                 TestContext.Current.CancellationToken);
             var body = Body(result);
             Assert.Equal(ExtensionInvocationState.Handled, result.State);
-            Assert.Contains("api14=bridge14;serviceOutputOpen=Opened;serviceOutputSubscribe=Opened", body, StringComparison.Ordinal);
+            Assert.Contains("api14=bridge14;serviceOutputOpen=Opened;serviceOutputSubscribe=Subscribed", body, StringComparison.Ordinal);
             Assert.Equal(1, api14Factory.CreateCount);
         }
 
@@ -176,11 +176,12 @@ public sealed partial class ExtensionRuntimeTests
                 unsupported.LogWriter,
                 unsupported.ExtensionManagement,
                 unsupported.HostInfo,
-                _provideServiceOutput ? new RecordingServiceOutput() : null);
+                _provideServiceOutput ? new RecordingVersionGateServiceOutput() : null,
+                null);
         }
     }
 
-    private sealed class RecordingServiceOutput : IExtensionServiceOutputApi
+    private sealed class RecordingVersionGateServiceOutput : IExtensionServiceOutputApi
     {
         public ValueTask<ExtensionServiceOutputStreamResult> OpenStreamAsync(
             Guid serviceId,
@@ -191,25 +192,26 @@ public sealed partial class ExtensionRuntimeTests
                 ExtensionServiceOutputCode.Opened,
                 serviceId,
                 new MemoryStream()));
-
-        public ValueTask<ExtensionServiceOutputSubscriptionResult> SubscribeAsync(
+        public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
             Guid serviceId,
-            ExtensionServiceOutputStream stream,
-            IExtensionServiceOutputSink sink,
+            IExtensionServiceLogSink sink,
+            long? sinceSequence = null,
             CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new ExtensionServiceOutputSubscriptionResult(
+            ValueTask.FromResult(new ExtensionServiceLogSubscriptionResult(
                 true,
-                ExtensionServiceOutputCode.Opened,
+                ExtensionServiceLogCode.Subscribed,
                 serviceId,
                 new RecordingSubscription()));
     }
 
-    private sealed class RecordingSubscription : IExtensionServiceOutputSubscription
+
+    private sealed class RecordingSubscription : IExtensionServiceLogSubscription
     {
         public void Dispose() { }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
+
 
     private sealed class RecordingFullConfiguration : IExtensionFullConfigurationApi
     {

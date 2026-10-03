@@ -25,11 +25,10 @@ public sealed partial class FixtureEntrypoint
             .ConfigureAwait(false);
         var subscribed = await bridge.ServiceOutput.SubscribeAsync(
                 OutputProbeId,
-                ExtensionServiceOutputStream.Stderr,
                 holdServiceOutput && serviceOutputBlockPort > 0
                     ? new ProbeSink(serviceOutputBlockPort)
                     : new ProbeSink(0),
-                cancellationToken)
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         if (!holdServiceOutput && subscribed.Subscription is { } subscription)
@@ -45,13 +44,13 @@ public sealed partial class FixtureEntrypoint
         return $"api14=bridge14;serviceOutputOpen={opened.Code};serviceOutputSubscribe={subscribed.Code}";
     }
 
-    private sealed class ProbeSink : IExtensionServiceOutputSink
+    private sealed class ProbeSink : IExtensionServiceLogSink
     {
         private readonly int _blockPort;
 
         public ProbeSink(int blockPort) => _blockPort = blockPort;
 
-        public void OnChunk(ExtensionServiceOutputChunk chunk)
+        public void OnEntry(ExtensionServiceLogEntry entry)
         {
             if (_blockPort <= 0)
             {
@@ -66,8 +65,6 @@ public sealed partial class FixtureEntrypoint
             stream.ReadExactly(release);
         }
 
-        public void OnCompleted(ExtensionServiceOutputCompletionReason reason) { }
-
-        public void OnDropped(long byteCount) { }
+        public void OnCompleted() { }
     }
 }

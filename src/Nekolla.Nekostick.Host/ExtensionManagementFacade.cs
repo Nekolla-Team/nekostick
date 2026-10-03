@@ -196,12 +196,15 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         ConfigurationWriteResult result;
         if (_dbContextFactory is null)
         {
-            result = await api.SetExtensionLoadStateAsync(
-                    extensionId,
-                    record.RecordVersion,
-                    ExtensionLoadState.Loaded,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+            {
+                result = await api.SetExtensionLoadStateAsync(
+                        extensionId,
+                        record.RecordVersion,
+                        ExtensionLoadState.Loaded,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         else
         {
@@ -211,13 +214,16 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     .CreateDbContextAsync(cancellationToken)
                     .ConfigureAwait(false);
                 var contentPersistence = new EfExtensionRecordContentPersistence(db, logger: _logger);
-                result = await contentPersistence.SetLoadStateAndContentHashAsync(
-                        extensionId,
-                        record.RecordVersion,
-                        ExtensionLoadState.Loaded,
-                        contentHash,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+                {
+                    result = await contentPersistence.SetLoadStateAndContentHashAsync(
+                            extensionId,
+                            record.RecordVersion,
+                            ExtensionLoadState.Loaded,
+                            contentHash,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -308,12 +314,16 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Validation);
         }
 
-        var result = await api.SetExtensionLoadStateAsync(
-                extensionId,
-                record.RecordVersion,
-                ExtensionLoadState.Disabled,
-                cancellationToken)
-            .ConfigureAwait(false);
+        ConfigurationWriteResult result;
+        using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+        {
+            result = await api.SetExtensionLoadStateAsync(
+                    extensionId,
+                    record.RecordVersion,
+                    ExtensionLoadState.Disabled,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
         if (result.IsSuccess)
         {
             await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
@@ -522,11 +532,15 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             await _lifecycle.StopOwnedServicesAsync(extensionId, cancellationToken).ConfigureAwait(false);
         }
 
-        var result = await api.DeleteExtensionRecordCascadeAsync(
-                extensionId,
-                record.RecordVersion,
-                cancellationToken)
-            .ConfigureAwait(false);
+        ConfigurationWriteResult result;
+        using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+        {
+            result = await api.DeleteExtensionRecordCascadeAsync(
+                    extensionId,
+                    record.RecordVersion,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
         // Publish either way: on failure the owned services stopped above must be reconciled back.
         await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
         if (result.IsSuccess)
@@ -590,6 +604,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             .OrderBy(static id => id, StringComparer.Ordinal)
             .ToArray();
         var versionUpdated = new List<string>();
+        var contentHashUpdated = 0;
 
         if (added.Length != 0)
         {
@@ -604,12 +619,16 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     recordVersion: 0,
                     contentHash: scan.ContentHashes.TryGetValue(id, out var hash) ? hash : null))
                 .ToImmutableArray();
-            var persisted = await api.PersistDiscoveredExtensionRecordsAsync(
-                    ExtensionLoadState.Disabled,
-                    snapshot.Version,
-                    additions,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            ConfigurationWriteResult persisted;
+            using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+            {
+                persisted = await api.PersistDiscoveredExtensionRecordsAsync(
+                        ExtensionLoadState.Disabled,
+                        snapshot.Version,
+                        additions,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
             if (!persisted.IsSuccess)
             {
                 return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
@@ -645,23 +664,29 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     continue;
                 }
 
-                updated = await api.UpdateExtensionInstalledVersionAsync(
-                        pair.Key,
-                        record.RecordVersion,
-                        installedVersion,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+                {
+                    updated = await api.UpdateExtensionInstalledVersionAsync(
+                            pair.Key,
+                            record.RecordVersion,
+                            installedVersion,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
             else if (versionChanged && !hashObservable)
             {
                 // Version bumped while the new digest is uncomputable: clear the stale pin
                 // (unknown over stale); the next publish reports the extension ContentHashMissing.
-                updated = await api.UpdateExtensionInstalledVersionAsync(
-                        pair.Key,
-                        record.RecordVersion,
-                        installedVersion,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+                {
+                    updated = await api.UpdateExtensionInstalledVersionAsync(
+                            pair.Key,
+                            record.RecordVersion,
+                            installedVersion,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
             else
             {
@@ -671,20 +696,23 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                         .CreateDbContextAsync(cancellationToken)
                         .ConfigureAwait(false);
                     var contentPersistence = new EfExtensionRecordContentPersistence(db, logger: _logger);
-                    updated = versionChanged
-                        ? await contentPersistence.UpdateInstalledVersionAndContentHashAsync(
-                                pair.Key,
-                                record.RecordVersion,
-                                installedVersion,
-                                observedHash!,
-                                cancellationToken)
-                            .ConfigureAwait(false)
-                        : await contentPersistence.SetContentHashAsync(
-                                pair.Key,
-                                record.RecordVersion,
-                                observedHash!,
-                                cancellationToken)
-                            .ConfigureAwait(false);
+                    using (HostConfigurationWriteContext.EnterExtension(_callerExtensionId))
+                    {
+                        updated = versionChanged
+                            ? await contentPersistence.UpdateInstalledVersionAndContentHashAsync(
+                                    pair.Key,
+                                    record.RecordVersion,
+                                    installedVersion,
+                                    observedHash!,
+                                    cancellationToken)
+                                .ConfigureAwait(false)
+                            : await contentPersistence.SetContentHashAsync(
+                                    pair.Key,
+                                    record.RecordVersion,
+                                    observedHash!,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                    }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -707,6 +735,10 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
                     updated.Errors.ToArray());
             }
+            if (hashChanged && _dbContextFactory is not null)
+            {
+                contentHashUpdated++;
+            }
 
             if (versionChanged)
             {
@@ -714,10 +746,32 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             }
         }
 
-        // Reload is derived from descriptor identity at publish time: a pinned digest that
-        // differs from the running binding's digest re-candidates the extension on any publish,
-        // so refresh only needs to trigger the publish, not carry a reload set.
-        await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
+        var hasDurableChanges = added.Length != 0 || versionUpdated.Count != 0 || contentHashUpdated != 0;
+        var hasLoadedRecordNotRunning = false;
+        var runningContentHashDrift = false;
+        if (!hasDurableChanges)
+        {
+            var runningExtensionIds = _runtimeManager.GetStatuses()
+                .Where(static status => status.State == ExtensionLoadState.Loaded)
+                .Select(static status => status.ExtensionId)
+                .ToHashSet(StringComparer.Ordinal);
+            hasLoadedRecordNotRunning = snapshot.ExtensionRecords.Any(record =>
+                record.LoadState == ExtensionLoadState.Loaded &&
+                scan.Manifests.ContainsKey(record.ExtensionId) &&
+                !runningExtensionIds.Contains(record.ExtensionId));
+            runningContentHashDrift = _publisher?.HasRunningContentHashDrift(snapshot, scan.ContentHashes) == true;
+        }
+
+        var publishDecision = GetRefreshPublishDecision(
+            added.Length,
+            versionUpdated.Count,
+            contentHashUpdated,
+            runningContentHashDrift,
+            hasLoadedRecordNotRunning);
+        if (publishDecision.ShouldPublish)
+        {
+            await CompletePublishTriggerAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         var missing = records.Keys
             .Where(id => !scan.Manifests.ContainsKey(id))
@@ -728,8 +782,11 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             _callerExtensionId,
             added.Length,
             versionUpdated.Count,
+            contentHashUpdated,
             missing.Length,
-            scan.Skipped.Length);
+            scan.Skipped.Length,
+            publishDecision.ShouldPublish,
+            publishDecision.Reason);
         return ConfigurationReadResult<ExtensionRefreshSummary>.Success(
             new ExtensionRefreshSummary(
                 added.ToImmutableArray(),
@@ -742,6 +799,27 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         !string.IsNullOrWhiteSpace(extensionId) &&
         extensionId.Length <= 128 &&
         !extensionId.Any(char.IsControl);
+    internal static (bool ShouldPublish, string Reason) GetRefreshPublishDecision(
+        int addedCount,
+        int versionUpdatedCount,
+        int contentHashUpdatedCount,
+        bool hasRunningContentHashDrift,
+        bool hasLoadedRecordNotRunning)
+    {
+        if (addedCount != 0 || versionUpdatedCount != 0 || contentHashUpdatedCount != 0)
+        {
+            return (true, "DurableConfigurationChange");
+        }
+
+        if (hasLoadedRecordNotRunning)
+        {
+            return (true, "LoadedRecordNotRunning");
+        }
+
+        return hasRunningContentHashDrift
+            ? (true, "RunningContentHashDrift")
+            : (false, "NoChanges");
+    }
 
     private static bool HasLoadedDependent(
         HostConfigurationSnapshot snapshot,

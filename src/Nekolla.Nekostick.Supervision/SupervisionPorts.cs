@@ -132,11 +132,13 @@ public sealed record ProcessExitObservation
     /// <param name="instanceId">The opaque process generation identifier.</param>
     /// <param name="successfulExit">Whether the helper exited successfully.</param>
     /// <param name="exitedAt">The UTC exit timestamp.</param>
+    /// <param name="exitCode">The numeric exit code when the process reported one.</param>
     public ProcessExitObservation(
         Guid serviceId,
         ProcessInstanceId instanceId,
         bool successfulExit,
-        DateTimeOffset exitedAt)
+        DateTimeOffset exitedAt,
+        int? exitCode = null)
     {
         if (serviceId == Guid.Empty)
         {
@@ -147,6 +149,7 @@ public sealed record ProcessExitObservation
         InstanceId = instanceId;
         SuccessfulExit = successfulExit;
         ExitedAt = exitedAt.ToUniversalTime();
+        ExitCode = exitCode;
     }
 
     /// <summary>Gets the service identifier.</summary>
@@ -160,6 +163,8 @@ public sealed record ProcessExitObservation
 
     /// <summary>Gets the UTC exit timestamp.</summary>
     public DateTimeOffset ExitedAt { get; }
+    /// <summary>Gets the numeric process exit code, when it was safely read.</summary>
+    public int? ExitCode { get; }
 }
 
 /// <summary>Defines the narrow generation-specific process exit observation boundary.</summary>

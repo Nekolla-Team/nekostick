@@ -273,7 +273,8 @@ internal static class Program
         builder.Services.AddSingleton(new HostRuntimeOptions(
             bootstrap.ConnectionString,
             bootstrap.NodeId,
-            command.RunOptions.ReadOnly));
+            command.RunOptions.ReadOnly,
+            serviceLogBufferByteBudget: bootstrap.ServiceLogBufferByteBudget));
         builder.Services.AddSingleton<HostConfigurationSnapshotHolder>(serviceProvider =>
             new HostConfigurationSnapshotHolder(
                 serviceProvider.GetRequiredService<ILogger<HostConfigurationSnapshotHolder>>()));
@@ -392,6 +393,9 @@ internal static class Program
                         serviceProvider.GetRequiredService<IDbContextFactory<NekostickDbContext>>(),
                         serviceProvider.GetRequiredService<HostRuntimeState>(),
                         serviceProvider.GetRequiredService<ILogger<HostPortLeaseStoreAdapter>>()));
+                builder.Services.AddSingleton<HostServiceRuntimeRegistry>();
+                builder.Services.AddSingleton<IHostServiceRuntimeStateSource>(serviceProvider =>
+                    serviceProvider.GetRequiredService<HostServiceRuntimeRegistry>());
                 builder.Services.AddSingleton<HostServiceLifecycleManager>(serviceProvider =>
                     new HostServiceLifecycleManager(
                         serviceProvider.GetRequiredService<IProcessExecutor>(),
@@ -404,7 +408,8 @@ internal static class Program
                         serviceProvider.GetRequiredService<ILogger<HostServiceLifecycleManager>>(),
                         serviceProvider.GetRequiredService<IMicroserviceDrainTracker>(),
                         serviceProvider.GetRequiredService<HostNodeOptions>(),
-                        serviceProvider.GetRequiredService<ExtensionRuntimeManager>()));
+                        serviceProvider.GetRequiredService<ExtensionRuntimeManager>(),
+                        serviceProvider.GetRequiredService<HostServiceRuntimeRegistry>()));
                 builder.Services.AddSingleton<IPortLeaseStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<HostPortLeaseStoreAdapter>());
                 builder.Services.AddSingleton<IHostServiceLifecycleCoordinator>(serviceProvider =>
@@ -759,7 +764,8 @@ internal static class Program
         BootstrapDefaults.NodeIdOption or
         BootstrapDefaults.LogLevelOption or
         BootstrapDefaults.LogColorOption or
-        BootstrapDefaults.DataDirectoryOption;
+        BootstrapDefaults.DataDirectoryOption or
+        BootstrapDefaults.ServiceLogBufferByteBudgetOption;
     private static Dictionary<string, string?> ReadBootstrapEnvironment() =>
         new Dictionary<string, string?>(StringComparer.Ordinal)
         {
@@ -776,7 +782,9 @@ internal static class Program
             [BootstrapDefaults.LogColorEnvironmentVariable] =
                 Environment.GetEnvironmentVariable(BootstrapDefaults.LogColorEnvironmentVariable),
             [BootstrapDefaults.DataDirectoryEnvironmentVariable] =
-                Environment.GetEnvironmentVariable(BootstrapDefaults.DataDirectoryEnvironmentVariable)
+                Environment.GetEnvironmentVariable(BootstrapDefaults.DataDirectoryEnvironmentVariable),
+            [BootstrapDefaults.ServiceLogBufferByteBudgetEnvironmentVariable] =
+                Environment.GetEnvironmentVariable(BootstrapDefaults.ServiceLogBufferByteBudgetEnvironmentVariable)
         };
 
     private sealed record DatabaseInspection(

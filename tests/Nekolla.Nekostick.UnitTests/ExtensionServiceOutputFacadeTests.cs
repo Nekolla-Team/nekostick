@@ -1,12 +1,10 @@
 using System.Collections;
-using System.Diagnostics;
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
-using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Host;
 using Nekolla.Nekostick.Supervision;
 using ContractRestartPolicy = Nekolla.Nekostick.Contracts.ServiceRestartPolicy;
@@ -20,7 +18,7 @@ public sealed class ExtensionServiceOutputFacadeTests
         new("0198a1af-6e94-7b25-9732-59c9075b14f6");
 
     [Fact]
-    public async Task InvalidAndUnconfiguredServiceIdsReturnNotFound()
+    public async Task InvalidAndUnconfiguredServiceIdsReturnNotFoundForOpenStream()
     {
         await using var facade = CreateFacade(configured: false, executor: null);
 
@@ -40,29 +38,8 @@ public sealed class ExtensionServiceOutputFacadeTests
         Assert.False(open.Succeeded);
         Assert.Equal(ExtensionServiceOutputCode.NotFound, open.Code);
 
-        var subscription = await facade.SubscribeAsync(
-            ServiceId,
-            ExtensionServiceOutputStream.Stdout,
-            new RecordingSink(),
-            TestContext.Current.CancellationToken);
-        Assert.False(subscription.Succeeded);
-        Assert.Equal(ExtensionServiceOutputCode.NotFound, subscription.Code);
     }
 
-    [Fact]
-    public async Task ConfiguredServiceWithoutExecutorReturnsUnsupported()
-    {
-        await using var facade = CreateFacade(configured: true, executor: null);
-
-        var result = await facade.SubscribeAsync(
-            ServiceId,
-            ExtensionServiceOutputStream.Stdout,
-            new RecordingSink(),
-            TestContext.Current.CancellationToken);
-
-        Assert.False(result.Succeeded);
-        Assert.Equal(ExtensionServiceOutputCode.Unsupported, result.Code);
-    }
 
     [Fact]
     public async Task ForeignConfiguredServiceCanBeOpened()
@@ -113,81 +90,6 @@ public sealed class ExtensionServiceOutputFacadeTests
         Assert.Equal(ExtensionServiceOutputCode.NotRunning, result.Code);
     }
 
-    [Fact]
-    public async Task SubscribeAfterPumpEndReturnsOpenedAndImmediateProcessExitedCompletion()
-    {
-        var helperPath = RequireNativeHelperPath();
-        var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        await using var facade = CreateFacade(configured: true, executor: executor);
-        var fifoPath = CreateFifo();
-        var captureStarted = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseCapture = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var captureSink = new BlockingCaptureSink(captureStarted, releaseCapture);
-        using var captureSubscription = executor.SubscribeOutputCapture(captureSink);
-        var lateResult = new TaskCompletionSource<ExtensionServiceOutputSubscriptionResult>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var lateSink = new RecordingSink();
-        var rawSink = new CompletionActionChunkSink(() =>
-        {
-            try
-            {
-                var result = facade.SubscribeAsync(
-                    ServiceId,
-                    ExtensionServiceOutputStream.Stdout,
-                    lateSink,
-                    CancellationToken.None).AsTask().GetAwaiter().GetResult();
-                lateResult.TrySetResult(result);
-            }
-            catch (Exception exception)
-            {
-                lateResult.TrySetException(exception);
-            }
-        });
-
-        try
-        {
-            var start = await executor.StartAsync(
-                CreateLaunch($"read _ < {fifoPath}; printf hold; exit 0"),
-                TestContext.Current.CancellationToken);
-            Assert.Equal(ProcessOperationStatus.Accepted, start.Status);
-            using var rawSubscription = executor.TrySubscribeOutput(
-                ServiceId,
-                ProcessOutputStream.Stdout,
-                rawSink) ?? throw new InvalidOperationException("The running fixture must expose stdout.");
-
-            await File.WriteAllTextAsync(
-                fifoPath,
-                "\n",
-                TestContext.Current.CancellationToken);
-            await captureStarted.Task.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
-            var subscribed = await lateResult.Task.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
-            Assert.True(subscribed.Succeeded);
-            Assert.Equal(ExtensionServiceOutputCode.Opened, subscribed.Code);
-            Assert.NotNull(subscribed.Subscription);
-
-            var completion = await lateSink.Completed.Task.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
-            Assert.Equal(ExtensionServiceOutputCompletionReason.ProcessExited, completion);
-            releaseCapture.TrySetResult(true);
-            await subscribed.Subscription!.DisposeAsync();
-        }
-        finally
-        {
-            releaseCapture.TrySetResult(true);
-            await executor.StopAsync(
-                ServiceId,
-                TimeSpan.FromSeconds(2),
-                TestContext.Current.CancellationToken);
-            File.Delete(fifoPath);
-        }
-    }
 
     [Fact]
     public async Task DisposingOpenedResourcesPrunesTrackingAcrossCycles()
@@ -222,145 +124,6 @@ public sealed class ExtensionServiceOutputFacadeTests
         }
     }
 
-    [Fact]
-    public async Task DisposeAfterDisposeAsyncWaitsForBlockedSinkAndCallbackGuardReturnsReentrant()
-    {
-        var helperPath = RequireNativeHelperPath();
-        var executor = new PosixProcessExecutor(helperPath, TimeSpan.FromSeconds(2));
-        await using var facade = CreateFacade(configured: true, executor: executor);
-        var pending = typeof(ExtensionServiceOutputFacade).GetField(
-            "_pendingDisposals",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(pending);
-        var callbackEntered = new TaskCompletionSource<object?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseCallback = new TaskCompletionSource<object?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        ExtensionLifecycleOperationResult? lifecycleResult = null;
-        var lifecycle = new ExtensionLifecycleApi(
-            () => null,
-            _ => ValueTask.FromResult(new ExtensionLifecycleOperationResult(
-                true,
-                ExtensionLifecycleOperationCode.Accepted,
-                null)),
-            _ => ValueTask.FromResult(new ExtensionLifecycleOperationResult(
-                true,
-                ExtensionLifecycleOperationCode.Accepted,
-                null)));
-        var sink = new RecordingSink
-        {
-            OnChunkAction = _ =>
-            {
-                lifecycleResult = lifecycle.RequestUnloadAsync().AsTask().GetAwaiter().GetResult();
-                callbackEntered.TrySetResult(null);
-                releaseCallback.Task.GetAwaiter().GetResult();
-            }
-        };
-        var fifoPath = CreateFifo();
-
-        var start = await executor.StartAsync(
-            CreateLaunch($"read _ < {fifoPath}; printf payload; sleep 3"),
-            TestContext.Current.CancellationToken);
-        Assert.Equal(ProcessOperationStatus.Accepted, start.Status);
-        try
-        {
-            var subscribed = await facade.SubscribeAsync(
-                ServiceId,
-                ExtensionServiceOutputStream.Stdout,
-                sink,
-                TestContext.Current.CancellationToken);
-            Assert.True(subscribed.Succeeded);
-            Assert.NotNull(subscribed.Subscription);
-            await File.WriteAllTextAsync(
-                fifoPath,
-                "\n",
-                TestContext.Current.CancellationToken);
-            await callbackEntered.Task.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
-
-            subscribed.Subscription!.Dispose();
-            var disposeTask = subscribed.Subscription.DisposeAsync().AsTask();
-            Assert.False(disposeTask.IsCompleted);
-            var facadeDisposeTask = facade.DisposeAsync().AsTask();
-            Assert.False(facadeDisposeTask.IsCompleted);
-            Assert.NotNull(lifecycleResult);
-            Assert.Equal(ExtensionLifecycleOperationCode.Reentrant, lifecycleResult!.Code);
-
-            releaseCallback.TrySetResult(null);
-            await disposeTask.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
-            await facadeDisposeTask.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
-            Assert.Empty((ICollection)pending!.GetValue(facade)!);
-        }
-        finally
-        {
-            await executor.StopAsync(
-                ServiceId,
-                TimeSpan.FromSeconds(2),
-                TestContext.Current.CancellationToken);
-            File.Delete(fifoPath);
-        }
-    }
-
-    [Fact]
-    public async Task QuiescedSyncDisposedSubscriptionStaysPrunedAcrossRepeatedAsyncDispose()
-    {
-        var facade = CreateFacade(configured: true, executor: null);
-        var pending = typeof(ExtensionServiceOutputFacade).GetField(
-            "_pendingDisposals",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        var wrapperType = typeof(ExtensionServiceOutputFacade).GetNestedType(
-            "ExtensionServiceOutputSubscription",
-            BindingFlags.NonPublic);
-        var markDetached = typeof(ExtensionServiceOutputFacade).GetMethod(
-            "MarkDetached",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        var untrack = typeof(ExtensionServiceOutputFacade).GetMethod(
-            "Untrack",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(pending);
-        Assert.NotNull(wrapperType);
-        Assert.NotNull(markDetached);
-        Assert.NotNull(untrack);
-
-        var onDetached = markDetached!.CreateDelegate<Action<IDisposable>>(facade);
-        var untrackResource = untrack!.CreateDelegate<Action<IDisposable>>(facade);
-        var quiesced = new TaskCompletionSource<object?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var onQuiesced = (Action<IDisposable>)(resource =>
-        {
-            untrackResource(resource);
-            quiesced.TrySetResult(null);
-        });
-        var underlying = new BlockingAsyncDisposable();
-        var subscription = Assert.IsAssignableFrom<IExtensionServiceOutputSubscription>(
-            Activator.CreateInstance(
-                wrapperType!,
-                BindingFlags.Instance | BindingFlags.NonPublic,
-                binder: null,
-                args: [underlying, NullLogger.Instance, onDetached, onQuiesced],
-                culture: null));
-
-        subscription.Dispose();
-        await underlying.DisposeStarted.Task.WaitAsync(
-            TimeSpan.FromSeconds(5),
-            TestContext.Current.CancellationToken);
-        Assert.Single((ICollection)pending!.GetValue(facade)!);
-
-        underlying.Release();
-        await quiesced.Task.WaitAsync(
-            TimeSpan.FromSeconds(5),
-            TestContext.Current.CancellationToken);
-        Assert.Empty((ICollection)pending.GetValue(facade)!);
-
-        await subscription.DisposeAsync();
-        await subscription.DisposeAsync();
-        Assert.Empty((ICollection)pending.GetValue(facade)!);
-    }
 
     private static ExtensionServiceOutputFacade CreateFacade(
         bool configured,
@@ -400,21 +163,6 @@ public sealed class ExtensionServiceOutputFacadeTests
             ImmutableArray.Create("-c", command),
             new ProcessEnvironment(new Dictionary<string, string>()));
 
-    private static string CreateFifo()
-    {
-        var path = Path.Combine(Path.GetTempPath(), "nekostick-fifo-" + Guid.NewGuid().ToString("N"));
-        using var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = "mkfifo",
-            ArgumentList = { path },
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        });
-        Assert.NotNull(process);
-        process!.WaitForExit();
-        Assert.Equal(0, process.ExitCode);
-        return path;
-    }
 
     private static string RequireNativeHelperPath()
     {
@@ -493,73 +241,6 @@ public sealed class ExtensionServiceOutputFacadeTests
         }
     }
 
-    private sealed class RecordingSink : IExtensionServiceOutputSink
-    {
-        public Action<ExtensionServiceOutputChunk>? OnChunkAction { get; init; }
-
-        internal TaskCompletionSource<ExtensionServiceOutputCompletionReason> Completed { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public void OnChunk(ExtensionServiceOutputChunk chunk) => OnChunkAction?.Invoke(chunk);
-
-        public void OnCompleted(ExtensionServiceOutputCompletionReason reason) => Completed.TrySetResult(reason);
-
-        public void OnDropped(long byteCount) { }
-    }
-
-    private sealed class BlockingCaptureSink : IProcessOutputSink
-    {
-        private readonly TaskCompletionSource<bool> started;
-        private readonly TaskCompletionSource<bool> release;
-
-        internal BlockingCaptureSink(
-            TaskCompletionSource<bool> started,
-            TaskCompletionSource<bool> release)
-        {
-            this.started = started;
-            this.release = release;
-        }
-
-        public void OnLine(ProcessOutputRecord record)
-        {
-            started.TrySetResult(true);
-            release.Task.GetAwaiter().GetResult();
-        }
-
-        public void OnDropped(Guid serviceId, ProcessOutputStream stream, long count) { }
-    }
-
-    private sealed class CompletionActionChunkSink : IProcessOutputChunkSink
-    {
-        private readonly Action onCompleted;
-
-        internal CompletionActionChunkSink(Action onCompleted) => this.onCompleted = onCompleted;
-
-        public void OnChunk(ReadOnlyMemory<byte> chunk, DateTimeOffset timestamp) { }
-
-        public void OnCompleted(ProcessOutputCompletion completion) => onCompleted();
-
-        public void OnDropped(long byteCount) { }
-    }
-
-    private sealed class BlockingAsyncDisposable : IDisposable, IAsyncDisposable
-    {
-        private readonly TaskCompletionSource<object?> release =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        internal TaskCompletionSource<object?> DisposeStarted { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public void Dispose() { }
-
-        public ValueTask DisposeAsync()
-        {
-            DisposeStarted.TrySetResult(null);
-            return new ValueTask(release.Task);
-        }
-
-        internal void Release() => release.TrySetResult(null);
-    }
 
     private static Nekolla.Nekostick.Contracts.ServiceConfiguration CreateServiceConfiguration() =>
         new(

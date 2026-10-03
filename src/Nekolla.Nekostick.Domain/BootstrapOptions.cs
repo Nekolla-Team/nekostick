@@ -37,7 +37,10 @@ public enum BootstrapErrorCode
     InvalidDataDirectory,
 
     /// <summary>The requested log color mode was not a supported name.</summary>
-    InvalidLogColor
+    InvalidLogColor,
+
+    /// <summary>The service-log buffer budget was not a positive integer.</summary>
+    InvalidServiceLogBufferByteBudget
 }
 
 /// <summary>Controls when ANSI colors decorate the stderr log output.</summary>
@@ -85,7 +88,8 @@ public sealed record BootstrapOptions
         string minimumLevel,
         bool includeEfLogs,
         string dataDirectory,
-        LogColorMode logColor)
+        LogColorMode logColor,
+        int serviceLogBufferByteBudget)
     {
         ConnectionString = connectionString;
         ListenAddress = listenAddress;
@@ -95,6 +99,7 @@ public sealed record BootstrapOptions
         IncludeEfLogs = includeEfLogs;
         DataDirectory = dataDirectory;
         LogColor = logColor;
+        ServiceLogBufferByteBudget = serviceLogBufferByteBudget;
     }
 
     /// <summary>Gets the PostgreSQL connection string. Callers must treat it as secret.</summary>
@@ -117,6 +122,9 @@ public sealed record BootstrapOptions
     /// <summary>Gets the normalized absolute host data directory for extension-owned files.</summary>
     public string DataDirectory { get; }
 
+    /// <summary>Gets the per-service retained service-log buffer budget in bytes.</summary>
+    public int ServiceLogBufferByteBudget { get; }
+
     /// <summary>Gets when ANSI colors decorate the stderr log output.</summary>
     public LogColorMode LogColor { get; }
 
@@ -128,7 +136,8 @@ public sealed record BootstrapOptions
         string minimumLevel,
         bool includeEfLogs,
         string dataDirectory,
-        LogColorMode logColor) => new(
+        LogColorMode logColor,
+        int serviceLogBufferByteBudget) => new(
             connectionString,
             listenAddress,
             listenPort,
@@ -136,7 +145,8 @@ public sealed record BootstrapOptions
             minimumLevel,
             includeEfLogs,
             dataDirectory,
-            logColor);
+            logColor,
+            serviceLogBufferByteBudget);
 }
 
 /// <summary>Registers bootstrap environment names and safe defaults.</summary>
@@ -165,6 +175,9 @@ public static class BootstrapDefaults
     /// <summary>The environment variable for the host data directory.</summary>
     public const string DataDirectoryEnvironmentVariable = "NEKOSTICK_DATA_DIRECTORY";
 
+    /// <summary>The environment variable for the per-service service-log buffer budget.</summary>
+    public const string ServiceLogBufferByteBudgetEnvironmentVariable = "NEKOSTICK_SERVICE_LOG_BUFFER_BYTE_BUDGET";
+
     /// <summary>The CLI option for the database connection string.</summary>
     public const string ConnectionStringOption = "--connection-string";
 
@@ -188,6 +201,9 @@ public static class BootstrapDefaults
     /// <summary>The CLI option for the host data directory.</summary>
     public const string DataDirectoryOption = "--data-directory";
 
+    /// <summary>The CLI option for the per-service service-log buffer budget.</summary>
+    public const string ServiceLogBufferByteBudgetOption = "--service-log-buffer-byte-budget";
+
     /// <summary>The default loopback listen address.</summary>
     public const string DefaultListenAddress = "127.0.0.1";
 
@@ -202,6 +218,9 @@ public static class BootstrapDefaults
 
     /// <summary>The default stderr log color mode.</summary>
     public const string DefaultLogColor = "auto";
+
+    /// <summary>The default per-service retained service-log buffer budget in bytes.</summary>
+    public const int DefaultServiceLogBufferByteBudget = 1_048_576;
 
     /// <summary>The default host data directory beside the executable.</summary>
     public static string DefaultDataDirectory => Path.Combine(AppContext.BaseDirectory, "data");

@@ -439,7 +439,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             revision.Version = newVersion;
             revision.CommittedAt = now;
             revision.UpdatedAt = now;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
             await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
@@ -565,7 +565,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             revision.Version = newVersion;
             revision.CommittedAt = now;
             revision.UpdatedAt = now;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
             await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
@@ -682,7 +682,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             revision.Version = committedVersion;
             revision.CommittedAt = now;
             revision.UpdatedAt = now;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
             await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
@@ -822,7 +822,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             revision.Version = committedVersion;
             revision.CommittedAt = now;
             revision.UpdatedAt = now;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
             await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
@@ -1109,7 +1109,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 revision.Version = newRevisionVersion;
                 revision.CommittedAt = now;
                 revision.UpdatedAt = now;
-                revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+                revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
                 await _dbContext.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 await _revisionHelper.PublishConfigurationChangedAsync(newRevisionVersion);
@@ -1141,7 +1141,7 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
             revision.Version = committedVersion;
             revision.CommittedAt = updateTime;
             revision.UpdatedAt = updateTime;
-            revision.CommittedBy = EfHostConfigRevisionHelper.Committer;
+            revision.CommittedBy = HostConfigurationWriteContext.CurrentCommittedBy;
             await _dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             await _revisionHelper.PublishConfigurationChangedAsync(committedVersion);

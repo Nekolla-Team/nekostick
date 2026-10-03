@@ -28,7 +28,15 @@ public sealed record HostServiceRuntimeSnapshot
         DateTimeOffset? lastHealthAt,
         ExtensionServiceLifecycleState lifecycleState,
         ExtensionServiceHealthState healthState,
-        string? ownerExtensionId = null)
+        string? ownerExtensionId = null,
+        ExtensionServiceFailureStage failureStage = ExtensionServiceFailureStage.None,
+        ExtensionServiceFailureCode failureCode = ExtensionServiceFailureCode.None,
+        string? failureReason = null,
+        ExtensionServiceProbeSnapshot? lastProbe = null,
+        int? processExitCode = null,
+        int restartCount = 0,
+        DateTimeOffset? stateEnteredAt = null,
+        DateTimeOffset? retryAt = null)
     {
         ServiceId = serviceId;
         ConfigurationVersion = configurationVersion;
@@ -40,6 +48,14 @@ public sealed record HostServiceRuntimeSnapshot
         LifecycleState = lifecycleState;
         Health = healthState;
         OwnerExtensionId = ownerExtensionId;
+        FailureStage = failureStage;
+        FailureCode = failureCode;
+        FailureReason = failureReason;
+        LastProbe = lastProbe;
+        ProcessExitCode = processExitCode;
+        RestartCount = restartCount;
+        StateEnteredAt = stateEnteredAt ?? lastUpdatedAt;
+        RetryAt = retryAt;
     }
 
     /// <summary>Gets the identifier of the service represented by this snapshot.</summary>
@@ -69,6 +85,112 @@ public sealed record HostServiceRuntimeSnapshot
 
     /// <summary>Gets the owning extension identifier when this service is extension-owned.</summary>
     public string? OwnerExtensionId { get; }
+    /// <summary>Gets the lifecycle stage where the current failure occurred.</summary>
+    public ExtensionServiceFailureStage FailureStage { get; }
+
+    /// <summary>Gets the safe machine-readable failure reason.</summary>
+    public ExtensionServiceFailureCode FailureCode { get; }
+
+    /// <summary>Gets the bounded human-readable failure explanation.</summary>
+    public string? FailureReason { get; }
+
+    /// <summary>Gets the latest health probe result and safe details.</summary>
+    public ExtensionServiceProbeSnapshot? LastProbe { get; }
+
+    /// <summary>Gets the process exit code, when an exit was observed.</summary>
+    public int? ProcessExitCode { get; }
+
+    /// <summary>Gets the number of restart attempts recorded for the service.</summary>
+    public int RestartCount { get; }
+
+    /// <summary>Gets the UTC time at which the current lifecycle state began.</summary>
+    public DateTimeOffset? StateEnteredAt { get; }
+
+    /// <summary>Gets the UTC time of the next scheduled attempt.</summary>
+    public DateTimeOffset? RetryAt { get; }
+
+    internal HostServiceRuntimeSnapshot WithStateEnteredAt(DateTimeOffset? stateEnteredAt) => new(
+        ServiceId,
+        ConfigurationVersion,
+        ProcessId,
+        ProcessInstanceId,
+        StartedAt,
+        LastUpdatedAt,
+        LastHealthAt,
+        LifecycleState,
+        Health,
+        OwnerExtensionId,
+        FailureStage,
+        FailureCode,
+        FailureReason,
+        LastProbe,
+        ProcessExitCode,
+        RestartCount,
+        stateEnteredAt,
+        RetryAt);
+
+    internal HostServiceRuntimeSnapshot WithOwnerExtensionId(string? ownerExtensionId, DateTimeOffset lastUpdatedAt) => new(
+        ServiceId,
+        ConfigurationVersion,
+        ProcessId,
+        ProcessInstanceId,
+        StartedAt,
+        lastUpdatedAt,
+        LastHealthAt,
+        LifecycleState,
+        Health,
+        ownerExtensionId,
+        FailureStage,
+        FailureCode,
+        FailureReason,
+        LastProbe,
+        ProcessExitCode,
+        RestartCount,
+        StateEnteredAt,
+        RetryAt);
+    internal HostServiceRuntimeSnapshot WithConfigurationVersion(
+        long configurationVersion,
+        string? ownerExtensionId,
+        DateTimeOffset lastUpdatedAt) => new(
+            ServiceId,
+            configurationVersion,
+            ProcessId,
+            ProcessInstanceId,
+            StartedAt,
+            lastUpdatedAt,
+            LastHealthAt,
+            LifecycleState,
+            Health,
+            ownerExtensionId,
+            FailureStage,
+            FailureCode,
+            FailureReason,
+            LastProbe,
+            ProcessExitCode,
+            RestartCount,
+            StateEnteredAt,
+            RetryAt);
+
+    internal HostServiceRuntimeSnapshot WithRestartCount(int restartCount) => new(
+        ServiceId,
+        ConfigurationVersion,
+        ProcessId,
+        ProcessInstanceId,
+        StartedAt,
+        LastUpdatedAt,
+        LastHealthAt,
+        LifecycleState,
+        Health,
+        OwnerExtensionId,
+        FailureStage,
+        FailureCode,
+        FailureReason,
+        LastProbe,
+        ProcessExitCode,
+        restartCount,
+        StateEnteredAt,
+        RetryAt);
+
 
 
     /// <summary>Gets the non-negative elapsed time since the active service process started, or <see langword="null"/> if unavailable.</summary>
@@ -88,77 +210,104 @@ public sealed record HostServiceRuntimeSnapshot
 }
 
 
-/// <summary>Publishes active supervisor state through the narrow telemetry accessor.</summary>
+/// <summary>Publishes node-local runtime state through the narrow telemetry accessor.</summary>
 public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSnapshotAccessor
 {
     /// <inheritdoc />
     public ImmutableArray<HostServiceRuntimeSnapshot> ReadCurrent()
     {
-        var builder = ImmutableArray.CreateBuilder<HostServiceRuntimeSnapshot>();
-        foreach (var pair in _slots)
-        {
-            lock (pair.Value.Gate)
-            {
-                if (pair.Value.Active is { } generation)
-                {
-                    builder.Add(CreateRuntimeSnapshot(generation));
-                }
-            }
-        }
-
-        return builder.ToImmutable();
+        SynchronizePublishedRuntimeConfiguration();
+        return _runtimeRegistry.ReadCurrent();
     }
 
     /// <inheritdoc />
     public bool TryGet(Guid serviceId, out HostServiceRuntimeSnapshot snapshot)
     {
-        snapshot = null!;
-        if (!_slots.TryGetValue(serviceId, out var slot))
-        {
-            return false;
-        }
-
-        lock (slot.Gate)
-        {
-            if (slot.Active is not { } generation)
-            {
-                return false;
-            }
-
-            snapshot = CreateRuntimeSnapshot(generation);
-            return true;
-        }
+        SynchronizePublishedRuntimeConfiguration();
+        return _runtimeRegistry.TryGet(serviceId, out snapshot);
     }
 
-    private static HostServiceRuntimeSnapshot CreateRuntimeSnapshot(ServiceGeneration generation)
+    private void PublishRuntimeSnapshot(
+        ServiceGeneration generation,
+        ServiceRuntimeSnapshot? state = null,
+        ExtensionServiceLifecycleState? lifecycleState = null,
+        ExtensionServiceFailureStage failureStage = ExtensionServiceFailureStage.None,
+        ExtensionServiceFailureCode failureCode = ExtensionServiceFailureCode.None,
+        string? failureReason = null,
+        int? processExitCode = null,
+        DateTimeOffset? retryAt = null,
+        DateTimeOffset? updatedAt = null,
+        bool preserveFailure = false,
+        long? configurationVersion = null,
+        long? serviceVersion = null,
+        ServiceHealthState? healthOverride = null,
+        HealthObservationResult? lastProbeOverride = null,
+        ServiceStateReasonCode? probeFailureReasonOverride = null,
+        bool preserveServiceVersion = false,
+        int? restartCountIncrementOverride = null,
+        bool preserveLastProbe = false)
     {
         var supervisor = generation.Supervisor;
-        var current = supervisor.Snapshot;
-        var health = current.Health switch
+        var current = state ?? supervisor.Snapshot;
+        var lifecycle = lifecycleState ?? MapLifecycle(current.ObservedLifecycle);
+        if (lifecycleState is null && current.ObservedLifecycle == ServiceLifecycleState.Starting &&
+            current.Deadline is { Kind: ServiceDeadlineKind.RestartBackoff or ServiceDeadlineKind.WaitingBackoff })
         {
-            ServiceHealthState.Healthy => ExtensionServiceHealthState.Healthy,
-            ServiceHealthState.Unhealthy => ExtensionServiceHealthState.Unhealthy,
-            _ => ExtensionServiceHealthState.Unknown
-        };
-        var lifecycle = current.ObservedLifecycle switch
-        {
-            ServiceLifecycleState.Disabled => ExtensionServiceLifecycleState.Disabled,
-            ServiceLifecycleState.Starting => ExtensionServiceLifecycleState.Starting,
-            ServiceLifecycleState.Running => ExtensionServiceLifecycleState.Running,
-            ServiceLifecycleState.Stopping => ExtensionServiceLifecycleState.Stopping,
-            ServiceLifecycleState.Failed => ExtensionServiceLifecycleState.Failed,
-            ServiceLifecycleState.Waiting => ExtensionServiceLifecycleState.Waiting,
-            _ => ExtensionServiceLifecycleState.Unknown
-        };
-        var hasProcess = supervisor.TryGetActiveProcessTelemetry(out var processInstanceId, out var processId, out var startedAt);
-        if (!hasProcess && (lifecycle is ExtensionServiceLifecycleState.Starting or ExtensionServiceLifecycleState.Running))
-        {
-            lifecycle = ExtensionServiceLifecycleState.Unknown;
-            health = ExtensionServiceHealthState.Unknown;
+            lifecycle = ExtensionServiceLifecycleState.Waiting;
         }
 
-        var lastHealthAt = current.LastHealthObservation?.ObservedAt;
+        var hasPrevious = _runtimeRegistry.TryGet(current.ServiceId, out var previous);
+        if (preserveFailure && hasPrevious && previous.LifecycleState == lifecycle &&
+            (previous.FailureStage != ExtensionServiceFailureStage.None ||
+             previous.FailureCode != ExtensionServiceFailureCode.None))
+        {
+            failureStage = previous.FailureStage;
+            failureCode = previous.FailureCode;
+            failureReason = previous.FailureReason;
+            processExitCode ??= previous.ProcessExitCode;
+            retryAt ??= previous.RetryAt;
+        }
+
+        var health = MapHealth(healthOverride ?? current.Health);
+        var hasProcess = supervisor.TryGetActiveProcessTelemetry(
+            out var processInstanceId,
+            out var processId,
+            out var startedAt);
+        var observation = lastProbeOverride ?? current.LastHealthObservation;
+        var lastHealthAt = observation?.ObservedAt;
+        var lastProbe = observation is null
+            ? hasPrevious ? previous.LastProbe : null
+            : new ExtensionServiceProbeSnapshot(
+                observation.ObservedAt,
+                MapProbeResult(observation.Status),
+                observation.Target,
+                MapProbeFailure(observation.Status, probeFailureReasonOverride ?? generation.LastHealthProbeReason),
+                observation.ErrorMessage is { Length: > 512 } probeErrorMessage
+                    ? probeErrorMessage[..512]
+                    : observation.ErrorMessage);
+        if (preserveFailure && hasPrevious && previous.LifecycleState == lifecycle &&
+            (previous.FailureStage != ExtensionServiceFailureStage.None ||
+             previous.FailureCode != ExtensionServiceFailureCode.None))
+        {
+            lastProbe = previous.LastProbe;
+            lastHealthAt = previous.LastHealthAt;
+        }
+        if (preserveLastProbe && hasPrevious)
+        {
+            lastProbe = previous.LastProbe;
+            lastHealthAt = previous.LastHealthAt;
+        }
+        if (lastHealthAt is null && hasPrevious)
+        {
+            lastHealthAt = previous.LastHealthAt;
+        }
+
         var lastUpdatedAt = current.ChangedAt;
+        if (updatedAt is { } updated && updated > lastUpdatedAt)
+        {
+            lastUpdatedAt = updated;
+        }
+
         if (startedAt is { } started && started > lastUpdatedAt)
         {
             lastUpdatedAt = started;
@@ -169,16 +318,338 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
             lastUpdatedAt = healthAt;
         }
 
-        return new HostServiceRuntimeSnapshot(
-            current.ServiceId,
-            generation.SnapshotVersion,
-            processId,
-            processInstanceId,
-            startedAt,
-            lastUpdatedAt,
-            lastHealthAt,
-            lifecycle,
-            health,
-            generation.OwnerExtensionId);
+        var restartCountIncrement = restartCountIncrementOverride ??
+            generation.RecordRestartAttemptDelta(current.RestartAttempts);
+
+        var resolvedRetryAt = retryAt ?? (lifecycle == ExtensionServiceLifecycleState.Waiting
+            ? current.Deadline?.At
+            : null);
+        _runtimeRegistry.Publish(
+            new HostServiceRuntimeSnapshot(
+                current.ServiceId,
+                configurationVersion ?? generation.SnapshotVersion,
+                hasProcess ? processId : null,
+                hasProcess ? processInstanceId : null,
+                hasProcess ? startedAt : null,
+                lastUpdatedAt,
+                lastHealthAt,
+                lifecycle,
+                health,
+                generation.OwnerExtensionId,
+                failureStage,
+                failureCode,
+                failureReason ?? DescribeFailure(failureCode),
+                lastProbe,
+                processExitCode,
+                0,
+                retryAt: resolvedRetryAt),
+            serviceVersion ?? generation.Configuration.Version,
+            enabled: true,
+            preserveServiceVersion: preserveServiceVersion,
+            restartCountIncrement: restartCountIncrement);
     }
+
+    private void PublishConfiguredRuntimeState(
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        ExtensionServiceLifecycleState lifecycleState,
+        ExtensionServiceFailureStage failureStage = ExtensionServiceFailureStage.None,
+        ExtensionServiceFailureCode failureCode = ExtensionServiceFailureCode.None,
+        string? failureReason = null,
+        DateTimeOffset? retryAt = null)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var owner = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(service.Id, out var serviceOwner) == true
+            ? serviceOwner
+            : null;
+        _runtimeRegistry.TryGet(service.Id, out var previous);
+        _runtimeRegistry.Publish(
+            new HostServiceRuntimeSnapshot(
+                service.Id,
+                snapshot.Version,
+                null,
+                null,
+                null,
+                now,
+                previous?.LastHealthAt,
+                lifecycleState,
+                ExtensionServiceHealthState.Unknown,
+                owner,
+                failureStage,
+                failureCode,
+                failureReason ?? DescribeFailure(failureCode),
+                lifecycleState == ExtensionServiceLifecycleState.Disabled ? null : previous?.LastProbe,
+                processExitCode: null,
+                restartCount: previous?.RestartCount ?? 0,
+                retryAt: retryAt),
+            service.Version,
+            enabled: lifecycleState != ExtensionServiceLifecycleState.Disabled);
+    }
+
+    private void PublishConfiguredRuntimeTransition(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        ExtensionServiceLifecycleState lifecycleState)
+    {
+        ServiceGeneration? active;
+        lock (slot.Gate)
+        {
+            active = slot.Active;
+        }
+
+        if (active is { Ready: true } &&
+            active.Supervisor.Snapshot.ObservedLifecycle == ServiceLifecycleState.Running)
+        {
+            var liveState = active.Supervisor.Snapshot;
+            PublishRuntimeSnapshot(
+                active,
+                liveState,
+                ExtensionServiceLifecycleState.Running,
+                configurationVersion: snapshot.Version,
+                serviceVersion: service.Version,
+                healthOverride: liveState.Health);
+            return;
+        }
+
+        PublishConfiguredRuntimeState(snapshot, service, lifecycleState);
+    }
+
+    private void PublishCandidateRuntimeObservation(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceGeneration attempt,
+        ServiceRuntimeSnapshot state,
+        ExtensionServiceLifecycleState lifecycleState,
+        ServiceStateReasonCode? probeFailureReason = null)
+    {
+        ServiceGeneration? active;
+        lock (slot.Gate)
+        {
+            active = slot.Active;
+        }
+
+        if (active is { Ready: true } && !ReferenceEquals(active, attempt) &&
+            active.Supervisor.Snapshot.ObservedLifecycle == ServiceLifecycleState.Running)
+        {
+            var liveState = active.Supervisor.Snapshot;
+            PublishRuntimeSnapshot(
+                active,
+                liveState,
+                ExtensionServiceLifecycleState.Running,
+                updatedAt: state.ChangedAt,
+                configurationVersion: snapshot.Version,
+                serviceVersion: attempt.Configuration.Version,
+                healthOverride: liveState.Health,
+                lastProbeOverride: state.LastHealthObservation,
+                probeFailureReasonOverride: probeFailureReason ?? attempt.LastHealthProbeReason);
+            return;
+        }
+
+        PublishRuntimeSnapshot(
+            attempt,
+            state,
+            lifecycleState,
+            probeFailureReasonOverride: probeFailureReason ?? attempt.LastHealthProbeReason);
+    }
+
+    private void PublishActiveRuntimeState(ServiceSlot slot, HostConfigurationSnapshot snapshot)
+    {
+        ServiceGeneration? active;
+        lock (slot.Gate)
+        {
+            active = slot.Active;
+        }
+
+        if (active is null)
+        {
+            return;
+        }
+
+        PublishRuntimeSnapshot(
+            active,
+            updatedAt: DateTimeOffset.UtcNow,
+            preserveFailure: true,
+            configurationVersion: snapshot.Version,
+            serviceVersion: active.Configuration.Version,
+            preserveServiceVersion: true);
+    }
+
+    private void PublishRuntimeFailure(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        ServiceGeneration? candidate,
+        ServiceRuntimeSnapshot? failureState,
+        ExtensionServiceLifecycleState lifecycleState,
+        ExtensionServiceFailureStage failureStage,
+        ExtensionServiceFailureCode failureCode,
+        int? processExitCode = null,
+        DateTimeOffset? retryAt = null,
+        DateTimeOffset? updatedAt = null,
+        int? attemptNumber = null)
+    {
+        var attemptedState = failureState ?? candidate?.Supervisor.Snapshot;
+        ServiceGeneration? active;
+        lock (slot.Gate)
+        {
+            active = slot.Active;
+            attemptNumber ??= slot.StartAttemptNumber;
+        }
+        var restartCountIncrement = candidate is not null && attemptedState is not null
+            ? candidate.RecordRestartAttemptDelta(attemptedState.RestartAttempts)
+            : (int?)null;
+
+        if (attemptNumber is > 0 &&
+            failureStage != ExtensionServiceFailureStage.None &&
+            failureCode != ExtensionServiceFailureCode.None)
+        {
+            _serviceLogBufferRegistry.RecordStartupFailure(
+                service.Id,
+                attemptNumber.Value,
+                candidate?.Supervisor.ActiveProcessInstance,
+                failureStage,
+                failureCode,
+                DescribeFailure(failureCode),
+                updatedAt ?? attemptedState?.ChangedAt ?? DateTimeOffset.UtcNow);
+        }
+
+        if (active is { Ready: true } && !ReferenceEquals(active, candidate) &&
+            active.Supervisor.Snapshot.ObservedLifecycle == ServiceLifecycleState.Running)
+        {
+            var liveState = active.Supervisor.Snapshot;
+            PublishRuntimeSnapshot(
+                active,
+                liveState,
+                ExtensionServiceLifecycleState.Running,
+                failureStage,
+                failureCode,
+                processExitCode: processExitCode,
+                retryAt: retryAt,
+                updatedAt: updatedAt ?? attemptedState?.ChangedAt ?? DateTimeOffset.UtcNow,
+                configurationVersion: snapshot.Version,
+                serviceVersion: service.Version,
+                healthOverride: liveState.Health,
+                lastProbeOverride: attemptedState?.LastHealthObservation,
+                probeFailureReasonOverride: attemptedState?.Reason,
+                restartCountIncrementOverride: restartCountIncrement);
+            return;
+        }
+
+        if (candidate is not null)
+        {
+            PublishRuntimeSnapshot(
+                candidate,
+                failureState,
+                lifecycleState,
+                failureStage,
+                failureCode,
+                processExitCode: processExitCode,
+                retryAt: retryAt,
+                updatedAt: updatedAt,
+                probeFailureReasonOverride: attemptedState?.Reason,
+                restartCountIncrementOverride: restartCountIncrement);
+            return;
+        }
+
+        PublishConfiguredRuntimeState(
+            snapshot,
+            service,
+            lifecycleState,
+            failureStage,
+            failureCode,
+            retryAt: retryAt);
+    }
+
+    private static ExtensionServiceLifecycleState MapLifecycle(ServiceLifecycleState lifecycle) => lifecycle switch
+    {
+        ServiceLifecycleState.Disabled => ExtensionServiceLifecycleState.Disabled,
+        ServiceLifecycleState.Starting => ExtensionServiceLifecycleState.Starting,
+        ServiceLifecycleState.Running => ExtensionServiceLifecycleState.Running,
+        ServiceLifecycleState.Stopping => ExtensionServiceLifecycleState.Stopping,
+        ServiceLifecycleState.Failed => ExtensionServiceLifecycleState.Failed,
+        ServiceLifecycleState.Waiting => ExtensionServiceLifecycleState.Waiting,
+        _ => ExtensionServiceLifecycleState.Unknown
+    };
+
+    private static ExtensionServiceHealthState MapHealth(ServiceHealthState health) => health switch
+    {
+        ServiceHealthState.Healthy => ExtensionServiceHealthState.Healthy,
+        ServiceHealthState.Unhealthy => ExtensionServiceHealthState.Unhealthy,
+        _ => ExtensionServiceHealthState.Unknown
+    };
+
+    private static ExtensionServiceProbeResult MapProbeResult(HealthObservationStatus status) => status switch
+    {
+        HealthObservationStatus.Healthy => ExtensionServiceProbeResult.Healthy,
+        HealthObservationStatus.Unhealthy => ExtensionServiceProbeResult.Unhealthy,
+        HealthObservationStatus.TimedOut => ExtensionServiceProbeResult.TimedOut,
+        HealthObservationStatus.Cancelled => ExtensionServiceProbeResult.Cancelled,
+        HealthObservationStatus.Unavailable => ExtensionServiceProbeResult.Unavailable,
+        _ => ExtensionServiceProbeResult.Unknown
+    };
+
+    private static ExtensionServiceFailureCode MapProbeFailure(
+        HealthObservationStatus status,
+        ServiceStateReasonCode reason = ServiceStateReasonCode.None) =>
+        (status, reason) switch
+        {
+            (HealthObservationStatus.Unavailable, ServiceStateReasonCode.PortLeaseUnavailable) =>
+                ExtensionServiceFailureCode.PortLeaseUnavailable,
+            (HealthObservationStatus.Unhealthy, _) => ExtensionServiceFailureCode.HealthCheckFailed,
+            (HealthObservationStatus.TimedOut, _) => ExtensionServiceFailureCode.HealthTimeout,
+            (HealthObservationStatus.Unavailable, _) => ExtensionServiceFailureCode.RuntimeUnavailable,
+            (HealthObservationStatus.Cancelled, _) => ExtensionServiceFailureCode.Cancelled,
+            _ => ExtensionServiceFailureCode.None
+        };
+
+    private static ExtensionServiceFailureCode MapFailureCode(ServiceStateReasonCode reason) => reason switch
+    {
+        ServiceStateReasonCode.StartRejected => ExtensionServiceFailureCode.StartRejected,
+        ServiceStateReasonCode.InvalidLaunchSpecification => ExtensionServiceFailureCode.InvalidLaunchSpecification,
+        ServiceStateReasonCode.MissingHostEnvironment => ExtensionServiceFailureCode.MissingHostEnvironment,
+        ServiceStateReasonCode.ExecutableMissing => ExtensionServiceFailureCode.ExecutableMissing,
+        ServiceStateReasonCode.PortLeaseUnavailable or
+            ServiceStateReasonCode.PortLeaseConflict or
+            ServiceStateReasonCode.PortLeaseExpired => ExtensionServiceFailureCode.PortLeaseUnavailable,
+        ServiceStateReasonCode.DatabaseUnavailable => ExtensionServiceFailureCode.RuntimeUnavailable,
+        ServiceStateReasonCode.HealthCheckFailed or
+            ServiceStateReasonCode.HealthFailureThreshold => ExtensionServiceFailureCode.HealthCheckFailed,
+        ServiceStateReasonCode.HealthTimeout => ExtensionServiceFailureCode.HealthTimeout,
+        ServiceStateReasonCode.ProcessExited => ExtensionServiceFailureCode.ProcessExited,
+        ServiceStateReasonCode.RestartAttemptLimitReached => ExtensionServiceFailureCode.RestartLimitReached,
+        ServiceStateReasonCode.Cancelled => ExtensionServiceFailureCode.Cancelled,
+        ServiceStateReasonCode.DesiredDisabled or
+            ServiceStateReasonCode.DesiredStopped or
+            ServiceStateReasonCode.None or
+            ServiceStateReasonCode.StartRequested or
+            ServiceStateReasonCode.StartAccepted or
+            ServiceStateReasonCode.HealthPending or
+            ServiceStateReasonCode.Healthy or
+            ServiceStateReasonCode.StopRequested or
+            ServiceStateReasonCode.StopCompleted or
+        ServiceStateReasonCode.ProcessExitedSuccessfully or
+            ServiceStateReasonCode.DeadlineExpired or
+            ServiceStateReasonCode.Superseded => ExtensionServiceFailureCode.None,
+        _ => ExtensionServiceFailureCode.Unknown
+    };
+
+    private static string? DescribeFailure(ExtensionServiceFailureCode code) => code switch
+    {
+        ExtensionServiceFailureCode.None => null,
+        ExtensionServiceFailureCode.StartRejected => "The process start was rejected.",
+        ExtensionServiceFailureCode.InvalidLaunchSpecification => "The process launch specification is invalid.",
+        ExtensionServiceFailureCode.MissingHostEnvironment => "A required host environment value is unavailable.",
+        ExtensionServiceFailureCode.ExecutableMissing => "The service executable is not available yet.",
+        ExtensionServiceFailureCode.DependencyUnavailable => "A required startup dependency is unavailable.",
+        ExtensionServiceFailureCode.PortLeaseUnavailable => "The service port lease is unavailable.",
+        ExtensionServiceFailureCode.RuntimeUnavailable => "A required runtime resource is unavailable.",
+        ExtensionServiceFailureCode.HealthCheckFailed => "The service health check failed.",
+        ExtensionServiceFailureCode.HealthTimeout => "The service health check timed out.",
+        ExtensionServiceFailureCode.ProcessExited => "The service process exited while it was expected to remain running.",
+        ExtensionServiceFailureCode.RestartPolicyDisabled => "The configured restart policy prevents another restart.",
+        ExtensionServiceFailureCode.RestartLimitReached => "The configured restart-attempt limit was reached.",
+        ExtensionServiceFailureCode.Cancelled => "The service operation was cancelled.",
+        _ => "The service operation failed."
+    };
 }

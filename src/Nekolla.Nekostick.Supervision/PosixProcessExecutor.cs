@@ -23,8 +23,10 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     private readonly ConcurrentDictionary<ProcessInstanceId, ProcessLease> leases = new();
     private readonly ConcurrentDictionary<long, Action<ProcessExitObservation>> observers = new();
     private readonly ConcurrentDictionary<long, CaptureSubscription> captureSubscriptions = new();
+    private readonly ConcurrentDictionary<long, OutputTapSubscription> outputTapSubscriptions = new();
     private long nextObserverId;
     private long nextCaptureSubscriptionId;
+    private long nextOutputTapSubscriptionId;
 
     /// <summary>Creates a helper-backed executor using an absolute extracted helper path.</summary>
     /// <param name="helperPath">The absolute helper executable or DLL path, or null to reject starts.</param>
@@ -64,6 +66,17 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         var id = Interlocked.Increment(ref nextCaptureSubscriptionId);
         var subscription = new CaptureSubscription(this, id, sink, enabledGate);
         captureSubscriptions[id] = subscription;
+        return subscription;
+    }
+    /// <summary>Subscribes to raw output and lifecycle events for future process generations.</summary>
+    /// <param name="tap">The service log tap that receives every generation's output.</param>
+    /// <returns>A subscription that detaches the tap.</returns>
+    public IDisposable SubscribeOutputTap(IProcessOutputTap tap)
+    {
+        ArgumentNullException.ThrowIfNull(tap);
+        var id = Interlocked.Increment(ref nextOutputTapSubscriptionId);
+        var subscription = new OutputTapSubscription(this, id, tap);
+        outputTapSubscriptions[id] = subscription;
         return subscription;
     }
 
@@ -314,6 +327,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 specification.ServiceId,
                 process,
                 processStartedAt,
+                specification.AttemptNumber,
                 _logger);
             if (!leases.TryAdd(instanceId, lease))
             {
@@ -323,6 +337,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
                 return Rejected();
             }
 
+            AttachOutputTaps(lease);
             AttachCaptureConsumers(lease);
             lease.StartOutputPumps();
             lease.Monitor = MonitorAsync(lease);
@@ -529,6 +544,17 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             }
         }
     }
+    private void AttachOutputTaps(ProcessLease lease)
+    {
+        foreach (var subscription in outputTapSubscriptions.Values)
+        {
+            if (subscription.IsEnabled)
+            {
+                subscription.TryAttach(lease);
+            }
+        }
+    }
+
 
     /// <summary>Stops the current process generation for a service.</summary>
     /// <param name="serviceId">The service identifier.</param>
@@ -625,6 +651,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     {
         var exited = false;
         var successfulExit = false;
+        int? exitCode = null;
         try
         {
             try
@@ -660,7 +687,8 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             {
                 try
                 {
-                    successfulExit = lease.Process.ExitCode == 0;
+                    exitCode = lease.Process.ExitCode;
+                    successfulExit = exitCode == 0;
                 }
                 catch (Exception exception)
                 {
@@ -691,18 +719,21 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             {
                 subscription.RemoveBinding(lease.InstanceId);
             }
+
+            var exitedAt = DateTimeOffset.UtcNow;
+            lease.NotifyOutputTapsExited(exitCode, exitedAt);
             lease.DisposeOutputs();
             leases.TryRemove(lease.InstanceId, out _);
             lease.Process.Dispose();
             lease.Exited.TrySetResult(true);
             if (exited)
             {
-                PublishExit(lease, successfulExit, DateTimeOffset.UtcNow);
+                PublishExit(lease, successfulExit, exitCode, exitedAt);
             }
         }
     }
 
-    private void PublishExit(ProcessLease lease, bool successfulExit, DateTimeOffset exitedAt)
+    private void PublishExit(ProcessLease lease, bool successfulExit, int? exitCode, DateTimeOffset exitedAt)
     {
         var callbacks = observers.Values.ToArray();
         if (callbacks.Length == 0)
@@ -710,7 +741,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             return;
         }
 
-        var observation = new ProcessExitObservation(lease.ServiceId, lease.InstanceId, successfulExit, exitedAt);
+        var observation = new ProcessExitObservation(lease.ServiceId, lease.InstanceId, successfulExit, exitedAt, exitCode);
         _ = Task.Run(() =>
         {
             foreach (var callback in callbacks)
@@ -813,6 +844,239 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         (RuntimeInformation.ProcessArchitecture is Architecture.Arm64 or Architecture.X64);
 
     private sealed record HelperLaunchRequest(string FileName, string WorkingDirectory, string[] Arguments);
+
+    private sealed class OutputTapSubscription : IDisposable
+    {
+        private readonly object gate = new();
+        private readonly PosixProcessExecutor owner;
+        private readonly IProcessOutputTap tap;
+        private readonly ConcurrentDictionary<ProcessInstanceId, OutputTapBinding> bindings = new();
+        private int disposed;
+
+        internal OutputTapSubscription(PosixProcessExecutor owner, long id, IProcessOutputTap tap)
+        {
+            this.owner = owner;
+            Id = id;
+            this.tap = tap;
+        }
+
+        internal long Id { get; }
+
+        internal bool IsEnabled => Volatile.Read(ref disposed) == 0;
+
+        internal void TryAttach(ProcessLease lease)
+        {
+            lock (gate)
+            {
+                if (disposed != 0)
+                {
+                    return;
+                }
+
+                var binding = new OutputTapBinding(lease, this);
+                if (!bindings.TryAdd(lease.InstanceId, binding))
+                {
+                    return;
+                }
+
+                lease.AddOutputTapBinding(Id, binding);
+                try
+                {
+                    binding.Start();
+                }
+                catch
+                {
+                    binding.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        internal void RemoveBinding(ProcessInstanceId instanceId) => bindings.TryRemove(instanceId, out _);
+
+        internal void OnGenerationStarted(ProcessLease lease)
+        {
+            if (!IsEnabled)
+            {
+                return;
+            }
+
+            try
+            {
+                tap.OnGenerationStarted(lease.ServiceId, lease.InstanceId, lease.AttemptNumber, lease.StartedAt);
+            }
+            catch (Exception exception)
+            {
+                LogFailure(exception, nameof(IProcessOutputTap.OnGenerationStarted), lease.ServiceId);
+            }
+        }
+
+        internal void OnOutputChunk(
+            ProcessLease lease,
+            ProcessOutputStream stream,
+            ReadOnlyMemory<byte> chunk,
+            DateTimeOffset capturedAt)
+        {
+            if (!IsEnabled)
+            {
+                return;
+            }
+
+            try
+            {
+                tap.OnOutputChunk(
+                    lease.ServiceId,
+                    lease.InstanceId,
+                    lease.AttemptNumber,
+                    stream,
+                    chunk,
+                    capturedAt);
+            }
+            catch (Exception exception)
+            {
+                LogFailure(exception, nameof(IProcessOutputTap.OnOutputChunk), lease.ServiceId);
+            }
+        }
+
+        internal void OnGenerationExited(ProcessLease lease, int? exitCode, DateTimeOffset exitedAt)
+        {
+            if (!IsEnabled)
+            {
+                return;
+            }
+
+            try
+            {
+                tap.OnGenerationExited(
+                    lease.ServiceId,
+                    lease.InstanceId,
+                    lease.AttemptNumber,
+                    exitCode,
+                    exitedAt);
+            }
+            catch (Exception exception)
+            {
+                LogFailure(exception, nameof(IProcessOutputTap.OnGenerationExited), lease.ServiceId);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (Interlocked.Exchange(ref disposed, 1) != 0)
+                {
+                    return;
+                }
+
+                owner.outputTapSubscriptions.TryRemove(Id, out _);
+                foreach (var binding in bindings.Values)
+                {
+                    binding.Dispose();
+                }
+
+                bindings.Clear();
+            }
+        }
+
+        private void LogFailure(Exception exception, string operation, Guid serviceId) =>
+            SupervisionLogMessages.ProcessOutputSubscriberFailed(
+                owner._logger,
+                exception,
+                operation,
+                "service-log",
+                serviceId);
+    }
+
+    private sealed class OutputTapBinding : IDisposable
+    {
+        private readonly object gate = new();
+        private readonly ProcessLease lease;
+        private readonly OutputTapSubscription subscription;
+        private IDisposable? stdoutSubscription;
+        private IDisposable? stderrSubscription;
+        private int disposed;
+
+        internal OutputTapBinding(ProcessLease lease, OutputTapSubscription subscription)
+        {
+            this.lease = lease;
+            this.subscription = subscription;
+        }
+
+        internal void Start()
+        {
+            lock (gate)
+            {
+                if (disposed != 0)
+                {
+                    return;
+                }
+
+                IDisposable? stdout = null;
+                IDisposable? stderr = null;
+                try
+                {
+                    subscription.OnGenerationStarted(lease);
+                    stdout = lease.Stdout.SubscribeTap(
+                        (chunk, capturedAt) => subscription.OnOutputChunk(
+                            lease,
+                            ProcessOutputStream.Stdout,
+                            chunk,
+                            capturedAt));
+                    stderr = lease.Stderr.SubscribeTap(
+                        (chunk, capturedAt) => subscription.OnOutputChunk(
+                            lease,
+                            ProcessOutputStream.Stderr,
+                            chunk,
+                            capturedAt));
+                    stdoutSubscription = stdout;
+                    stderrSubscription = stderr;
+                }
+                catch
+                {
+                    stdout?.Dispose();
+                    stderr?.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        internal void NotifyExited(int? exitCode, DateTimeOffset exitedAt)
+        {
+            lock (gate)
+            {
+                if (disposed != 0)
+                {
+                    return;
+                }
+            }
+
+            subscription.OnGenerationExited(lease, exitCode, exitedAt);
+        }
+
+        public void Dispose()
+        {
+            IDisposable? stdout;
+            IDisposable? stderr;
+            lock (gate)
+            {
+                if (Interlocked.Exchange(ref disposed, 1) != 0)
+                {
+                    return;
+                }
+
+                stdout = stdoutSubscription;
+                stderr = stderrSubscription;
+                stdoutSubscription = null;
+                stderrSubscription = null;
+            }
+
+            stdout?.Dispose();
+            stderr?.Dispose();
+            subscription.RemoveBinding(lease.InstanceId);
+            lease.RemoveOutputTapBinding(subscription.Id);
+        }
+    }
 
     private sealed class CaptureSubscription : IDisposable, IProcessOutputSink
     {
@@ -984,12 +1248,14 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
     private sealed class ProcessLease
     {
         private readonly ConcurrentDictionary<long, CaptureBinding> captureBindings = new();
+        private readonly ConcurrentDictionary<long, OutputTapBinding> outputTapBindings = new();
 
         internal ProcessLease(
             ProcessInstanceId instanceId,
             Guid serviceId,
             Process process,
             DateTimeOffset startedAt,
+            int attemptNumber,
             ILogger logger)
         {
             InstanceId = instanceId;
@@ -997,6 +1263,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
             Process = process;
             ProcessId = process.Id;
             StartedAt = startedAt.ToUniversalTime();
+            AttemptNumber = attemptNumber;
             Stdout = new ProcessOutputFanout(process.StandardOutput.BaseStream, serviceId, ProcessOutputStream.Stdout, logger);
             Stderr = new ProcessOutputFanout(process.StandardError.BaseStream, serviceId, ProcessOutputStream.Stderr, logger);
         }
@@ -1006,6 +1273,7 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         internal Process Process { get; }
         internal int ProcessId { get; }
         internal DateTimeOffset StartedAt { get; }
+        internal int AttemptNumber { get; }
         internal ProcessOutputFanout Stdout { get; }
         internal ProcessOutputFanout Stderr { get; }
         internal Task? Monitor { get; set; }
@@ -1013,6 +1281,17 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
         internal TaskCompletionSource<bool> Exited { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         internal void AddCaptureBinding(long id, CaptureBinding binding) => captureBindings[id] = binding;
+        internal void AddOutputTapBinding(long id, OutputTapBinding binding) => outputTapBindings[id] = binding;
+
+        internal void RemoveOutputTapBinding(long id) => outputTapBindings.TryRemove(id, out _);
+
+        internal void NotifyOutputTapsExited(int? exitCode, DateTimeOffset exitedAt)
+        {
+            foreach (var binding in outputTapBindings.Values)
+            {
+                binding.NotifyExited(exitCode, exitedAt);
+            }
+        }
 
         internal void RemoveCaptureBinding(long id)
         {
@@ -1062,6 +1341,12 @@ public sealed class PosixProcessExecutor : IProcessInstanceExecutor, IProcessLiv
 
         internal void DisposeOutputs()
         {
+            foreach (var binding in outputTapBindings.Values)
+            {
+                binding.Dispose();
+            }
+
+            outputTapBindings.Clear();
             Stdout.Dispose();
             Stderr.Dispose();
         }

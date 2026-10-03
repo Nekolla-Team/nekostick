@@ -55,6 +55,45 @@ public sealed class PostgresExtensionManagementTests
         // No-op writes are idempotent: identical state must not bump the record version.
         Assert.Equal(1L, record.RecordVersion);
     }
+
+    [Fact]
+    public async Task ContentHashPinPreservesExtensionWriterAttribution()
+    {
+        await using var test = await PostgresConfigurationTestScope.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var initial = await test.Api.ReadSnapshotAsync(cancellationToken);
+        Assert.True(initial.IsSuccess, initial.Errors.FirstOrDefault()?.Message);
+        const string extensionId = "x";
+        var now = DateTimeOffset.UtcNow;
+        var bootstrap = await test.Api.PersistDiscoveredExtensionRecordsAsync(
+            ContractExtensionLoadState.Disabled,
+            initial.Value!.Version,
+            ImmutableArray.Create(new ExtensionRecordConfiguration(
+                extensionId,
+                "1.0.0",
+                ContractExtensionLoadState.Disabled,
+                now,
+                now,
+                0)),
+            cancellationToken);
+        Assert.True(bootstrap.IsSuccess, bootstrap.Errors.FirstOrDefault()?.Message);
+
+        var contentPersistence = new EfExtensionRecordContentPersistence(test.Context);
+        using (HostConfigurationWriteContext.EnterExtension("x"))
+        {
+            var contentHash = $"sha256:{new string('a', 64)}";
+            var pin = await contentPersistence.SetContentHashAsync(
+                extensionId,
+                expectedRecordVersion: 1,
+                contentHash,
+                cancellationToken);
+            Assert.True(pin.IsSuccess, pin.Errors.FirstOrDefault()?.Message);
+        }
+
+        await using var verificationContext = test.Database.CreateContext();
+        var revision = await verificationContext.ConfigurationRevisions.SingleAsync(cancellationToken);
+        Assert.Equal("extension:x", revision.CommittedBy);
+    }
     [Fact]
     public async Task SetExtensionLoadStateEnforcesWhitelistAndOptimisticRecordVersions()
     {

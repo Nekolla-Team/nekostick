@@ -115,7 +115,7 @@ public sealed class NekostickDbContext : DbContext
         ConfigureUtcTimestamp(builder.Property(value => value.CommittedAt));
         builder.Property(value => value.CommittedBy)
             .HasColumnName("committed_by")
-            .HasMaxLength(128);
+            .HasMaxLength(256);
         ConfigureUtcTimestamp(builder.Property(value => value.CreatedAt).HasColumnName("created_at"));
         ConfigureUtcTimestamp(builder.Property(value => value.UpdatedAt).HasColumnName("updated_at"));
         ConfigureVersion(builder.Property(value => value.Version));

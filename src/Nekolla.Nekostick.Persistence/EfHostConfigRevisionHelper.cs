@@ -11,7 +11,6 @@ namespace Nekolla.Nekostick.Persistence;
 internal sealed class EfHostConfigRevisionHelper
 {
     private const string ConfigurationChangedChannel = "nekostick_config_changed";
-    internal const string Committer = "host-config-api";
     private readonly NekostickDbContext _dbContext;
     private readonly ILogger _logger;
 

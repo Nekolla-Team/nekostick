@@ -14,6 +14,7 @@ public sealed partial class HostServiceLifecycleManager
     private (ServiceSupervisor Supervisor, ImmutableDictionary<string, string> ResolvedEnvironment) CreateSupervisor(
         ServiceConfiguration service,
         int port,
+        int attemptNumber,
         PortLease? initialLease = null,
         DateTimeOffset? initialLeaseNow = null)
     {
@@ -43,7 +44,8 @@ public sealed partial class HostServiceLifecycleManager
             ServicePathResolver.Resolve(_dataDirectory, service.FileName),
             ServicePathResolver.Resolve(_dataDirectory, service.WorkingDirectory),
             arguments,
-            new ProcessEnvironment(expandedEnvironment));
+            new ProcessEnvironment(expandedEnvironment),
+            attemptNumber: attemptNumber);
         var healthDefinition = new HealthCheckDefinition(
             service.HealthCheck.Type switch
             {
@@ -118,26 +120,57 @@ public sealed partial class HostServiceLifecycleManager
         Guid serviceId,
         ProcessInstanceId instanceId,
         bool successfulExit,
-        DateTimeOffset exitedAt)
+        DateTimeOffset exitedAt,
+        int? exitCode = null)
     {
-        if (IsStopping || !_slots.TryGetValue(serviceId, out var slot))
+        if (!_slots.TryGetValue(serviceId, out var slot))
         {
             return;
         }
 
         ServiceGeneration? generation;
-        RetiringGenerationState? retiring;
+        RetiringGenerationState? retiring = null;
+        var isStarting = false;
         lock (slot.Gate)
         {
             generation = slot.Active;
             if (generation is null || generation.Supervisor.ActiveProcessInstance != instanceId)
             {
+                generation = slot.Starting;
+                isStarting = generation is not null && generation.Supervisor.ActiveProcessInstance == instanceId;
+                if (!isStarting)
+                {
+                    return;
+                }
+            }
+
+            if (generation is null)
+            {
                 return;
             }
 
-            _retiringGenerations.TryGetValue(generation, out retiring);
+            if (!isStarting)
+            {
+                _retiringGenerations.TryGetValue(generation, out retiring);
+            }
+
             generation.Ready = false;
+            if (isStarting)
+            {
+                generation.ProcessExitCode = exitCode;
+            }
         }
+        if (!_serviceLogBufferRegistry.HasOutputTap)
+        {
+            _serviceLogBufferRegistry.OnGenerationExited(
+                serviceId,
+                instanceId,
+                generation.Supervisor.StartAttemptNumber,
+                exitCode,
+                exitedAt);
+        }
+
+
         if (successfulExit)
         {
             HostLogMessages.ServiceExitedSuccessfully(_logger, serviceId);
@@ -147,14 +180,42 @@ public sealed partial class HostServiceLifecycleManager
             HostLogMessages.ServiceExitedUnexpectedly(_logger, serviceId);
         }
 
-        PublishServiceState(
-            generation.Configuration.Id,
-            generation.SnapshotVersion,
-            "unavailable");
-
+        PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "unavailable");
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
         if (IsStopping)
         {
+            return;
+        }
+
+        if (isStarting)
+        {
+            SupervisorOperationResult startingResult;
+            lock (slot.Gate)
+            {
+                if (IsStopping || !ReferenceEquals(slot.Starting, generation) ||
+                    generation.Supervisor.ActiveProcessInstance != instanceId)
+                {
+                    return;
+                }
+
+                startingResult = generation.Supervisor.RecordProcessExit(successfulExit, exitedAt);
+                generation.ProcessExitRecorded = true;
+                generation.ProcessExitCode = exitCode;
+            }
+
+            if (_snapshotHolder.Current is { } snapshot)
+            {
+                PublishRuntimeFailure(
+                    slot,
+                    snapshot,
+                    generation.Configuration,
+                    generation,
+                    startingResult.Snapshot,
+                    ExtensionServiceLifecycleState.Failed,
+                    ExtensionServiceFailureStage.ProcessExit,
+                    ExtensionServiceFailureCode.ProcessExited,
+                    exitCode);
+            }
             return;
         }
 
@@ -187,15 +248,30 @@ public sealed partial class HostServiceLifecycleManager
 
             result = generation.Supervisor.RecordProcessExit(successfulExit, exitedAt);
             generation.ProcessExitRecorded = true;
+            generation.ProcessExitCode = exitCode;
         }
 
-        if (result.Restart is not { ShouldRestart: true, NotBefore: { } notBefore })
+        var willRestart = result.Restart is { ShouldRestart: true, NotBefore: { } };
+        var notBefore = result.Restart?.NotBefore;
+        var cleanExit = successfulExit && exitCode == 0;
+        PublishRuntimeSnapshot(
+            generation,
+            result.Snapshot,
+            willRestart
+                ? ExtensionServiceLifecycleState.Waiting
+                : cleanExit
+                    ? ExtensionServiceLifecycleState.Stopped
+                    : ExtensionServiceLifecycleState.Failed,
+            cleanExit ? ExtensionServiceFailureStage.None : ExtensionServiceFailureStage.ProcessExit,
+            cleanExit ? ExtensionServiceFailureCode.None : ExtensionServiceFailureCode.ProcessExited,
+            processExitCode: exitCode,
+            retryAt: notBefore,
+            preserveServiceVersion: true);
+
+        if (!willRestart || notBefore is null)
         {
             await StopOrReleaseGenerationAfterExitAsync(slot, generation, CancellationToken.None).ConfigureAwait(false);
-            PublishServiceState(
-                generation.Configuration.Id,
-                generation.SnapshotVersion,
-                "stopped");
+            PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "stopped");
             lock (slot.Gate)
             {
                 if (ReferenceEquals(slot.Active, generation))
@@ -211,11 +287,8 @@ public sealed partial class HostServiceLifecycleManager
         if (!IsStopping)
         {
             HostLogMessages.ServiceRestartScheduled(_logger, serviceId);
-            PublishServiceState(
-                generation.Configuration.Id,
-                generation.SnapshotVersion,
-                "restarting");
-            await RestartAfterAsync(slot, generation, notBefore, CancellationToken.None).ConfigureAwait(false);
+            PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "restarting");
+            await RestartAfterAsync(slot, generation, notBefore.Value, CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -229,7 +302,12 @@ public sealed partial class HostServiceLifecycleManager
             }
 
             ServiceGeneration? generation;
-            lock (slot.Gate) generation = slot.Active;
+            bool hasStartingCandidate;
+            lock (slot.Gate)
+            {
+                generation = slot.Active;
+                hasStartingCandidate = slot.Starting is { } starting && !ReferenceEquals(starting, generation);
+            }
             if (generation is null || !generation.Ready)
             {
                 continue;
@@ -256,6 +334,21 @@ public sealed partial class HostServiceLifecycleManager
             var decision = result.Health;
             if (decision is null)
             {
+                lock (slot.Gate)
+                {
+                    if (IsStopping || !ReferenceEquals(slot.Active, generation))
+                    {
+                        continue;
+                    }
+                }
+                generation.LastHealthProbeReason = result.Snapshot.Reason;
+
+                PublishRuntimeSnapshot(
+                    generation,
+                    result.Snapshot,
+                    preserveFailure: true,
+                    preserveServiceVersion: true,
+                    preserveLastProbe: hasStartingCandidate);
                 continue;
             }
 
@@ -269,6 +362,7 @@ public sealed partial class HostServiceLifecycleManager
                 }
 
                 generation.HealthRetryState = decision.NextState;
+                generation.LastHealthProbeReason = result.Snapshot.Reason;
                 if (decision.Action == HealthRetryAction.Healthy)
                 {
                     if (result.Lease is { } lease && !lease.IsExpired(DateTimeOffset.UtcNow))
@@ -286,6 +380,30 @@ public sealed partial class HostServiceLifecycleManager
                 {
                     terminal = true;
                 }
+            }
+            if (terminal)
+            {
+                var failureCode = result.Snapshot.LastHealthObservation is { } observation
+                    ? MapProbeFailure(observation.Status, result.Snapshot.Reason)
+                    : ExtensionServiceFailureCode.HealthCheckFailed;
+                PublishRuntimeSnapshot(
+                    generation,
+                    result.Snapshot,
+                    ExtensionServiceLifecycleState.Failed,
+                    ExtensionServiceFailureStage.HealthProbe,
+                    failureCode == ExtensionServiceFailureCode.None
+                        ? ExtensionServiceFailureCode.HealthCheckFailed
+                        : failureCode,
+                    preserveServiceVersion: true);
+            }
+            else
+            {
+                PublishRuntimeSnapshot(
+                    generation,
+                    result.Snapshot,
+                    preserveFailure: true,
+                    preserveServiceVersion: true,
+                    preserveLastProbe: hasStartingCandidate);
             }
 
             if (withdraw)
@@ -321,7 +439,14 @@ public sealed partial class HostServiceLifecycleManager
             slot.Active = null;
             slot.Startup = null;
         }
+        if (generation is not null)
+        {
+            PublishRuntimeSnapshot(
+                generation,
+                lifecycleState: ExtensionServiceLifecycleState.Stopping,
+                preserveServiceVersion: true);
 
+        }
         if (generation is not null)
         {
             await StopOrReleaseGenerationAfterExitAsync(slot, generation, cancellationToken).ConfigureAwait(false);
@@ -329,9 +454,20 @@ public sealed partial class HostServiceLifecycleManager
                 generation.Configuration.Id,
                 generation.SnapshotVersion,
                 "stopped");
+            var currentSnapshot = _snapshotHolder.Current;
+            var currentService = currentSnapshot?.Services.FirstOrDefault(value => value.Id == serviceId);
+            if (currentSnapshot is not null && currentService is { Enabled: true } &&
+                IsServiceEnabledForSnapshot(currentSnapshot, serviceId))
+            {
+                PublishConfiguredRuntimeState(
+                    currentSnapshot,
+                    currentService,
+                    ExtensionServiceLifecycleState.Stopped);
+            }
         }
 
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        SynchronizePublishedRuntimeConfiguration();
     }
 
     private async Task StopGenerationAsync(
@@ -449,8 +585,34 @@ public sealed partial class HostServiceLifecycleManager
     {
         internal readonly object Gate = new();
         internal ServiceGeneration? Active;
+        internal ServiceGeneration? Starting;
         internal Task<HostServiceReadinessResult>? Startup;
         internal long StartupGeneration;
+        internal int StartAttemptNumber;
+
+        internal int ReserveStartAttemptNumber()
+        {
+            lock (Gate)
+            {
+                if (StartAttemptNumber < int.MaxValue)
+                {
+                    StartAttemptNumber++;
+                }
+
+                return StartAttemptNumber;
+            }
+        }
+
+        internal void ObserveStartAttemptNumber(int attemptNumber)
+        {
+            lock (Gate)
+            {
+                if (attemptNumber > StartAttemptNumber)
+                {
+                    StartAttemptNumber = attemptNumber;
+                }
+            }
+        }
     }
 
     private sealed class ServiceGeneration
@@ -458,6 +620,8 @@ public sealed partial class HostServiceLifecycleManager
         private volatile PortLease? _lease;
         private volatile bool _ready;
         private volatile bool _processExitRecorded;
+        private readonly object _restartAttemptsGate = new();
+        private RestartAttemptState _lastPublishedRestartAttempts = RestartAttemptState.Empty;
 
         internal ServiceGeneration(
             ServiceConfiguration configuration,
@@ -488,6 +652,7 @@ public sealed partial class HostServiceLifecycleManager
         }
         internal long SnapshotVersion { get; }
         internal HealthRetryState HealthRetryState { get; set; }
+        internal ServiceStateReasonCode LastHealthProbeReason { get; set; }
         internal string? OwnerExtensionId { get; }
         internal ImmutableDictionary<string, string> ResolvedEnvironment { get; }
         internal bool Ready
@@ -500,6 +665,30 @@ public sealed partial class HostServiceLifecycleManager
             get => _processExitRecorded;
             set => _processExitRecorded = value;
         }
+        internal int? ProcessExitCode { get; set; }
+        internal int RecordRestartAttemptDelta(RestartAttemptState current)
+        {
+            if (current.Attempts == 0 || current.LastAttemptAt is not { } attemptAt)
+            {
+                return 0;
+            }
+
+            lock (_restartAttemptsGate)
+            {
+                var previous = _lastPublishedRestartAttempts;
+                if (previous.LastAttemptAt is { } previousAttemptAt && attemptAt <= previousAttemptAt)
+                {
+                    return 0;
+                }
+
+                var increment = previous.LastAttemptAt is null || current.WindowStartedAt != previous.WindowStartedAt
+                    ? current.Attempts
+                    : Math.Max(0, current.Attempts - previous.Attempts);
+                _lastPublishedRestartAttempts = current;
+                return increment;
+            }
+        }
+
 
     }
 }

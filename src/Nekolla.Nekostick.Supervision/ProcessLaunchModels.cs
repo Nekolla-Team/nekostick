@@ -151,15 +151,18 @@ public sealed class ProcessLaunchSpecification
     /// <param name="arguments">The immutable process arguments.</param>
     /// <param name="environment">The bounded environment overrides.</param>
     /// <param name="limits">The launch bounds.</param>
+    /// <param name="attemptNumber">The one-based process start attempt number.</param>
     public ProcessLaunchSpecification(
         Guid serviceId,
         string fileName,
         string workingDirectory,
         ImmutableArray<string> arguments,
         ProcessEnvironment environment,
-        ProcessLaunchLimits? limits = null)
+        ProcessLaunchLimits? limits = null,
+        int attemptNumber = 1)
     {
         limits ??= ProcessLaunchLimits.Default;
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(attemptNumber, 0);
         if (serviceId == Guid.Empty)
         {
             throw new ArgumentException("A service identifier is required.", nameof(serviceId));
@@ -184,6 +187,7 @@ public sealed class ProcessLaunchSpecification
         Arguments = arguments.IsDefault ? ImmutableArray<string>.Empty : arguments;
         Environment = environment;
         Limits = limits;
+        AttemptNumber = attemptNumber;
     }
 
     /// <summary>Gets the service identifier.</summary>
@@ -203,6 +207,20 @@ public sealed class ProcessLaunchSpecification
 
     /// <summary>Gets the launch bounds.</summary>
     public ProcessLaunchLimits Limits { get; }
+    /// <summary>Gets the one-based process start attempt number.</summary>
+    public int AttemptNumber { get; }
+
+    internal ProcessLaunchSpecification WithAttemptNumber(int attemptNumber) =>
+        attemptNumber == AttemptNumber
+            ? this
+            : new ProcessLaunchSpecification(
+                ServiceId,
+                FileName,
+                WorkingDirectory,
+                Arguments,
+                Environment,
+                Limits,
+                attemptNumber);
 
     /// <summary>Returns a fixed safe marker and never formats command or environment data.</summary>
     /// <returns>A fixed marker.</returns>

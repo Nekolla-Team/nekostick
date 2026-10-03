@@ -170,7 +170,10 @@ internal static class HostConfigurationSnapshotMapper
             routes,
             services,
             extensionRecords,
-            extensionSettings);
+            extensionSettings)
+        {
+            CommittedBy = revision.CommittedBy
+        };
     }
 
     private static ExtensionRecordConfiguration MapExtensionRecord(ExtensionRecord value) =>

@@ -100,7 +100,7 @@ public sealed record ExtensionCapabilitySet(
     {
     }
 
-    /// <summary>Creates an extension capability set including the API 1.4 service-output capability.</summary>
+    /// <summary>Creates an extension capability set including the API 1.4 service-output capability for raw streams and ordered service logs.</summary>
     /// <param name="configurationApi">The owner-scoped configuration capability.</param>
     /// <param name="routes">The owner-scoped route capability.</param>
     /// <param name="services">The owner-scoped service capability.</param>
@@ -111,7 +111,7 @@ public sealed record ExtensionCapabilitySet(
     /// <param name="logWriter">The optional Host-attributed text writer.</param>
     /// <param name="management">The optional extension management capability.</param>
     /// <param name="hostInfo">The optional provider for the latest non-sensitive host information snapshot.</param>
-    /// <param name="serviceOutput">The optional caller-owned service stdout/stderr capability.</param>
+    /// <param name="serviceOutput">The optional caller-owned service stdout/stderr streams and ordered log subscriptions.</param>
     public ExtensionCapabilitySet(
         IExtensionConfigurationApi configurationApi,
         IExtensionRouteApi routes,
@@ -124,6 +124,36 @@ public sealed record ExtensionCapabilitySet(
         IExtensionManagementApi? management,
         Func<ExtensionHostInfoSnapshot>? hostInfo,
         IExtensionServiceOutputApi? serviceOutput)
+        : this(configurationApi, routes, services, endpoints, fullConfiguration, supervisor, routeEvents, logWriter, management, hostInfo, serviceOutput, null)
+    {
+    }
+
+    /// <summary>Creates an extension capability set including API 1.4 service output and runtime-state subscriptions.</summary>
+    /// <param name="configurationApi">The owner-scoped configuration capability.</param>
+    /// <param name="routes">The owner-scoped route capability.</param>
+    /// <param name="services">The owner-scoped service capability.</param>
+    /// <param name="endpoints">The read-only endpoint capability.</param>
+    /// <param name="fullConfiguration">The full configuration capability.</param>
+    /// <param name="supervisor">The optional global runtime telemetry capability.</param>
+    /// <param name="routeEvents">The optional route observation and hook capability.</param>
+    /// <param name="logWriter">The optional Host-attributed text writer.</param>
+    /// <param name="management">The optional extension management capability.</param>
+    /// <param name="hostInfo">The optional provider for the latest non-sensitive host information snapshot.</param>
+    /// <param name="serviceOutput">The optional caller-owned service stdout/stderr streams and ordered log subscriptions.</param>
+    /// <param name="serviceRuntimeState">The optional node-local runtime-state subscription capability.</param>
+    public ExtensionCapabilitySet(
+        IExtensionConfigurationApi configurationApi,
+        IExtensionRouteApi routes,
+        IExtensionServiceApi services,
+        IExtensionEndpointApi endpoints,
+        IExtensionFullConfigurationApi fullConfiguration,
+        IExtensionSupervisorApi? supervisor,
+        IExtensionRouteEvents? routeEvents,
+        IExtensionLogWriter? logWriter,
+        IExtensionManagementApi? management,
+        Func<ExtensionHostInfoSnapshot>? hostInfo,
+        IExtensionServiceOutputApi? serviceOutput,
+        IExtensionServiceRuntimeStateApi? serviceRuntimeState)
         : this(configurationApi, routes, services, endpoints, fullConfiguration)
     {
         Supervisor = supervisor;
@@ -132,6 +162,7 @@ public sealed record ExtensionCapabilitySet(
         ExtensionManagement = management;
         HostInfo = hostInfo;
         ServiceOutput = serviceOutput;
+        ServiceRuntimeState = serviceRuntimeState;
     }
 
     /// <summary>Gets the optional global runtime telemetry capability.</summary>
@@ -149,8 +180,11 @@ public sealed record ExtensionCapabilitySet(
     /// <summary>Gets the optional API 1.3.3 provider for non-sensitive host information snapshots.</summary>
     public Func<ExtensionHostInfoSnapshot>? HostInfo { get; }
 
-    /// <summary>Gets the optional API 1.4 provider for caller-owned service stdout/stderr streams.</summary>
+    /// <summary>Gets the optional API 1.4 provider for caller-owned service stdout/stderr streams and ordered service logs.</summary>
     public IExtensionServiceOutputApi? ServiceOutput { get; }
+
+    /// <summary>Gets the optional API 1.4 node-local runtime-state subscription capability.</summary>
+    public IExtensionServiceRuntimeStateApi? ServiceRuntimeState { get; }
 }
 
 /// <summary>Provides the persistence-backed owner-scoped configuration seam used by Host facades.</summary>

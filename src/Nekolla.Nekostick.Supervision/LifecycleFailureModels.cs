@@ -11,12 +11,16 @@ public sealed record HealthObservationResult
     /// <param name="observedAt">The UTC observation instant.</param>
     /// <param name="duration">The elapsed probe duration.</param>
     /// <param name="attempt">The one-based attempt number.</param>
+    /// <param name="target">The safe probe target, when available.</param>
+    /// <param name="errorMessage">The bounded non-sensitive probe error, when the result failed.</param>
     public HealthObservationResult(
         Guid serviceId,
         HealthObservationStatus status,
         DateTimeOffset observedAt,
         TimeSpan duration,
-        int attempt)
+        int attempt,
+        string? target = null,
+        string? errorMessage = null)
     {
         if (serviceId == Guid.Empty)
         {
@@ -24,14 +28,24 @@ public sealed record HealthObservationResult
         }
 
         ArgumentOutOfRangeException.ThrowIfLessThan(duration, TimeSpan.Zero);
-
         ArgumentOutOfRangeException.ThrowIfLessThan(attempt, 1);
+        if (target is { Length: > 512 })
+        {
+            throw new ArgumentOutOfRangeException(nameof(target));
+        }
+
+        if (errorMessage is { Length: > 1024 })
+        {
+            throw new ArgumentOutOfRangeException(nameof(errorMessage));
+        }
 
         ServiceId = serviceId;
         Status = status;
         ObservedAt = observedAt.ToUniversalTime();
         Duration = duration;
         Attempt = attempt;
+        Target = target;
+        ErrorMessage = errorMessage;
     }
 
     /// <summary>Gets the service identifier.</summary>
@@ -49,6 +63,11 @@ public sealed record HealthObservationResult
     /// <summary>Gets the one-based observation attempt.</summary>
     public int Attempt { get; }
 
+    /// <summary>Gets the safe protocol target, when available.</summary>
+    public string? Target { get; }
+
+    /// <summary>Gets the bounded, non-sensitive probe error message.</summary>
+    public string? ErrorMessage { get; }
     /// <summary>Gets the corresponding domain health state.</summary>
     public ServiceHealthState HealthState => Status switch
     {

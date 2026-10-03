@@ -39,7 +39,7 @@ internal static class PostgresMigrationSchemaMetadata
         new("configuration_revisions", "id", "uuid", false),
         new("configuration_revisions", "revision_key", "character varying(16)", false),
         new("configuration_revisions", "committed_at", "timestamp with time zone", false),
-        new("configuration_revisions", "committed_by", "character varying(128)", true),
+        new("configuration_revisions", "committed_by", "character varying(256)", true),
         new("configuration_revisions", "created_at", "timestamp with time zone", false),
         new("configuration_revisions", "updated_at", "timestamp with time zone", false),
         new("configuration_revisions", "version", "bigint", false),

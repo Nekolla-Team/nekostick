@@ -5,6 +5,7 @@ using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Proxy;
 using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Supervision;
+using Nekolla.Nekostick.Persistence;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -68,6 +69,23 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 _serviceProvider,
                 logger: logger)
             : null;
+        var runtimeAccessor = _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>();
+        var runtimeStateSource = _serviceProvider.GetService<IHostServiceRuntimeStateSource>();
+        var supervisor = new ExtensionSupervisorFacade(
+            extensionId,
+            _runtimeState,
+            lifecycle,
+            runtimeAccessor,
+            _serviceProvider.GetService<IMicroserviceForwardingTelemetry>(),
+            logger);
+        var runtimeState = runtimeAccessor is not null && runtimeStateSource is not null
+            ? new ExtensionServiceRuntimeStateFacade(
+                extensionId,
+                runtimeAccessor,
+                runtimeStateSource,
+                supervisor.ToContract,
+                logger)
+            : null;
 
         return new ExtensionCapabilitySet(
             configuration,
@@ -81,19 +99,22 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
             new ExtensionEndpointFacade(
                 extensionId,
                 _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
-            new ExtensionFullConfigurationFacade(_scopeFactory, _runtimeState),
-            new ExtensionSupervisorFacade(
-                extensionId,
-                _runtimeState,
-                lifecycle,
-                _serviceProvider.GetService<IHostServiceRuntimeSnapshotAccessor>(),
-                _serviceProvider.GetService<IMicroserviceForwardingTelemetry>(),
-                logger),
+            new ExtensionFullConfigurationFacade(extensionId, _scopeFactory, _runtimeState),
+            supervisor,
             routeEvents,
             new ExtensionLogWriter(extensionId, logger),
             management,
             BuildHostInfoSnapshot,
-            new ExtensionServiceOutputFacade(extensionId, _runtimeState, processExecutor, logger));
+            new ExtensionServiceLogFacade(
+                extensionId,
+                _runtimeState,
+                lifecycle is HostServiceLifecycleManager lifecycleManager
+                    ? lifecycleManager.ServiceLogBufferRegistry
+                    : _serviceProvider.GetService<HostServiceLogBufferRegistry>(),
+                runtimeAccessor,
+                new ExtensionServiceOutputFacade(extensionId, _runtimeState, processExecutor, logger),
+                logger),
+            runtimeState);
     }
     private ExtensionHostInfoSnapshot BuildHostInfoSnapshot()
     {
@@ -129,12 +150,15 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
 internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigurationApi
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly string _extensionId;
     private readonly HostRuntimeState _runtimeState;
 
     internal ExtensionFullConfigurationFacade(
+        string extensionId,
         IServiceScopeFactory scopeFactory,
         HostRuntimeState runtimeState)
     {
+        _extensionId = extensionId;
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _runtimeState = runtimeState ?? throw new ArgumentNullException(nameof(runtimeState));
     }
@@ -163,13 +187,17 @@ internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigura
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
-        return hostConfig is null
-            ? ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported))
-            : await hostConfig.WriteSnapshotAsync(
-                expectedVersion,
-                changes,
-                cancellationToken).ConfigureAwait(false);
+        if (hostConfig is null)
+        {
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+        }
+
+        using var writeContext = HostConfigurationWriteContext.EnterExtension(_extensionId);
+        return await hostConfig.WriteSnapshotAsync(
+            expectedVersion,
+            changes,
+            cancellationToken).ConfigureAwait(false);
     }
 }
 
