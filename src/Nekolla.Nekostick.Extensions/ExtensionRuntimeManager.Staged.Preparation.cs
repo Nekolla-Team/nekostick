@@ -105,6 +105,8 @@ public sealed partial class ExtensionRuntimeManager
             {
                 return ExtensionGenerationPreparationResult.Failure(graph.FailureCode);
             }
+            // These versions reflect desired manifests, not successful starts. The Host's failed-binding closure
+            // prevents dependents from publishing when non-optional dependencies or contract imports fail.
             var availableDependencyVersions = graphManifests.ToDictionary(
                 static manifest => manifest.Id,
                 static manifest => manifest.Version,

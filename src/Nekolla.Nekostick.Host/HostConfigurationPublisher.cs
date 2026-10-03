@@ -193,6 +193,13 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
             var preparation = preparedResult.Preparation;
             activePreparation = preparation;
+            desiredSet = desiredSet with
+            {
+                NodeStates = ApplyUnavailableBindingNodeStates(
+                    desiredSet.NodeStates,
+                    preparation.Generation,
+                    preparation.Previous)
+            };
             var publicationSnapshot = await ReadLatestSnapshotAsync(snapshot, cancellationToken)
                 .ConfigureAwait(false);
             if (publicationSnapshot is null)
@@ -222,7 +229,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 await ReportNodeStatesAsync(desiredSet.NodeStates, cancellationToken).ConfigureAwait(false);
                 return outcome = PublishOutcome.Published;
             }
-            if (HasUnsafeUnavailableBinding(preparation.Generation))
+            if (HasUnsafeUnavailableBinding(preparation.Generation, preparation.Previous, desired))
             {
                 await preparation.AbortAsync().ConfigureAwait(false);
                 activePreparation = null;
@@ -285,7 +292,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     ? PublishOutcome.Published
                     : PublishOutcome.Superseded;
             }
-
+            var publishedGeneration = ready.Generation!;
 
             var publicationStageAdmission = _snapshotHolder.TryStage(publicationSnapshot);
             if (publicationStageAdmission != SnapshotAdmission.Accepted)
@@ -307,7 +314,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
             var publicationAdmission = _snapshotHolder.TryReplace(
                 publicationSnapshot,
-                ready.Generation,
+                publishedGeneration,
                 publicationServiceOwners);
             if (publicationAdmission != SnapshotAdmission.Accepted)
             {
@@ -328,6 +335,22 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 changeSummary.Text,
                 requestedForceReloadIds.Count != 0,
                 hasDispatchGenerationChange);
+
+            var publishedContextIds = GetGenerationContextIds(publishedGeneration);
+            var excludedBindings = string.Join(
+                "; ",
+                publishedGeneration.Bindings
+                    .Where(binding => IsFailedUnavailableBinding(binding, publishedContextIds))
+                    .Select(static binding => $"{binding.ExtensionId ?? "unknown"}={binding.FailureCode}")
+                    .OrderBy(static value => value, StringComparer.Ordinal));
+            if (excludedBindings.Length != 0)
+            {
+                HostLogMessages.FailedExtensionBindingsExcludedFromPublication(
+                    _logger,
+                    publishedGeneration.GenerationId,
+                    publicationSnapshot.Version,
+                    excludedBindings);
+            }
             if (!await preparation.CompletePublicationAsync().ConfigureAwait(false))
             {
                 HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);

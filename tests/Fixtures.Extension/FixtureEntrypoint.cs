@@ -29,6 +29,10 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
         {
             throw new InvalidOperationException("Fixture start deliberately failed.");
         }
+        if (options.StartCancelled)
+        {
+            throw new OperationCanceledException("Fixture start deliberately cancelled.");
+        }
 
         if (options.ReportStatus is { } reportedStatusCode)
         {
@@ -104,7 +108,8 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
             }
         }
 
-        if (!context.Registration.TryRegisterHandler(
+        if (options.RegisterHandler &&
+            !context.Registration.TryRegisterHandler(
                 new FixtureHandler(state, options.HandlerId)))
         {
             throw new InvalidOperationException("Fixture handler registration failed.");
@@ -239,6 +244,11 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
             }
 
             _ = context.Host.Events.TryPublish(new ExtensionEvent("fixture.bounded", 1, "newest"));
+        }
+
+        if (options.StartDelayMilliseconds > 0)
+        {
+            await Task.Delay(options.StartDelayMilliseconds, cancellationToken).ConfigureAwait(false);
         }
     }
 

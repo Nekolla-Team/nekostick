@@ -290,7 +290,8 @@ public sealed partial class ExtensionRuntimeTests
         bool subscribeSettingsChanged = false,
         bool readDataDirectory = false,
         string? reportStatus = null,
-        bool holdServiceOutput = false)
+        bool holdServiceOutput = false,
+        int startDelayMilliseconds = 0)
     {
         var json = JsonSerializer.Serialize(new
         {
@@ -331,8 +332,9 @@ public sealed partial class ExtensionRuntimeTests
             subscribeSettingsChanged,
             readDataDirectory,
             reportStatus,
-            holdServiceOutput
-         });
+            holdServiceOutput,
+            startDelayMilliseconds
+        });
         return new ExtensionSettingsConfiguration(extensionId, 1, json, 0);
     }
 

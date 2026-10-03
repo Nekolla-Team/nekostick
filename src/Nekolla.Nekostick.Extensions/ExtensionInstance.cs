@@ -200,9 +200,10 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        CancellationTokenSource? timeoutSource = null;
         try
         {
-            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(timeout);
             using (ExtensionCallbackGuard.Enter(ExtensionCallbackKind.Lifecycle))
             {
@@ -225,14 +226,23 @@ internal sealed partial class ExtensionInstance : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            _lastFailure = ExtensionFailureCode.Cancelled;
+            _lastFailure = !cancellationToken.IsCancellationRequested &&
+                timeoutSource?.IsCancellationRequested == true
+                    ? ExtensionFailureCode.LifecycleFailed
+                    : ExtensionFailureCode.Cancelled;
             return false;
         }
         catch (Exception exception)
         {
-            _lastFailure = ExtensionFailureCode.LifecycleFailed;
             await NotifyFailureAsync(exception).ConfigureAwait(false);
+            // The failure notification records CallbackFailed; the start classification
+            // (LifecycleFailed) must survive so candidate results carry the real cause.
+            _lastFailure = ExtensionFailureCode.LifecycleFailed;
             return false;
+        }
+        finally
+        {
+            timeoutSource?.Dispose();
         }
     }
 

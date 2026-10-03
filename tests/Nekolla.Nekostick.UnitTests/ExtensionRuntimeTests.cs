@@ -108,6 +108,36 @@ public sealed partial class ExtensionRuntimeTests
     }
 
     [Fact]
+    public async Task SlowStartTimeoutIsClassifiedAsLifecycleFailed()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var load = new CollectibleExtensionLoader(new SemVersion(1, 0, 0)).Load(manifest);
+        Assert.True(load.Succeeded, load.FailureCode.ToString());
+
+        var instance = new ExtensionInstance(
+            manifest,
+            load.Handle!,
+            HostApiVersion.Current,
+            Settings(manifest.Id, startDelayMilliseconds: 1_000),
+            static (_, _, _) => null,
+            ImmutableDictionary<string, SemVersion>.Empty.Add(manifest.Id, manifest.Version),
+            capabilityFactory: null);
+        try
+        {
+            Assert.False(await instance.StartAsync(
+                reloading: false,
+                timeout: TimeSpan.FromMilliseconds(20),
+                cancellationToken: CancellationToken.None));
+            Assert.Equal(ExtensionFailureCode.LifecycleFailed, instance.GetStatus().LastFailure);
+        }
+        finally
+        {
+            await instance.AbortAsync(TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
     public async Task OldStopFailureHonestlyMarksTheStoppedGeneration()
     {
         using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
@@ -272,7 +302,7 @@ public sealed partial class ExtensionRuntimeTests
             TestContext.Current.CancellationToken);
 
         Assert.False(result.Succeeded);
-        Assert.Equal(ExtensionFailureCode.LifecycleFailed, result.FailureCode);
+        Assert.Equal(ExtensionFailureCode.HandlerConflict, result.FailureCode);
         Assert.Null(manager.GetStatus(manifest.Id));
     }
 

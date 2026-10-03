@@ -76,13 +76,22 @@ public sealed partial class ExtensionRuntimeManager
                 () => RemoveFallbackRegistration(instance));
             if (!await instance.StartAsync(reloading, LifecycleTimeout, cancellationToken).ConfigureAwait(false))
             {
+                // Preserve the instance's classified failure (Cancelled, HandlerConflict,
+                // RegistrationRejected-derived codes) instead of collapsing everything to
+                // LifecycleFailed; the publisher's unsafe-binding policy keys off these codes.
+                var failureCode = instance.GetStatus().LastFailure;
+                if (failureCode == ExtensionFailureCode.None)
+                {
+                    failureCode = ExtensionFailureCode.LifecycleFailed;
+                }
+
                 await instance.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                 if (_logger is { } lifecycleLogger)
                 {
-                    ExtensionLogMessages.ExtensionCandidateFailed(lifecycleLogger, manifest.Id, ExtensionFailureCode.LifecycleFailed.ToString());
+                    ExtensionLogMessages.ExtensionCandidateFailed(lifecycleLogger, manifest.Id, failureCode.ToString());
                 }
 
-                return CandidateResult.Failure(ExtensionFailureCode.LifecycleFailed);
+                return CandidateResult.Failure(failureCode);
             }
 
             return CandidateResult.Success(instance);

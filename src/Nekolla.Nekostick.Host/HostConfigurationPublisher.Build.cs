@@ -735,8 +735,225 @@ public sealed partial class HostConfigurationPublisher
         }
     }
 
-    private static bool HasUnsafeUnavailableBinding(ExtensionDispatchGeneration generation) =>
-        generation.Bindings.Any(static binding => !binding.Available && binding.FailureCode is not ExtensionFailureCode.None and not ExtensionFailureCode.HandlerUnavailable and not ExtensionFailureCode.FallbackConflict);
+    internal static bool HasUnsafeUnavailableBinding(
+        ExtensionDispatchGeneration generation,
+        ExtensionDispatchGeneration? previousGeneration,
+        ImmutableArray<ExtensionRuntimeDescriptor> desired)
+    {
+        var failedIds = new HashSet<string>(StringComparer.Ordinal);
+        var availableIds = new HashSet<string>(StringComparer.Ordinal);
+        var contextIds = GetGenerationContextIds(generation);
+        foreach (var binding in generation.Bindings)
+        {
+            if (binding.Available)
+            {
+                if (binding.ExtensionId is { } availableId)
+                {
+                    availableIds.Add(availableId);
+                }
+
+                continue;
+            }
+
+            if (binding.FailureCode is
+                ExtensionFailureCode.Cancelled or
+                ExtensionFailureCode.RuntimeUnavailable or
+                ExtensionFailureCode.InvalidArgument or
+                ExtensionFailureCode.HandlerConflict)
+            {
+                return true;
+            }
+
+            if (IsFailedUnavailableBinding(binding, contextIds) &&
+                binding.ExtensionId is { } failedId)
+            {
+                failedIds.Add(failedId);
+            }
+        }
+
+        if (failedIds.Count == 0)
+        {
+            return false;
+        }
+
+        if (previousGeneration is not null)
+        {
+            foreach (var context in previousGeneration.Contexts)
+            {
+                if (failedIds.Contains(context.Instance.Manifest.Id))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (availableIds.Count == 0)
+        {
+            return false;
+        }
+
+        var manifests = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
+        if (!desired.IsDefaultOrEmpty)
+        {
+            foreach (var descriptor in desired)
+            {
+                if (descriptor?.Manifest is { } manifest)
+                {
+                    manifests.TryAdd(manifest.Id, manifest);
+                }
+            }
+        }
+
+        var providers = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var manifest in manifests.Values)
+        {
+            foreach (var export in manifest.Exports)
+            {
+                providers.TryAdd(export.ContractId, manifest.Id);
+            }
+        }
+
+        var dependentsByDependencyId = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var availableId in availableIds)
+        {
+            if (!manifests.TryGetValue(availableId, out var manifest))
+            {
+                continue;
+            }
+
+            foreach (var dependency in manifest.Dependencies)
+            {
+                if (!dependency.Optional && manifests.ContainsKey(dependency.Id))
+                {
+                    AddDependent(dependentsByDependencyId, dependency.Id, availableId);
+                }
+            }
+
+            foreach (var import in manifest.Imports)
+            {
+                if (!import.Optional &&
+                    providers.TryGetValue(import.ContractId, out var providerId) &&
+                    !string.Equals(providerId, availableId, StringComparison.Ordinal))
+                {
+                    AddDependent(dependentsByDependencyId, providerId, availableId);
+                }
+            }
+        }
+
+        var failedClosure = new HashSet<string>(failedIds, StringComparer.Ordinal);
+        var pending = new Queue<string>(failedIds);
+        var hasAvailableDependent = false;
+        while (pending.TryDequeue(out var extensionId))
+        {
+            if (!dependentsByDependencyId.TryGetValue(extensionId, out var dependents))
+            {
+                continue;
+            }
+
+            foreach (var dependentId in dependents)
+            {
+                if (failedClosure.Add(dependentId))
+                {
+                    pending.Enqueue(dependentId);
+                    hasAvailableDependent = true;
+                }
+            }
+        }
+
+        return hasAvailableDependent;
+    }
+
+    private static void AddDependent(
+        Dictionary<string, List<string>> dependentsByDependencyId,
+        string dependencyId,
+        string dependentId)
+    {
+        if (!dependentsByDependencyId.TryGetValue(dependencyId, out var dependents))
+        {
+            dependents = [];
+            dependentsByDependencyId.Add(dependencyId, dependents);
+        }
+
+        dependents.Add(dependentId);
+    }
+
+    internal static ImmutableArray<ExtensionNodeStateWrite> ApplyUnavailableBindingNodeStates(
+        ImmutableArray<ExtensionNodeStateWrite> nodeStates,
+        ExtensionDispatchGeneration generation,
+        ExtensionDispatchGeneration? previousGeneration = null)
+    {
+        var failures = new Dictionary<string, ExtensionFailureCode>(StringComparer.Ordinal);
+        var generationContextIds = GetGenerationContextIds(generation);
+        var previousContextIds = previousGeneration is null
+            ? null
+            : GetGenerationContextIds(previousGeneration);
+        if (!generation.Bindings.IsDefaultOrEmpty)
+        {
+            foreach (var binding in generation.Bindings)
+            {
+                if (IsFailedUnavailableBinding(binding, generationContextIds) &&
+                    binding.ExtensionId is { } extensionId &&
+                    (previousContextIds is null || !previousContextIds.Contains(extensionId)))
+                {
+                    failures.TryAdd(extensionId, binding.FailureCode);
+                }
+            }
+        }
+
+        if (failures.Count == 0)
+        {
+            return nodeStates;
+        }
+
+        var states = nodeStates.IsDefault ? ImmutableArray<ExtensionNodeStateWrite>.Empty : nodeStates;
+        var updated = ImmutableArray.CreateBuilder<ExtensionNodeStateWrite>(states.Length + failures.Count);
+        foreach (var state in states)
+        {
+            if (failures.Remove(state.ExtensionId, out var failureCode))
+            {
+                updated.Add(state with
+                {
+                    LoadState = ExtensionLoadState.Failed,
+                    FailureCode = failureCode.ToString()
+                });
+            }
+            else
+            {
+                updated.Add(state);
+            }
+        }
+
+        foreach (var failure in failures)
+        {
+            updated.Add(new ExtensionNodeStateWrite(
+                failure.Key,
+                null,
+                ExtensionLoadState.Failed,
+                failure.Value.ToString()));
+        }
+
+        return updated.ToImmutable();
+    }
+
+    private static HashSet<string> GetGenerationContextIds(ExtensionDispatchGeneration generation)
+    {
+        var contextIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var context in generation.Contexts)
+        {
+            contextIds.Add(context.Instance.Manifest.Id);
+        }
+
+        return contextIds;
+    }
+
+    private static bool IsFailedUnavailableBinding(
+        ExtensionGenerationBindingStatus binding,
+        HashSet<string> contextIds) =>
+        !binding.Available &&
+        binding.ExtensionId is { } extensionId &&
+        (!contextIds.Contains(extensionId) ||
+         (binding.FailureCode != ExtensionFailureCode.None &&
+          binding.FailureCode != ExtensionFailureCode.HandlerUnavailable));
 
     private static bool HasRunningContentDrift(
         ExtensionDispatchGeneration previousGeneration,

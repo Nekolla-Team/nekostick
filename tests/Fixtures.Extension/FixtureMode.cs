@@ -41,8 +41,13 @@ public sealed record FixtureMode(
         bool SubscribeSettingsChanged,
         bool ReadDataDirectory,
         string? ReportStatus,
-        bool HoldServiceOutput)
+        bool HoldServiceOutput,
+        bool StartCancelled)
     {
+        internal bool RegisterHandler { get; init; } = true;
+
+        internal int StartDelayMilliseconds { get; init; }
+
         /// <summary>Reads the small test-only settings document.</summary>
         public static FixtureMode Parse(string? settingsJson)
         {
@@ -91,7 +96,12 @@ public sealed record FixtureMode(
                 ReadBool(root, "subscribeSettingsChanged"),
                 ReadBool(root, "readDataDirectory"),
                 ReadOptionalString(root, "reportStatus"),
-                ReadBool(root, "holdServiceOutput"));
+                ReadBool(root, "holdServiceOutput"),
+                ReadBool(root, "startCancelled"))
+            {
+                RegisterHandler = ReadBool(root, "registerHandler", fallback: true),
+                StartDelayMilliseconds = ReadInt(root, "startDelayMilliseconds", fallback: 0)
+            };
         }
 
         private static string ReadString(JsonElement root, string name, string fallback) =>
@@ -104,8 +114,10 @@ public sealed record FixtureMode(
                 ? value.GetString()
                 : null;
 
-        private static bool ReadBool(JsonElement root, string name) =>
-            root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
+        private static bool ReadBool(JsonElement root, string name, bool fallback = false) =>
+            root.TryGetProperty(name, out var value)
+                ? value.ValueKind == JsonValueKind.True
+                : fallback;
 
         private static int ReadInt(JsonElement root, string name, int fallback) =>
             root.TryGetProperty(name, out var value) &&
@@ -160,5 +172,6 @@ public sealed record FixtureMode(
             false,
             false,
             null,
+            false,
             false);
     }

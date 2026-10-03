@@ -227,6 +227,16 @@ internal static partial class HostLogMessages
     internal static partial void ServiceStopped(ILogger logger, Guid serviceId);
 
     [LoggerMessage(
+        EventId = 1100,
+        Level = LogLevel.Warning,
+        Message = "Failed extension bindings excluded from publication. GenerationId: {GenerationId}. Version: {Version}. Bindings: {Bindings}.")]
+    internal static partial void FailedExtensionBindingsExcludedFromPublication(
+        ILogger logger,
+        long generationId,
+        long version,
+        string bindings);
+
+    [LoggerMessage(
         EventId = 1107,
         Level = LogLevel.Warning,
         Message = "Service restart scheduled. ServiceId: {ServiceId}.")]
