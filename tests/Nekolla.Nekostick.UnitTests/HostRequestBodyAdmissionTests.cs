@@ -205,6 +205,35 @@ public sealed class HostRequestBodyAdmissionTests
         Assert.Equal(1, count);
     }
 
+    [Fact]
+    public async Task EmptyBufferReadDoesNotCompleteBody()
+    {
+        var clock = new CancellationObservingClock();
+        var payload = "{}"u8.ToArray();
+        using var guard = new HostRequestBodyGuard(
+            new MemoryStream(payload),
+            maximumBytes: payload.Length,
+            readTimeout: TimeSpan.FromSeconds(1),
+            requestAborted: CancellationToken.None,
+            admissionContext: new HostRequestAdmissionContext(),
+            clock: clock);
+
+        var emptyRead = await guard.ReadAsync(Memory<byte>.Empty, TestContext.Current.CancellationToken);
+        await clock.CancellationObserved.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, emptyRead);
+
+        var buffer = new byte[payload.Length];
+        var count = await guard.ReadAsync(buffer, TestContext.Current.CancellationToken);
+
+        Assert.Equal(payload.Length, count);
+        Assert.Equal(payload, buffer);
+
+        var eof = await guard.ReadAsync(new byte[1], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, eof);
+    }
+
     private static HostRouteDispatcher CreateDispatcher(
         GlobalSettingsConfiguration settings,
         IRouteTargetExecutor? target = null,

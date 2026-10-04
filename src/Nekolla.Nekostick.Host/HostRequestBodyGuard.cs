@@ -135,7 +135,7 @@ internal sealed class HostRequestBodyGuard : Stream
                 throw;
             }
 
-            if (read == 0)
+            if (!buffer.IsEmpty && read == 0)
             {
                 Interlocked.Exchange(ref _completed, 1);
                 return 0;
