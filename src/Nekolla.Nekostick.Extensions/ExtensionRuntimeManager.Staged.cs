@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Extensions;
@@ -28,8 +29,16 @@ public sealed partial class ExtensionRuntimeManager
 
             if (preparation.State != 0 || !preparation.TryTransition(0, 1))
             {
+                var currentState = preparation.State;
+                if (currentState == 2)
+                {
+                    return ExtensionGenerationCommitResult.Success(preparation.Generation, preparation.Previous);
+                }
+
                 return ExtensionGenerationCommitResult.Failure(
-                    preparation.State == 2 ? ExtensionFailureCode.None : ExtensionFailureCode.RuntimeUnavailable,
+                    ExtensionFailureCode.RuntimeUnavailable,
+                    new ExtensionErrorDetail(
+                        $"ReadyToPublishAsync could not start for extension generation '{preparation.Generation.GenerationId}' because preparation is in state '{currentState}'."),
                     preparation.Previous);
             }
 
@@ -39,16 +48,27 @@ public sealed partial class ExtensionRuntimeManager
             var operationToken = readinessCancellation.Token;
             try
             {
+                ExtensionDispatchGeneration? currentGeneration;
+                bool generationIsStale;
                 lock (_gate)
                 {
-                    if (_disposed ||
+                    currentGeneration = _publishedDispatchGeneration;
+                    generationIsStale = _disposed ||
                         (preparation.Previous is null
-                            ? _publishedDispatchGeneration is not null
-                            : _publishedDispatchGeneration is not null &&
-                              !ReferenceEquals(_publishedDispatchGeneration, preparation.Previous)))
-                    {
-                        throw new InvalidOperationException("The prepared generation is stale.");
-                    }
+                            ? currentGeneration is not null
+                            : currentGeneration is not null &&
+                              !ReferenceEquals(currentGeneration, preparation.Previous));
+                }
+
+                if (generationIsStale)
+                {
+                    await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
+                    var currentGenerationId = currentGeneration?.GenerationId.ToString(CultureInfo.InvariantCulture) ?? "none";
+                    return ExtensionGenerationCommitResult.Failure(
+                        ExtensionFailureCode.RuntimeUnavailable,
+                        new ExtensionErrorDetail(
+                            $"Prepared extension generation '{preparation.Generation.GenerationId}' is stale; current generation is '{currentGenerationId}'."),
+                        preparation.Previous);
                 }
 
                 // Suspend dispatch for every replaced and removed extension before draining so
@@ -76,9 +96,13 @@ public sealed partial class ExtensionRuntimeManager
                     operationToken.ThrowIfCancellationRequested();
                     if (!await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false))
                     {
+                        var stopFailureDetail = previous.GetStatus().LastFailureDetail ??
+                            new ExtensionErrorDetail(
+                                $"Previous extension '{previous.Manifest.Id}' failed StopAsync while ReadyToPublishAsync was draining its dispatch.");
                         await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
                         return ExtensionGenerationCommitResult.Failure(
                             ExtensionFailureCode.StopFailed,
+                            stopFailureDetail,
                             preparation.Previous);
                     }
                 }
@@ -92,9 +116,13 @@ public sealed partial class ExtensionRuntimeManager
                     if (changedIds.Contains(candidate.Manifest.Id) &&
                         !await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
                     {
+                        var lifecycleFailureDetail = candidate.GetStatus().LastFailureDetail ??
+                            new ExtensionErrorDetail(
+                                $"Candidate extension '{candidate.Manifest.Id}' failed OnPreviousStoppedAsync before ReadyToPublishAsync could publish generation '{preparation.Generation.GenerationId}'.");
                         await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
                         return ExtensionGenerationCommitResult.Failure(
                             ExtensionFailureCode.LifecycleFailed,
+                            lifecycleFailureDetail,
                             preparation.Previous);
                     }
                 }
@@ -110,7 +138,7 @@ public sealed partial class ExtensionRuntimeManager
                 keepSuspended = true;
                 return ExtensionGenerationCommitResult.Success(preparation.Generation, preparation.Previous);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException exception)
             {
                 if (_logger is { } cancelledLogger)
                 {
@@ -120,6 +148,8 @@ public sealed partial class ExtensionRuntimeManager
                 await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
                 return ExtensionGenerationCommitResult.Failure(
                     ExtensionFailureCode.Cancelled,
+                    new ExtensionErrorDetail(
+                        $"ReadyToPublishAsync for extension generation '{preparation.Generation.GenerationId}' was cancelled before publication ({exception.GetType().Name})."),
                     preparation.Previous);
             }
             catch (Exception exception)
@@ -135,6 +165,8 @@ public sealed partial class ExtensionRuntimeManager
                 await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
                 return ExtensionGenerationCommitResult.Failure(
                     ExtensionFailureCode.RuntimeUnavailable,
+                    new ExtensionErrorDetail(
+                        $"ReadyToPublishAsync failed for extension generation '{preparation.Generation.GenerationId}' ({exception.GetType().Name})."),
                     preparation.Previous);
             }
         }
@@ -586,7 +618,8 @@ public sealed partial class ExtensionRuntimeManager
         string? extensionId,
         string? version,
         ImmutableArray<string>? requested,
-        ExtensionFailureCode failureCode) =>
+        ExtensionFailureCode failureCode,
+        ExtensionErrorDetail failureDetail) =>
         new(
             extensionId,
             version,
@@ -595,7 +628,8 @@ public sealed partial class ExtensionRuntimeManager
             failureCode,
             requested ?? ImmutableArray<string>.Empty,
             requested ?? ImmutableArray<string>.Empty,
-            false);
+            false,
+            failureDetail);
 
     private static void AddChangedPrevious(List<ExtensionInstance> changed, ExtensionInstance instance)
     {

@@ -51,5 +51,7 @@ internal sealed class HostConfigApiReadOnlyDecorator : IHostConfigApi
 
     private static ConfigurationWriteResult ReadOnlyWriteFailure() =>
         ConfigurationWriteResult.Failure(
-            new ConfigurationError(ConfigurationErrorCode.Unsupported));
+            new ConfigurationError(
+                ConfigurationErrorCode.Unsupported,
+                "Host configuration writes are not supported while the host is running in read-only mode."));
 }

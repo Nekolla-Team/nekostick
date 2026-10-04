@@ -26,7 +26,9 @@ public sealed partial class ExtensionRuntimeManager
             : forceReloadIds.WithComparer(StringComparer.Ordinal);
         if (cancellationToken.IsCancellationRequested)
         {
-            return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.Cancelled);
+            return ExtensionGenerationPreparationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                new ExtensionErrorDetail("Extension generation preparation was canceled before it began."));
         }
 
         using var preparationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -37,9 +39,11 @@ public sealed partial class ExtensionRuntimeManager
         {
             await _dispatchGate.WaitAsync(operationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
-            return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.Cancelled);
+            return ExtensionGenerationPreparationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                ExtensionErrorDetail.FromException(exception));
         }
 
         var keepGate = false;
@@ -53,19 +57,25 @@ public sealed partial class ExtensionRuntimeManager
             {
                 if (_disposed)
                 {
-                    return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.AlreadyStopped);
+                    return ExtensionGenerationPreparationResult.Failure(
+                        ExtensionFailureCode.AlreadyStopped,
+                        new ExtensionErrorDetail("The extension runtime manager has stopped."));
                 }
 
                 if (previous is not null && !ReferenceEquals(previous.Owner, this))
                 {
-                    return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.InvalidArgument);
+                    return ExtensionGenerationPreparationResult.Failure(
+                        ExtensionFailureCode.InvalidArgument,
+                        new ExtensionErrorDetail("The supplied previous generation belongs to a different extension runtime manager."));
                 }
 
                 if (_publishedDispatchGeneration is not null &&
                     previous is not null &&
                     !ReferenceEquals(_publishedDispatchGeneration, previous))
                 {
-                    return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+                    return ExtensionGenerationPreparationResult.Failure(
+                        ExtensionFailureCode.RuntimeUnavailable,
+                        new ExtensionErrorDetail("The supplied previous generation is not the currently published generation."));
                 }
 
                 baseGeneration = previous ?? _publishedDispatchGeneration ??
@@ -103,7 +113,10 @@ public sealed partial class ExtensionRuntimeManager
                 _logger);
             if (!graph.Succeeded)
             {
-                return ExtensionGenerationPreparationResult.Failure(graph.FailureCode);
+                return ExtensionGenerationPreparationResult.Failure(
+                    graph.FailureCode,
+                    graph.FailureDetail ?? new ExtensionErrorDetail(
+                        $"The extension manifest graph could not be validated ({graph.FailureCode})."));
             }
             // These versions reflect desired manifests, not successful starts. The Host's failed-binding closure
             // prevents dependents from publishing when non-optional dependencies or contract imports fail.
@@ -150,14 +163,17 @@ public sealed partial class ExtensionRuntimeManager
                     (descriptor.Settings is not null &&
                      !string.Equals(descriptor.Settings.ExtensionId, manifest.Id, StringComparison.Ordinal)))
                 {
+                    var message = manifest is null
+                        ? "The desired extension descriptor has no manifest."
+                        : $"Settings for extension '{manifest.Id}' do not match the desired manifest.";
                     statuses.Add(CreateUnavailableStatus(
                         manifest?.Id,
                         manifest?.Version.ToString(),
                         requested,
-                        ExtensionFailureCode.InvalidArgument));
+                        ExtensionFailureCode.InvalidArgument,
+                        new ExtensionErrorDetail(message)));
                     continue;
                 }
-
                 if (!desiredIds.Add(manifest.Id))
                 {
                     if (previousById.TryGetValue(manifest.Id, out var duplicatePrevious))
@@ -169,14 +185,16 @@ public sealed partial class ExtensionRuntimeManager
                         manifest.Id,
                         manifest.Version.ToString(),
                         requested,
-                        ExtensionFailureCode.RuntimeUnavailable));
+                        ExtensionFailureCode.RuntimeUnavailable,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' is requested more than once in the desired generation.")));
                     continue;
                 }
-
                 ExtensionDispatchContext? context = null;
                 ExtensionInstance? candidate = null;
                 var reused = false;
                 var failureCode = ExtensionFailureCode.None;
+                ExtensionErrorDetail? failureDetail = null;
                 if (previousById.TryGetValue(manifest.Id, out var previousContext) &&
                     !requestedForceReloadIds.Contains(manifest.Id) &&
                     HasExactIdentity(previousContext, manifest, descriptor.Settings, descriptor.RouteIds, descriptor.ContentHash))
@@ -223,6 +241,8 @@ public sealed partial class ExtensionRuntimeManager
                         failureCode = candidateResult.FailureCode == ExtensionFailureCode.None
                             ? ExtensionFailureCode.RuntimeUnavailable
                             : candidateResult.FailureCode;
+                        failureDetail = candidateResult.FailureDetail ?? new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' could not be started ({failureCode}).");
                     }
                 }
 
@@ -237,7 +257,9 @@ public sealed partial class ExtensionRuntimeManager
                         manifest.Id,
                         manifest.Version.ToString(),
                         requested,
-                        failureCode));
+                        failureCode,
+                        failureDetail ?? new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' could not be made available in the desired generation.")));
                     continue;
                 }
 
@@ -265,6 +287,11 @@ public sealed partial class ExtensionRuntimeManager
                     failureCode = collision != ExtensionFailureCode.None
                         ? collision
                         : ExtensionFailureCode.FallbackConflict;
+                    failureDetail = failureCode == ExtensionFailureCode.FallbackConflict
+                        ? new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' requests a fallback that conflicts with another generation binding.")
+                        : new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' requests handlers that conflict with another generation binding.");
                     if (candidate is not null)
                     {
                         await AbortCandidateAsync(candidate).ConfigureAwait(false);
@@ -286,7 +313,8 @@ public sealed partial class ExtensionRuntimeManager
                         manifest.Id,
                         manifest.Version.ToString(),
                         requested,
-                        failureCode));
+                        failureCode,
+                        failureDetail!));
                     continue;
                 }
 
@@ -309,15 +337,23 @@ public sealed partial class ExtensionRuntimeManager
                     fallback = new ExtensionDispatchBinding(context, null, context.Instance.Fallback);
                 }
 
+                var statusFailureCode = unavailable.Length == 0
+                    ? ExtensionFailureCode.None
+                    : ExtensionFailureCode.HandlerUnavailable;
+                var statusFailureDetail = unavailable.Length == 0
+                    ? null
+                    : new ExtensionErrorDetail(
+                        $"Extension '{manifest.Id}' does not provide requested handler(s): {string.Join(", ", unavailable)}.");
                 statuses.Add(new ExtensionGenerationBindingStatus(
                     manifest.Id,
                     manifest.Version.ToString(),
                     selectedIds.Length > unavailable.Length || wantsFallback,
                     reused,
-                    unavailable.Length == 0 ? ExtensionFailureCode.None : ExtensionFailureCode.HandlerUnavailable,
+                    statusFailureCode,
                     requested,
                     unavailable,
-                    wantsFallback));
+                    wantsFallback,
+                    statusFailureDetail));
             }
 
             foreach (var previousContext in previousById.Values)
@@ -394,7 +430,7 @@ public sealed partial class ExtensionRuntimeManager
             keepGate = true;
             return ExtensionGenerationPreparationResult.Success(preparation);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
             if (_logger is { } cancelledLogger)
             {
@@ -404,7 +440,9 @@ public sealed partial class ExtensionRuntimeManager
             }
 
             await AbortUnpublishedAsync(generationContexts, candidateContexts, candidates).ConfigureAwait(false);
-            return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.Cancelled);
+            return ExtensionGenerationPreparationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                ExtensionErrorDetail.FromException(exception));
         }
         catch (Exception exception)
         {
@@ -417,7 +455,9 @@ public sealed partial class ExtensionRuntimeManager
             }
 
             await AbortUnpublishedAsync(generationContexts, candidateContexts, candidates).ConfigureAwait(false);
-            return ExtensionGenerationPreparationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+            return ExtensionGenerationPreparationResult.Failure(
+                ExtensionFailureCode.RuntimeUnavailable,
+                ExtensionErrorDetail.FromException(exception));
         }
         finally
         {

@@ -36,7 +36,9 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
         if (settings is null || !string.Equals(extensionId, settings.ExtensionId, StringComparison.Ordinal))
         {
             return ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Validation));
+                new ConfigurationError(
+                    ConfigurationErrorCode.Validation,
+                    "WriteOwnedSettingsAsync requires a non-null settings document whose extension ID matches the requested extension ID."));
         }
 
         using var writeContext = HostConfigurationWriteContext.EnterExtension(extensionId);
@@ -58,7 +60,10 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
     {
         if (!HostConfigurationSemanticValidator.IsSafeExtensionId(extensionId) || changes is null)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(
+                    ConfigurationErrorCode.Validation,
+                    "ApplyOwnedAsync requires a valid extension ID and a non-null change set."));
         }
 
         var fullResult = await _host.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -83,7 +88,10 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
             if ((knownServiceIds.Contains(service.Id) && !ownedServiceIds.Contains(service.Id)) ||
                 (!ownedServiceIds.Contains(service.Id) && service.Version != 0))
             {
-                return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+                return ConfigurationWriteResult.Failure(
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Validation,
+                        $"Service '{service.Id:D}' is not owned by this extension or a new service has a nonzero revision."));
             }
         }
 
@@ -91,7 +99,10 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
         {
             if (knownRouteIds.Contains(route.Id) && !ownedRouteIds.Contains(route.Id))
             {
-                return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+                return ConfigurationWriteResult.Failure(
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Validation,
+                        $"Route '{route.Id:D}' is not owned by this extension and cannot be replaced by its change set."));
             }
         }
 
@@ -100,30 +111,47 @@ public sealed class EfExtensionOwnedConfigurationApi : IExtensionOwnedConfigurat
             if (route.Target is ExtensionHandlerRouteTarget handler &&
                 !(handlerIsOwned?.Invoke(handler.HandlerId) ?? false))
             {
-                return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+                return ConfigurationWriteResult.Failure(
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Validation,
+                        $"Route '{route.Id:D}' references a handler that is not owned by this extension."));
             }
 
             if (route.Target is ExtensionServiceRouteTarget service &&
                 !ownedServiceIds.Contains(service.ServiceId) && !serviceUpsertIds.Contains(service.ServiceId))
             {
-                return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+                return ConfigurationWriteResult.Failure(
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"Service '{service.ServiceId:D}' is not present in this extension's owned configuration or service upserts."));
             }
         }
 
         if (changes.Settings is { } settings &&
             !string.Equals(settings.ExtensionId, extensionId, StringComparison.Ordinal))
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(
+                    ConfigurationErrorCode.Validation,
+                    "Owned settings in the change set must use the requested extension ID."));
         }
 
-        if (changes.RemovedRouteIds.Any(routeId => !ownedRouteIds.Contains(routeId)))
+        var missingRouteId = changes.RemovedRouteIds.FirstOrDefault(routeId => !ownedRouteIds.Contains(routeId));
+        if (missingRouteId != default)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(
+                    ConfigurationErrorCode.NotFound,
+                    $"Route '{missingRouteId:D}' was not found in this extension's owned configuration."));
         }
 
-        if (changes.RemovedServiceIds.Any(serviceId => !ownedServiceIds.Contains(serviceId)))
+        var missingServiceId = changes.RemovedServiceIds.FirstOrDefault(serviceId => !ownedServiceIds.Contains(serviceId));
+        if (missingServiceId != default)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+            return ConfigurationWriteResult.Failure(
+                new ConfigurationError(
+                    ConfigurationErrorCode.NotFound,
+                    $"Service '{missingServiceId:D}' was not found in this extension's owned configuration."));
         }
 
         var removedRoutes = changes.RemovedRouteIds.ToHashSet();

@@ -28,21 +28,14 @@ public enum ConfigurationErrorCode
 /// <summary>Contains a safe configuration error without exception or secret data.</summary>
 public sealed record ConfigurationError
 {
-    /// <summary>Creates a configuration error.</summary>
+    /// <summary>Creates a configuration error with a caller-supplied precise message.</summary>
     /// <param name="code">The stable error category.</param>
-    public ConfigurationError(ConfigurationErrorCode code)
+    /// <param name="message">The precise, safe cause of the error.</param>
+    public ConfigurationError(ConfigurationErrorCode code, string message)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(message);
         Code = code;
-        Message = code switch
-        {
-            ConfigurationErrorCode.Validation => "Configuration validation failed.",
-            ConfigurationErrorCode.ConcurrencyConflict => "Configuration version conflict.",
-            ConfigurationErrorCode.NotFound => "Configuration item was not found.",
-            ConfigurationErrorCode.Unsupported => "Configuration operation is unsupported.",
-            ConfigurationErrorCode.StorageUnavailable => "Configuration storage is unavailable.",
-            ConfigurationErrorCode.NoSettings => "The extension has no persisted settings document.",
-            _ => "Configuration operation failed."
-        };
+        Message = message;
     }
 
     /// <summary>Gets the stable error category.</summary>

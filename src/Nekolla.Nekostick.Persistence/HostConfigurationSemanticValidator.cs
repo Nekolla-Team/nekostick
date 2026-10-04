@@ -23,8 +23,15 @@ public static class HostConfigurationSemanticValidator
     /// <param name="snapshot">The contract-only configuration snapshot.</param>
     /// <returns><see langword="true"/> when every semantic and persisted-version rule passes.</returns>
     /// <param name="logger">The optional persistence logger.</param>
-    public static bool TryValidateSnapshot(HostConfigurationSnapshot? snapshot, ILogger? logger = null)
+    public static bool TryValidateSnapshot(HostConfigurationSnapshot? snapshot, ILogger? logger = null) =>
+        TryValidateSnapshot(snapshot, out _, logger);
+
+    internal static bool TryValidateSnapshot(
+        HostConfigurationSnapshot? snapshot,
+        out string? validationMessage,
+        ILogger? logger = null)
     {
+        validationMessage = null;
         if (snapshot is null)
         {
             PersistenceLogMessages.ValidationRejected(logger ?? NullLogger.Instance, "ValidateSnapshot", "configuration");
@@ -41,7 +48,7 @@ public static class HostConfigurationSemanticValidator
                 snapshot.ExtensionSettings,
                 logger);
             HostConfigurationGlobalValidator.ValidatePersistedVersions(snapshot);
-        }, logger, "ValidateSnapshot");
+        }, logger, "ValidateSnapshot", out validationMessage);
     }
 
     /// <summary>
@@ -50,8 +57,15 @@ public static class HostConfigurationSemanticValidator
     /// <param name="changes">The complete replacement configuration change set.</param>
     /// <returns><see langword="true"/> when every semantic rule passes.</returns>
     /// <param name="logger">The optional persistence logger.</param>
-    public static bool TryValidateChangeSet(ConfigurationChangeSet? changes, ILogger? logger = null)
+    public static bool TryValidateChangeSet(ConfigurationChangeSet? changes, ILogger? logger = null) =>
+        TryValidateChangeSet(changes, out _, logger);
+
+    internal static bool TryValidateChangeSet(
+        ConfigurationChangeSet? changes,
+        out string? validationMessage,
+        ILogger? logger = null)
     {
+        validationMessage = null;
         if (changes is null)
         {
             PersistenceLogMessages.ValidationRejected(logger ?? NullLogger.Instance, "ValidateChangeSet", "configuration");
@@ -64,7 +78,7 @@ public static class HostConfigurationSemanticValidator
             changes.Services,
             changes.ExtensionRecords,
             changes.ExtensionSettings,
-            logger), logger, "ValidateChangeSet");
+            logger), logger, "ValidateChangeSet", out validationMessage);
     }
 
     /// <summary>
@@ -128,12 +142,20 @@ public static class HostConfigurationSemanticValidator
 
     internal static string SerializeJson<T>(T value) => HostConfigurationValueValidator.SerializeJson(value);
 
+    private static bool TryValidate(Action validation, ILogger? logger, string operation) =>
+        TryValidate(validation, logger, operation, out _);
+
     [SuppressMessage(
         "Design",
         "CA1031:Do not catch general exception types",
-        Justification = "The public DTO validation boundary is deliberately fail-closed and never exposes validation exception details.")]
-    private static bool TryValidate(Action validation, ILogger? logger, string operation)
+        Justification = "The DTO validation boundary is fail-closed and forwards only curated validation messages, never raw exception details.")]
+    private static bool TryValidate(
+        Action validation,
+        ILogger? logger,
+        string operation,
+        out string? validationMessage)
     {
+        validationMessage = null;
         try
         {
             validation();
@@ -145,6 +167,11 @@ public static class HostConfigurationSemanticValidator
             JsonException or
             ConfigurationValidationException)
         {
+            if (exception is ConfigurationValidationException validationException)
+            {
+                validationMessage = validationException.SafeMessage;
+            }
+
             PersistenceLogMessages.SemanticValidationFailed(
                 logger ?? NullLogger.Instance,
                 exception,
@@ -171,5 +198,12 @@ public static class HostConfigurationSemanticValidator
 
     internal sealed class ConfigurationValidationException : Exception
     {
+        internal ConfigurationValidationException(string? safeMessage = null)
+            : base(safeMessage)
+        {
+            SafeMessage = safeMessage;
+        }
+
+        internal string? SafeMessage { get; }
     }
 }

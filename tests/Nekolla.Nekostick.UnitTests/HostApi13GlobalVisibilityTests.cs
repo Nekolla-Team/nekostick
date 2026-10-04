@@ -174,14 +174,14 @@ public sealed class ExtensionApi13CrossExtensionVisibilityTests
         {
             if (string.Equals(extensionId, observingExtensionId, StringComparison.Ordinal))
             {
-                Assert.True(routeEvents.TryRegisterHook(
+                Assert.Same(ExtensionRouteRegistrationResult.Success, routeEvents.TryRegisterHook(
                     ExtensionRouteEventStage.Trigger,
                     (context, _) =>
                     {
                         hookRoute.TrySetResult(context.RouteId);
                         return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
                     }));
-                Assert.True(routeEvents.TrySubscribe((@event, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, routeEvents.TrySubscribe((@event, _) =>
                 {
                     if (@event.Type == ExtensionRouteEventTypes.Trigger)
                     {

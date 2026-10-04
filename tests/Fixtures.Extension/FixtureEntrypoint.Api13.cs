@@ -66,20 +66,33 @@ public sealed partial class FixtureEntrypoint
             $"settingsRead={ReadCode(settingsRead)};settingsWrite={WriteCode(settingsWrite)};" +
             $"fullRead={ReadCode(fullRead)};fullReplace={WriteCode(fullReplace)};" +
             $"routeRead={ReadCode(routeRead)};routeRemove={WriteCode(routeRemove)};" +
-            $"serviceRead={ReadCode(serviceRead)};serviceRemove={WriteCode(serviceRemove)};" +
-            $"serviceStart={serviceStart.Code};serviceStop={serviceStop.Code};serviceRestart={serviceRestart.Code};" +
-            $"endpoints={endpointCount};endpointResolve={(endpoint is null ? "null" : "present")};{api13};{api14}";
+            $"serviceRead={ReadCode(serviceRead, includeDetail: true)};serviceRemove={WriteCode(serviceRemove, includeDetail: true)};" +
+            $"serviceStart={DescribeServiceOperation(serviceStart)};serviceStop={DescribeServiceOperation(serviceStop)};serviceRestart={DescribeServiceOperation(serviceRestart)};" +
+            $"endpoints={endpointCount};endpointResolve={DescribeEndpointResolution(endpoint)};{api13};{api14}";
     }
 
-    private static string ReadCode<T>(ConfigurationReadResult<T> result) =>
+    private static string ReadCode<T>(
+        ConfigurationReadResult<T> result,
+        bool includeDetail = false) =>
         result.IsSuccess
             ? "Success"
-            : result.Errors.IsDefaultOrEmpty ? "Unknown" : result.Errors[0].Code.ToString();
+            : result.Errors.IsDefaultOrEmpty
+                ? "Unknown"
+                : FormatConfigurationError(result.Errors[0], includeDetail);
 
-    private static string WriteCode(ConfigurationWriteResult result) =>
+    private static string WriteCode(
+        ConfigurationWriteResult result,
+        bool includeDetail = false) =>
         result.IsSuccess
             ? "Success"
-            : result.Errors.IsDefaultOrEmpty ? "Unknown" : result.Errors[0].Code.ToString();
+            : result.Errors.IsDefaultOrEmpty
+                ? "Unknown"
+                : FormatConfigurationError(result.Errors[0], includeDetail);
+    private static string FormatConfigurationError(ConfigurationError error, bool includeDetail) =>
+        includeDetail
+            ? $"{error.Code}:{error.Message}"
+            : error.Code.ToString();
+
     private static async ValueTask<string> ProbeApi13CapabilitiesAsync(
         IExtensionHostBridge host,
         CancellationToken cancellationToken)
@@ -101,8 +114,31 @@ public sealed partial class FixtureEntrypoint
         bridge.LogWriter.WriteText(ExtensionLogLevel.Information, "fixture-api13-probe");
         var dataDirectory = string.IsNullOrEmpty(bridge.DataDirectory) ? "empty" : bridge.DataDirectory;
         return $"api13={(supported ? "Supported" : "Unsupported")};sibling=True;" +
-            $"supervisor={ReadCode(supervisor)};routeSubscribe={routeSubscribe};" +
-            $"routeHook={routeHook};logWriter={(supported ? "Called" : "Unsupported")};" +
+            $"supervisor={ReadCode(supervisor)};routeSubscribe={DescribeRouteRegistration(routeSubscribe)};" +
+            $"routeHook={DescribeRouteRegistration(routeHook)};logWriter={(supported ? "Called" : "Unsupported")};" +
             $"dataDirectory={dataDirectory}";
     }
+    private static string DescribeServiceOperation(ExtensionServiceOperationResult result) =>
+        result.Detail is { } detail
+            ? $"{result.Code}:{detail.Message}"
+            : result.Code.ToString();
+
+    private static string DescribeEndpointResolution(ExtensionEndpointResolutionResult result) =>
+        result switch
+        {
+            ExtensionEndpointResolutionSuccessResult success =>
+                $"Success:{success.Lease.ServiceId}",
+            ExtensionEndpointResolutionFailureResult failure =>
+                $"{failure.Code}:{failure.Detail.Message}",
+            _ => "Unknown"
+        };
+
+    private static string DescribeRouteRegistration(ExtensionRouteRegistrationResult result) =>
+        result switch
+        {
+            ExtensionRouteRegistrationFailureResult failure =>
+                $"{failure.Code}:{failure.Detail.Message}",
+            _ when ReferenceEquals(result, ExtensionRouteRegistrationResult.Success) => "Succeeded",
+            _ => "Unknown"
+        };
 }

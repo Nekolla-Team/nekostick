@@ -34,13 +34,44 @@ internal sealed class ExtensionDependencyContext : IExtensionDependencyContext
 
     public string? InstalledVersion { get; }
 
-    public bool TryImport<TContract>(string contractId, out TContract? contract)
+    public ExtensionContractImportResult<TContract> TryImport<TContract>(string contractId)
         where TContract : class
     {
-        contract = null;
-        return State == ExtensionDependencyState.Satisfied &&
-            _contracts is not null &&
-            _contracts.TryImport(contractId, out contract);
+        if (!ExtensionIdentifierSyntax.IsValid(contractId))
+        {
+            return ExtensionContractImportResult<TContract>.Failure(
+                ExtensionContractImportFailureCode.InvalidArgument,
+                new ExtensionErrorDetail(
+                    $"The contractId argument {ExtensionDiagnosticText.Value(contractId)} is invalid; contract identifiers must be {ExtensionDiagnosticText.IdentifierSyntaxRule}."));
+        }
+
+        if (State == ExtensionDependencyState.Unavailable)
+        {
+            return ExtensionContractImportResult<TContract>.Failure(
+                ExtensionContractImportFailureCode.Unavailable,
+                new ExtensionErrorDetail(
+                    $"Contract import '{contractId}' is unavailable because dependency '{ExtensionId}' has state {State}."));
+        }
+
+        if (State != ExtensionDependencyState.Satisfied)
+        {
+            var installedVersion = InstalledVersion is null ? "not installed" : $"version '{InstalledVersion}'";
+            var range = string.IsNullOrWhiteSpace(VersionRange) ? "no declared version range" : $"required range '{VersionRange}'";
+            return ExtensionContractImportResult<TContract>.Failure(
+                ExtensionContractImportFailureCode.DependencyUnsatisfied,
+                new ExtensionErrorDetail(
+                    $"Dependency '{ExtensionId}' has state {State} with {installedVersion}; {range} is not satisfied, so contract '{contractId}' cannot be imported."));
+        }
+
+        if (_contracts is null)
+        {
+            return ExtensionContractImportResult<TContract>.Failure(
+                ExtensionContractImportFailureCode.Unavailable,
+                new ExtensionErrorDetail(
+                    $"Contract import '{contractId}' is unavailable because dependency '{ExtensionId}' has no contract registry."));
+        }
+
+        return _contracts.TryImport<TContract>(contractId);
     }
 }
 

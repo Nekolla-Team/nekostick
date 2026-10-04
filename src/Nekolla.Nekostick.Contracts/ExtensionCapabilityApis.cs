@@ -37,17 +37,37 @@ public enum ExtensionServiceOperationCode
 public sealed record ExtensionServiceOperationResult
 {
     /// <summary>Creates a service operation result.</summary>
-    /// <param name="succeeded">Whether the operation completed successfully.</param>
-    /// <param name="code">The stable result category.</param>
+    /// <param name="succeeded">Whether the operation completed successfully; it must be <see langword="true" /> exactly when <paramref name="code" /> is <see cref="ExtensionServiceOperationCode.Accepted" />.</param>
+    /// <param name="code">The stable result category; <see cref="ExtensionServiceOperationCode.Accepted" /> indicates success and every other code indicates failure.</param>
     /// <param name="serviceId">The affected service identifier.</param>
+    /// <param name="detail">The required precise cause or additional context on failure; it must be <see langword="null" /> on success.</param>
+    /// <exception cref="ArgumentException">The success flag is inconsistent with <paramref name="code" />, or a successful result includes <paramref name="detail" />.</exception>
+    /// <exception cref="ArgumentNullException">The operation failed but <paramref name="detail" /> is <see langword="null" />.</exception>
     public ExtensionServiceOperationResult(
         bool succeeded,
         ExtensionServiceOperationCode code,
-        Guid serviceId)
+        Guid serviceId,
+        ExtensionErrorDetail? detail = null)
     {
+        ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
+        if (succeeded != (code == ExtensionServiceOperationCode.Accepted))
+        {
+            throw new ArgumentException("The service operation result is inconsistent.");
+        }
+
+        if (succeeded && detail is not null)
+        {
+            throw new ArgumentException("A successful result cannot include error detail.", nameof(detail));
+        }
+
+        if (!succeeded && detail is null)
+        {
+            throw new ArgumentNullException(nameof(detail), "An unsuccessful result must include error detail.");
+        }
+
         Succeeded = succeeded;
         Code = code;
-        ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
+        Detail = detail;
     }
 
     /// <summary>Gets whether the operation completed successfully.</summary>
@@ -58,8 +78,10 @@ public sealed record ExtensionServiceOperationResult
 
     /// <summary>Gets the affected service identifier.</summary>
     public Guid ServiceId { get; }
-}
 
+    /// <summary>Gets the required precise cause or additional context for a failed operation, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? Detail { get; }
+}
 /// <summary>Provides owned route CRUD convenience operations for an extension.</summary>
 /// <remarks>The host binds the caller identity; route targets are restricted to the caller's handlers and services.</remarks>
 public interface IExtensionRouteApi
@@ -184,8 +206,8 @@ public interface IExtensionEndpointApi
     /// <summary>Resolves one caller-owned service endpoint lease.</summary>
     /// <param name="serviceId">The caller-owned service identifier.</param>
     /// <param name="cancellationToken">The operation cancellation token.</param>
-    /// <returns>The lease when currently published; otherwise <see langword="null" />.</returns>
-    ValueTask<ExtensionEndpointLease?> ResolveAsync(
+    /// <returns>A typed result containing the lease on success, or a failure code with its required precise detail.</returns>
+    ValueTask<ExtensionEndpointResolutionResult> ResolveAsync(
         Guid serviceId,
         CancellationToken cancellationToken = default);
 }
@@ -287,6 +309,8 @@ public sealed record ExtensionLifecycleStatus
     /// <param name="failureCount">The bounded failure count.</param>
     /// <param name="droppedEvents">The number of dropped events.</param>
     /// <param name="lastFailure">The last safe failure category.</param>
+    /// <param name="lastFailureDetail">The precise cause or context when available; it must be <see langword="null" /> when <paramref name="lastFailure" /> is <see cref="ExtensionLifecycleFailureCode.None" />. Other failure codes may have no detail because the runtime does not yet provide a cause for every failure path.</param>
+    /// <exception cref="ArgumentException"><paramref name="lastFailure" /> is <see cref="ExtensionLifecycleFailureCode.None" /> but <paramref name="lastFailureDetail" /> is not <see langword="null" />.</exception>
     public ExtensionLifecycleStatus(
         string extensionId,
         string version,
@@ -297,7 +321,8 @@ public sealed record ExtensionLifecycleStatus
         int activeTasks,
         int failureCount,
         long droppedEvents,
-        ExtensionLifecycleFailureCode lastFailure)
+        ExtensionLifecycleFailureCode lastFailure,
+        ExtensionErrorDetail? lastFailureDetail = null)
     {
         ExtensionId = string.IsNullOrWhiteSpace(extensionId)
             ? throw new ArgumentException("An extension identifier is required.", nameof(extensionId))
@@ -310,6 +335,10 @@ public sealed record ExtensionLifecycleStatus
         ArgumentOutOfRangeException.ThrowIfNegative(activeTasks);
         ArgumentOutOfRangeException.ThrowIfNegative(failureCount);
         ArgumentOutOfRangeException.ThrowIfNegative(droppedEvents);
+        if (lastFailure == ExtensionLifecycleFailureCode.None && lastFailureDetail is not null)
+        {
+            throw new ArgumentException("A status with no failure cannot include failure detail.", nameof(lastFailureDetail));
+        }
 
         State = state;
         HandlerCount = handlerCount;
@@ -319,6 +348,7 @@ public sealed record ExtensionLifecycleStatus
         FailureCount = failureCount;
         DroppedEvents = droppedEvents;
         LastFailure = lastFailure;
+        LastFailureDetail = lastFailureDetail;
     }
 
     /// <summary>Gets the stable extension identifier.</summary>
@@ -350,23 +380,46 @@ public sealed record ExtensionLifecycleStatus
 
     /// <summary>Gets the last safe failure category.</summary>
     public ExtensionLifecycleFailureCode LastFailure { get; }
+
+    /// <summary>Gets the cause or context when the runtime provides one; it is null when no failure was recorded, and may be absent for other failures.</summary>
+    public ExtensionErrorDetail? LastFailureDetail { get; }
 }
 
 /// <summary>Contains the safe result of an extension self-lifecycle operation.</summary>
 public sealed record ExtensionLifecycleOperationResult
 {
     /// <summary>Creates a lifecycle operation result.</summary>
-    /// <param name="succeeded">Whether the operation completed successfully.</param>
-    /// <param name="code">The stable operation result category.</param>
+    /// <param name="succeeded">Whether the operation completed successfully; it must be <see langword="true" /> exactly when <paramref name="code" /> is <see cref="ExtensionLifecycleOperationCode.Accepted" />.</param>
+    /// <param name="code">The stable result category; <see cref="ExtensionLifecycleOperationCode.Accepted" /> indicates success and every other code indicates failure.</param>
     /// <param name="status">The resulting status when available.</param>
+    /// <param name="detail">The required precise cause or additional context on failure; it must be <see langword="null" /> on success.</param>
+    /// <exception cref="ArgumentException">The success flag is inconsistent with <paramref name="code" />, or a successful result includes <paramref name="detail" />.</exception>
+    /// <exception cref="ArgumentNullException">The operation failed but <paramref name="detail" /> is <see langword="null" />.</exception>
     public ExtensionLifecycleOperationResult(
         bool succeeded,
         ExtensionLifecycleOperationCode code,
-        ExtensionLifecycleStatus? status)
+        ExtensionLifecycleStatus? status,
+        ExtensionErrorDetail? detail = null)
     {
+        if (succeeded != (code == ExtensionLifecycleOperationCode.Accepted))
+        {
+            throw new ArgumentException("The lifecycle operation result is inconsistent.");
+        }
+
+        if (succeeded && detail is not null)
+        {
+            throw new ArgumentException("A successful result cannot include error detail.", nameof(detail));
+        }
+
+        if (!succeeded && detail is null)
+        {
+            throw new ArgumentNullException(nameof(detail), "An unsuccessful result must include error detail.");
+        }
+
         Succeeded = succeeded;
         Code = code;
         Status = status;
+        Detail = detail;
     }
 
     /// <summary>Gets whether the operation completed successfully.</summary>
@@ -377,6 +430,9 @@ public sealed record ExtensionLifecycleOperationResult
 
     /// <summary>Gets the resulting safe status when available.</summary>
     public ExtensionLifecycleStatus? Status { get; }
+
+    /// <summary>Gets the required precise cause or additional context for a failed operation, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? Detail { get; }
 }
 
 /// <summary>Provides bridge-scoped self lifecycle observation and requests.</summary>

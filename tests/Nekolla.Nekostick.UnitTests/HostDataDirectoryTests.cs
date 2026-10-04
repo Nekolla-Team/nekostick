@@ -16,7 +16,8 @@ public sealed class HostDataDirectoryTests
         using var contracts = new ExtensionContractRegistry(
             ImmutableArray<ExtensionContractExport>.Empty,
             ImmutableArray<ExtensionContractImport>.Empty,
-            static (_, _, _) => null);
+            static (_, _, _) => ExtensionContractProviderResolution.Failure(
+                new ExtensionErrorDetail("The data-directory test does not configure a contract provider.")));
 
         var bridge = new ExtensionHostBridge(
             HostApiVersion.Current,

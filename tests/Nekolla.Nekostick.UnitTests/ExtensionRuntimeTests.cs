@@ -120,7 +120,8 @@ public sealed partial class ExtensionRuntimeTests
             load.Handle!,
             HostApiVersion.Current,
             Settings(manifest.Id, startDelayMilliseconds: 1_000),
-            static (_, _, _) => null,
+            static (_, _, _) => ExtensionContractProviderResolution.Failure(
+                new ExtensionErrorDetail("The runtime test does not configure a contract provider.")),
             ImmutableDictionary<string, SemVersion>.Empty.Add(manifest.Id, manifest.Version),
             capabilityFactory: null);
         try

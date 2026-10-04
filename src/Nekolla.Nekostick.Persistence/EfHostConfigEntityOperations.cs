@@ -205,57 +205,71 @@ internal sealed class EfHostConfigEntityOperations
         IReadOnlyList<ExtensionRecord> extensionRecords,
         IReadOnlyList<ExtensionSetting> extensionSettings,
         GlobalSettings globalSettings,
-        out bool versionsAreValid)
+        out bool versionsAreValid,
+        out string? conflictMessage)
     {
+        conflictMessage = null;
         versionsAreValid = true;
         if (changes.GlobalSettings.Version != globalSettings.Version)
         {
             versionsAreValid = false;
+            conflictMessage = $"WriteSnapshot expected GlobalSettings revision {changes.GlobalSettings.Version}, but the actual revision is {globalSettings.Version}.";
             return true;
         }
 
         versionsAreValid = VersionsMatch(
+            "Route",
             changes.Routes,
             routes,
             value => value.Id,
             value => value.Version,
             value => value.Id,
-            value => value.Version)
+            value => value.Version,
+            out conflictMessage)
             && VersionsMatch(
+                "Service",
                 changes.Services,
                 services,
                 value => value.Id,
                 value => value.Version,
                 value => value.Id,
-                value => value.Version)
+                value => value.Version,
+                out conflictMessage)
             && VersionsMatch(
+                "ExtensionRecord",
                 changes.ExtensionRecords,
                 extensionRecords,
                 value => value.ExtensionId,
                 value => value.RecordVersion,
                 value => value.ExtensionId,
-                value => value.Version)
-            && SettingsVersionsMatch(changes.ExtensionSettings, extensionSettings, extensionRecords);
+                value => value.Version,
+                out conflictMessage)
+            && SettingsVersionsMatch(changes.ExtensionSettings, extensionSettings, extensionRecords, out conflictMessage);
         return true;
     }
 
     private static bool VersionsMatch<TValue, TEntity, TKey>(
+        string entityName,
         IEnumerable<TValue> incoming,
         IEnumerable<TEntity> existing,
         Func<TValue, TKey> incomingKey,
         Func<TValue, long> incomingVersion,
         Func<TEntity, TKey> existingKey,
-        Func<TEntity, long> existingVersion)
+        Func<TEntity, long> existingVersion,
+        out string? conflictMessage)
         where TKey : notnull
     {
+        conflictMessage = null;
         var existingByKey = existing.ToDictionary(existingKey, existingVersion);
         foreach (var item in incoming)
         {
             var key = incomingKey(item);
             if (existingByKey.TryGetValue(key, out var version))
             {
-                if (incomingVersion(item) != version)
+                var submittedVersion = incomingVersion(item);
+                if (submittedVersion != version)
                 {
+                    conflictMessage = $"WriteSnapshot expected {entityName} '{key}' revision {submittedVersion}, but the actual revision is {version}.";
                     return false;
                 }
             }
@@ -271,8 +285,10 @@ internal sealed class EfHostConfigEntityOperations
     private static bool SettingsVersionsMatch(
         IEnumerable<ExtensionSettingsConfiguration> incoming,
         IEnumerable<ExtensionSetting> existing,
-        IEnumerable<ExtensionRecord> extensionRecords)
+        IEnumerable<ExtensionRecord> extensionRecords,
+        out string? conflictMessage)
     {
+        conflictMessage = null;
         var recordIds = extensionRecords.ToDictionary(
             value => value.ExtensionId,
             value => value.Id,
@@ -294,6 +310,7 @@ internal sealed class EfHostConfigEntityOperations
             {
                 if (setting.Version != current.Version)
                 {
+                    conflictMessage = $"WriteSnapshot expected ExtensionSetting revision {setting.Version} for extension '{setting.ExtensionId}', but the actual revision is {current.Version}.";
                     return false;
                 }
             }

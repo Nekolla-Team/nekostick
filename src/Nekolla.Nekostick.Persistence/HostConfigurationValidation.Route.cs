@@ -277,9 +277,10 @@ internal static class HostConfigurationRouteValidator
                     HostConfigurationValueValidator.Throw();
                 }
             }
-            else if (!HeaderRewriteTemplate.TryCompile(rewrite.Value, out _))
+            else if (HeaderRewriteTemplate.TryCompile(rewrite.Value) is HeaderRewriteTemplateCompileFailureResult failure)
             {
-                HostConfigurationValueValidator.Throw();
+                HostConfigurationValueValidator.Throw(
+                    $"Header rewrite template compilation failed with {failure.Code}: {failure.Detail.Message}");
             }
         }
     }

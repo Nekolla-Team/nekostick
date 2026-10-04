@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
@@ -55,27 +56,50 @@ internal sealed class ExtensionServiceLogFacade :
     {
         if (!UuidV7.IsVersion7(serviceId))
         {
-            return SubscriptionFailure(Guid.CreateVersion7(), ExtensionServiceLogCode.InvalidArgument);
+            return SubscriptionFailure(
+                Guid.CreateVersion7(),
+                ExtensionServiceLogCode.InvalidArgument,
+                $"The serviceId argument '{serviceId}' is not a valid UUIDv7 identifier.");
         }
 
-        if (sink is null || sinceSequence is < 0)
+        if (sink is null)
         {
-            return SubscriptionFailure(serviceId, ExtensionServiceLogCode.InvalidArgument);
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.InvalidArgument,
+                "The sink argument is required; its value was null.");
+        }
+
+        if (sinceSequence is < 0)
+        {
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.InvalidArgument,
+                $"The sinceSequence argument must be zero or greater; the supplied value was {sinceSequence.Value}.");
         }
 
         if (cancellationToken.IsCancellationRequested)
         {
-            return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Cancelled);
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.Cancelled,
+                $"The service log subscription request for service '{serviceId}' was cancelled before it could be created.");
         }
 
         if (IsDisposed())
         {
-            return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Failed);
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.Failed,
+                $"The host service-log facade has been disposed and cannot create a subscription for service '{serviceId}'.");
         }
 
         if (_bufferRegistry is null)
         {
-            return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Unsupported);
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.Unsupported,
+                $"Service log subscriptions are unavailable because the host service-log buffer registry is not available for service '{serviceId}'.");
         }
 
         try
@@ -88,11 +112,18 @@ internal sealed class ExtensionServiceLogFacade :
                 currentState = snapshot.LifecycleState;
             }
 
-            if (!IsConfigured(serviceId))
+            if (!IsConfigured(serviceId, out var configurationUnavailable))
             {
-                return SubscriptionFailure(serviceId, ExtensionServiceLogCode.NotFound);
+                return configurationUnavailable
+                    ? SubscriptionFailure(
+                        serviceId,
+                        ExtensionServiceLogCode.Failed,
+                        $"The current host service configuration snapshot is unavailable; a log subscription cannot be created for service '{serviceId}'.")
+                    : SubscriptionFailure(
+                        serviceId,
+                        ExtensionServiceLogCode.NotFound,
+                        $"Service '{serviceId}' was not found in the current host configuration.");
             }
-
             var buffer = _bufferRegistry.GetOrCreate(serviceId);
             var code = buffer.TrySubscribe(
                 sinceSequence,
@@ -103,21 +134,40 @@ internal sealed class ExtensionServiceLogFacade :
                 out var subscription);
             if (code != ExtensionServiceLogCode.Subscribed || subscription is null)
             {
-                return SubscriptionFailure(
-                    serviceId,
-                    code == ExtensionServiceLogCode.Subscribed ? ExtensionServiceLogCode.Failed : code);
+                var failureCode = code == ExtensionServiceLogCode.Subscribed
+                    ? ExtensionServiceLogCode.Failed
+                    : code;
+                var message = code switch
+                {
+                    ExtensionServiceLogCode.InvalidCursor =>
+                        $"The sinceSequence value {sinceSequence} is beyond the latest log sequence for service '{serviceId}'.",
+                    ExtensionServiceLogCode.InvalidArgument =>
+                        $"The host service-log buffer rejected the sinceSequence value {sinceSequence?.ToString(CultureInfo.InvariantCulture) ?? "null"} for service '{serviceId}'.",
+                    ExtensionServiceLogCode.Subscribed =>
+                        $"The host service-log buffer accepted the request for service '{serviceId}' but did not return a subscription.",
+                    _ =>
+                        $"The host service-log buffer could not create a subscription for service '{serviceId}' (result code '{code}')."
+                };
+
+                return SubscriptionFailure(serviceId, failureCode, message);
             }
 
             if (!TryTrack(subscription))
             {
                 await subscription.DisposeAsync().ConfigureAwait(false);
-                return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Failed);
+                return SubscriptionFailure(
+                    serviceId,
+                    ExtensionServiceLogCode.Failed,
+                    $"The host service-log facade was disposed before the subscription for service '{serviceId}' could be registered.");
             }
 
             if (cancellationToken.IsCancellationRequested)
             {
                 await subscription.DisposeAsync().ConfigureAwait(false);
-                return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Cancelled);
+                return SubscriptionFailure(
+                    serviceId,
+                    ExtensionServiceLogCode.Cancelled,
+                    $"The service log subscription request for service '{serviceId}' was cancelled before delivery began.");
             }
 
             subscription.Start();
@@ -125,16 +175,24 @@ internal sealed class ExtensionServiceLogFacade :
                 true,
                 ExtensionServiceLogCode.Subscribed,
                 serviceId,
-                subscription);
+                subscription,
+                null);
+
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Cancelled);
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.Cancelled,
+                $"The service log subscription request for service '{serviceId}' was cancelled before it could be created.");
         }
         catch (Exception exception)
         {
             LogCapabilityFailure(exception, nameof(SubscribeAsync), serviceId);
-            return SubscriptionFailure(serviceId, ExtensionServiceLogCode.Failed);
+            return SubscriptionFailure(
+                serviceId,
+                ExtensionServiceLogCode.Failed,
+                $"The host could not create a service log subscription for service '{serviceId}' because a host operation raised {exception.GetType().Name}.");
         }
     }
 
@@ -267,9 +325,10 @@ internal sealed class ExtensionServiceLogFacade :
         }
     }
 
-    private bool IsConfigured(Guid serviceId)
+    private bool IsConfigured(Guid serviceId, out bool configurationUnavailable)
     {
         var snapshot = _runtimeState.CurrentSnapshot;
+        configurationUnavailable = snapshot is null;
         if (snapshot is null)
         {
             return false;
@@ -328,6 +387,7 @@ internal sealed class ExtensionServiceLogFacade :
 
     private static ExtensionServiceLogSubscriptionResult SubscriptionFailure(
         Guid serviceId,
-        ExtensionServiceLogCode code) =>
-        new(false, code, serviceId, null);
+        ExtensionServiceLogCode code,
+        string message) =>
+        new(false, code, serviceId, null, new ExtensionErrorDetail(message));
 }

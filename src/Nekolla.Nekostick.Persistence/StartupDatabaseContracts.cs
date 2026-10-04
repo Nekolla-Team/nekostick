@@ -188,7 +188,9 @@ public sealed class EfConfigurationRevisionReader : IConfigurationRevisionReader
                     cancellationToken);
             return revision is null
                 ? ConfigurationReadResult<ConfigurationRevisionStatus>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound))
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"ConfigurationRevision '{PersistenceDatabaseDefaults.GlobalRevisionKey}' was not found."))
                 : ConfigurationReadResult<ConfigurationRevisionStatus>.Success(
                     new ConfigurationRevisionStatus(revision.Version, revision.CommittedAt));
         }
@@ -205,7 +207,9 @@ public sealed class EfConfigurationRevisionReader : IConfigurationRevisionReader
                 "ReadCurrentConfigurationRevision",
                 "global");
             return ConfigurationReadResult<ConfigurationRevisionStatus>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+                new ConfigurationError(
+                    ConfigurationErrorCode.StorageUnavailable,
+                    $"ReadCurrentConfigurationRevision could not read ConfigurationRevision '{PersistenceDatabaseDefaults.GlobalRevisionKey}' from the persistence store."));
         }
     }
 }

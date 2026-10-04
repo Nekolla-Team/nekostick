@@ -46,13 +46,20 @@ public sealed record ExtensionServiceOutputStreamResult
     /// <param name="code">The stable result category.</param>
     /// <param name="serviceId">The affected service identifier.</param>
     /// <param name="stream">The readable output stream when <paramref name="succeeded" /> is <see langword="true" />.</param>
+    /// <param name="detail">The required precise failure cause, or <see langword="null" /> on success.</param>
     public ExtensionServiceOutputStreamResult(
         bool succeeded,
         ExtensionServiceOutputCode code,
         Guid serviceId,
-        System.IO.Stream? stream)
+        System.IO.Stream? stream,
+        ExtensionErrorDetail? detail)
     {
         ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
+        if (succeeded != (code == ExtensionServiceOutputCode.Opened))
+        {
+            throw new ArgumentException("The service-output result code is inconsistent.", nameof(code));
+        }
+
         if (succeeded && stream is null)
         {
             throw new ArgumentNullException(nameof(stream), "A successful result must include a stream.");
@@ -63,9 +70,20 @@ public sealed record ExtensionServiceOutputStreamResult
             throw new ArgumentException("An unsuccessful result cannot include a stream.", nameof(stream));
         }
 
+        if (succeeded && detail is not null)
+        {
+            throw new ArgumentException("A successful result cannot include error detail.", nameof(detail));
+        }
+
+        if (!succeeded && detail is null)
+        {
+            throw new ArgumentNullException(nameof(detail), "An unsuccessful result must include error detail.");
+        }
+
         Succeeded = succeeded;
         Code = code;
         Stream = stream;
+        Detail = detail;
     }
 
     /// <summary>Gets whether the stream was opened.</summary>
@@ -79,6 +97,9 @@ public sealed record ExtensionServiceOutputStreamResult
 
     /// <summary>Gets the readable output stream when the operation succeeded.</summary>
     public System.IO.Stream? Stream { get; }
+
+    /// <summary>Gets the precise failure cause, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? Detail { get; }
 }
 
 

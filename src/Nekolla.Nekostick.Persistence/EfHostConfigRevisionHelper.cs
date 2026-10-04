@@ -61,14 +61,15 @@ internal sealed class EfHostConfigRevisionHelper
 
     internal static Guid NewUuidV7() => Guid.CreateVersion7();
 
-    internal static ConfigurationWriteResult ValidationWriteFailure() =>
-        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+    internal static ConfigurationWriteResult ValidationWriteFailure(string message) =>
+        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation, message));
 
-    internal static ConfigurationWriteResult ConflictWriteFailure() =>
-        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.ConcurrencyConflict));
+    internal static ConfigurationWriteResult ConflictWriteFailure(string message) =>
+        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.ConcurrencyConflict, message));
 
-    internal static ConfigurationWriteResult StorageWriteFailure() =>
-        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+    internal static ConfigurationWriteResult StorageWriteFailure(string message) =>
+        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable, message));
+
 
     internal static bool IsTransactionConflict(DbUpdateException exception) =>
         exception.InnerException is PostgresException postgresException &&

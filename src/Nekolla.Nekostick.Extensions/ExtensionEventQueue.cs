@@ -38,40 +38,48 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
     /// <summary>Counts one event that could not run because the owning extension is draining or stopped.</summary>
     internal void RecordSkipped() => Interlocked.Increment(ref _dropped);
 
-    public bool TryPublish(ExtensionEvent @event)
+    public ExtensionEventPublishResult TryPublish(ExtensionEvent @event)
     {
         if (@event is null)
         {
-            return false;
+            return ExtensionEventPublishResult.Failure(
+                ExtensionEventPublishFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("The event argument is null."));
         }
 
-        var dropped = false;
+        ExtensionEventPublishFailureCode failureCode;
         lock (_gate)
         {
-            if (_stopped || _events.Count >= _capacity)
+            if (_stopped)
             {
                 Interlocked.Increment(ref _dropped);
-                dropped = true;
+                failureCode = ExtensionEventPublishFailureCode.Unavailable;
+            }
+            else if (_events.Count >= _capacity)
+            {
+                Interlocked.Increment(ref _dropped);
+                failureCode = ExtensionEventPublishFailureCode.QueueFull;
             }
             else
             {
                 _events.Enqueue(@event);
                 _available.Release();
+                return ExtensionEventPublishResult.Success;
             }
         }
 
-        if (dropped)
+        var failureDetail = failureCode == ExtensionEventPublishFailureCode.Unavailable
+            ? new ExtensionErrorDetail("The extension event queue has stopped accepting events.")
+            : new ExtensionErrorDetail(
+                $"The extension event queue is full at its capacity of {_capacity}; the newest event was dropped.");
+        if (_onDrop is { } onDrop)
         {
-            if (_onDrop is { } onDrop)
-            {
-                _ = ObserveDropAsync(onDrop(DroppedCount).AsTask());
-            }
-
-            return false;
+            _ = ObserveDropAsync(onDrop(DroppedCount).AsTask());
         }
 
-        return true;
+        return ExtensionEventPublishResult.Failure(failureCode, failureDetail);
     }
+
 
     private async Task ObserveDropAsync(Task notification)
     {
@@ -91,22 +99,26 @@ internal sealed class ExtensionEventQueue : IExtensionEventPublisher, IAsyncDisp
         }
     }
 
-    public bool TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback)
+    public ExtensionEventSubscribeResult TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback)
     {
         if (callback is null)
         {
-            return false;
+            return ExtensionEventSubscribeResult.Failure(
+                ExtensionEventSubscribeFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("The event subscription callback is null."));
         }
 
         lock (_gate)
         {
             if (_stopped)
             {
-                return false;
+                return ExtensionEventSubscribeResult.Failure(
+                    ExtensionEventSubscribeFailureCode.Unavailable,
+                    new ExtensionErrorDetail("The extension event queue has stopped accepting subscriptions."));
             }
 
             _subscribers.Add(callback);
-            return true;
+            return ExtensionEventSubscribeResult.Success;
         }
     }
 

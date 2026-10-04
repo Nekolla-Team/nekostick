@@ -487,25 +487,33 @@ public sealed class HostConfigurationSnapshotHolder : IHostConfigurationSnapshot
 /// <summary>Validates the complete DTO graph before it is published to the runtime.</summary>
 internal static class HostConfigurationSnapshotValidator
 {
-    internal static bool IsComplete(HostConfigurationSnapshot snapshot, ILogger? logger = null)
+    internal static bool IsComplete(HostConfigurationSnapshot snapshot, ILogger? logger = null) =>
+        IsComplete(snapshot, out _, logger);
+
+    internal static bool IsComplete(
+        HostConfigurationSnapshot snapshot,
+        out string? failureMessage,
+        ILogger? logger = null)
     {
+        failureMessage = null;
+
         try
         {
             ArgumentNullException.ThrowIfNull(snapshot);
             if (snapshot.Version < 0)
             {
-                return Reject(logger, "SnapshotVersionNegative", snapshot.Version.ToString(CultureInfo.InvariantCulture));
+                return Reject(logger, "SnapshotVersionNegative", out failureMessage, snapshot.Version.ToString(CultureInfo.InvariantCulture));
             }
 
             if (snapshot.GlobalSettings is null)
             {
-                return Reject(logger, "GlobalSettingsMissing");
+                return Reject(logger, "GlobalSettingsMissing", out failureMessage);
             }
 
             if (snapshot.GlobalSettings.TrustedProxyCidrs.Any(value =>
                     value is null || string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)))
             {
-                return Reject(logger, "TrustedProxyCidrs");
+                return Reject(logger, "TrustedProxyCidrs", out failureMessage);
             }
 
             if (snapshot.GlobalSettings.ConfigurationPollInterval < TimeSpan.FromSeconds(1) ||
@@ -514,31 +522,32 @@ internal static class HostConfigurationSnapshotValidator
                 return Reject(
                     logger,
                     "ConfigurationPollInterval",
+                    out failureMessage,
                     snapshot.GlobalSettings.ConfigurationPollInterval.ToString());
             }
 
             if (!AreUniqueIds(snapshot.Services.Select(value => value?.Id), out var duplicateServiceId))
             {
-                return Reject(logger, "DuplicateServiceId", duplicateServiceId?.ToString());
+                return Reject(logger, "DuplicateServiceId", out failureMessage, duplicateServiceId?.ToString());
             }
 
             if (!AreUniqueIds(snapshot.Routes.Select(value => value?.Id), out var duplicateRouteId))
             {
-                return Reject(logger, "DuplicateRouteId", duplicateRouteId?.ToString());
+                return Reject(logger, "DuplicateRouteId", out failureMessage, duplicateRouteId?.ToString());
             }
 
             if (!AreUniqueStrings(
                     snapshot.ExtensionRecords.Select(value => value?.ExtensionId),
                     out var duplicateExtensionRecordId))
             {
-                return Reject(logger, "DuplicateExtensionRecordId", duplicateExtensionRecordId);
+                return Reject(logger, "DuplicateExtensionRecordId", out failureMessage, duplicateExtensionRecordId);
             }
 
             if (!AreUniqueStrings(
                     snapshot.ExtensionSettings.Select(value => value?.ExtensionId),
                     out var duplicateExtensionSettingsId))
             {
-                return Reject(logger, "DuplicateExtensionSettingsId", duplicateExtensionSettingsId);
+                return Reject(logger, "DuplicateExtensionSettingsId", out failureMessage, duplicateExtensionSettingsId);
             }
 
             var serviceIds = snapshot.Services.Select(value => value.Id).ToHashSet();
@@ -550,22 +559,22 @@ internal static class HostConfigurationSnapshotValidator
             {
                 if (route is null)
                 {
-                    return Reject(logger, "RouteMissing");
+                    return Reject(logger, "RouteMissing", out failureMessage);
                 }
 
                 if (!IsValidJsonObject(route.MetadataJson, logger))
                 {
-                    return Reject(logger, "RouteMetadataInvalid", route.Id.ToString());
+                    return Reject(logger, "RouteMetadataInvalid", out failureMessage, route.Id.ToString());
                 }
 
                 if (!AreValidRewrites(route.RequestHeaderRewrites))
                 {
-                    return Reject(logger, "RouteRequestHeaderRewritesInvalid", route.Id.ToString());
+                    return Reject(logger, "RouteRequestHeaderRewritesInvalid", out failureMessage, route.Id.ToString());
                 }
 
                 if (!AreValidRewrites(route.ResponseHeaderRewrites))
                 {
-                    return Reject(logger, "RouteResponseHeaderRewritesInvalid", route.Id.ToString());
+                    return Reject(logger, "RouteResponseHeaderRewritesInvalid", out failureMessage, route.Id.ToString());
                 }
 
                 switch (route.Target)
@@ -576,6 +585,7 @@ internal static class HostConfigurationSnapshotValidator
                             return Reject(
                                 logger,
                                 "RouteTargetServiceMissing",
+                                out failureMessage,
                                 microservice.ServiceId.ToString());
                         }
 
@@ -586,9 +596,9 @@ internal static class HostConfigurationSnapshotValidator
                     case StaticFileRouteTargetConfiguration:
                         break;
                     case null:
-                        return Reject(logger, "RouteTargetMissing", route.Id.ToString());
+                        return Reject(logger, "RouteTargetMissing", out failureMessage, route.Id.ToString());
                     default:
-                        return Reject(logger, "RouteTargetUnknown", route.Id.ToString());
+                        return Reject(logger, "RouteTargetUnknown", out failureMessage, route.Id.ToString());
                 }
             }
 
@@ -596,22 +606,22 @@ internal static class HostConfigurationSnapshotValidator
             {
                 if (service is null)
                 {
-                    return Reject(logger, "ServiceMissing");
+                    return Reject(logger, "ServiceMissing", out failureMessage);
                 }
 
                 if (!IsValidJsonArray(service.ArgumentList, logger))
                 {
-                    return Reject(logger, "ServiceArgumentListInvalid", service.Id.ToString());
+                    return Reject(logger, "ServiceArgumentListInvalid", out failureMessage, service.Id.ToString());
                 }
 
                 if (!IsValidJsonObject(service.Environment, logger))
                 {
-                    return Reject(logger, "ServiceEnvironmentInvalid", service.Id.ToString());
+                    return Reject(logger, "ServiceEnvironmentInvalid", out failureMessage, service.Id.ToString());
                 }
 
                 if (service.ArgumentList.Any(value => value is null || value.Any(char.IsControl)))
                 {
-                    return Reject(logger, "ServiceArgumentInvalid", service.Id.ToString());
+                    return Reject(logger, "ServiceArgumentInvalid", out failureMessage, service.Id.ToString());
                 }
 
                 if (service.Environment.Any(value =>
@@ -620,7 +630,7 @@ internal static class HostConfigurationSnapshotValidator
                         value.Value is null ||
                         value.Value.Any(char.IsControl)))
                 {
-                    return Reject(logger, "ServiceEnvironmentEntryInvalid", service.Id.ToString());
+                    return Reject(logger, "ServiceEnvironmentEntryInvalid", out failureMessage, service.Id.ToString());
                 }
             }
 
@@ -628,17 +638,17 @@ internal static class HostConfigurationSnapshotValidator
             {
                 if (settings is null)
                 {
-                    return Reject(logger, "ExtensionSettingsMissing");
+                    return Reject(logger, "ExtensionSettingsMissing", out failureMessage);
                 }
 
                 if (!extensionIds.Contains(settings.ExtensionId))
                 {
-                    return Reject(logger, "ExtensionSettingsUnknownExtension", settings.ExtensionId);
+                    return Reject(logger, "ExtensionSettingsUnknownExtension", out failureMessage, settings.ExtensionId);
                 }
 
                 if (!IsValidJson(settings.SettingsJson, logger))
                 {
-                    return Reject(logger, "ExtensionSettingsJsonInvalid", settings.ExtensionId);
+                    return Reject(logger, "ExtensionSettingsJsonInvalid", out failureMessage, settings.ExtensionId);
                 }
             }
 
@@ -650,16 +660,50 @@ internal static class HostConfigurationSnapshotValidator
                 logger ?? HostLoggerDefaults.Logger,
                 exception,
                 nameof(IsComplete));
+            failureMessage = $"The host configuration snapshot could not be validated because its data caused {exception.GetType().Name}.";
             return false;
         }
     }
 
-    private static bool Reject(ILogger? logger, string check, string? detail = null)
+    private static bool Reject(
+        ILogger? logger,
+        string check,
+        out string? failureMessage,
+        string? detail = null)
     {
         HostLogMessages.ConfigurationSnapshotIncomplete(
             logger ?? HostLoggerDefaults.Logger,
             check,
             detail);
+
+        var actualValue = JsonSerializer.Serialize(detail);
+        failureMessage = check switch
+        {
+            "SnapshotVersionNegative" => $"Snapshot Version value {actualValue} must be non-negative.",
+            "GlobalSettingsMissing" => "The GlobalSettings field is required in a complete host configuration snapshot.",
+            "TrustedProxyCidrs" => "GlobalSettings.TrustedProxyCidrs contains a null, blank, or control-character entry; each CIDR must be non-empty and control-free.",
+            "ConfigurationPollInterval" => $"GlobalSettings.ConfigurationPollInterval is {actualValue}; it must be at least one second and a whole number of seconds.",
+            "DuplicateServiceId" => $"The Services collection contains a missing or duplicate service ID ({actualValue}).",
+            "DuplicateRouteId" => $"The Routes collection contains a missing or duplicate route ID ({actualValue}).",
+            "DuplicateExtensionRecordId" => $"The ExtensionRecords collection contains a missing or duplicate extension ID ({actualValue}).",
+            "DuplicateExtensionSettingsId" => $"The ExtensionSettings collection contains a missing or duplicate extension ID ({actualValue}).",
+            "RouteMissing" => "The Routes collection contains a null route.",
+            "RouteMetadataInvalid" => $"Route {actualValue} has invalid MetadataJson; the field must contain a JSON object.",
+            "RouteRequestHeaderRewritesInvalid" => $"Route {actualValue} has invalid RequestHeaderRewrites values.",
+            "RouteResponseHeaderRewritesInvalid" => $"Route {actualValue} has invalid ResponseHeaderRewrites values.",
+            "RouteTargetServiceMissing" => $"Route target service ID {actualValue} was not found in the Services collection.",
+            "RouteTargetMissing" => $"Route {actualValue} is missing its required target.",
+            "RouteTargetUnknown" => $"Route {actualValue} has an unsupported target configuration type.",
+            "ServiceMissing" => "The Services collection contains a null service.",
+            "ServiceArgumentListInvalid" => $"Service {actualValue} has an ArgumentList field that is not a JSON array.",
+            "ServiceEnvironmentInvalid" => $"Service {actualValue} has an Environment field that is not a JSON object.",
+            "ServiceArgumentInvalid" => $"Service {actualValue} has an ArgumentList item that is null or contains a control character.",
+            "ServiceEnvironmentEntryInvalid" => $"Service {actualValue} has an Environment key or value that is null, blank, or contains a control character.",
+            "ExtensionSettingsMissing" => "The ExtensionSettings collection contains a null settings entry.",
+            "ExtensionSettingsUnknownExtension" => $"Extension settings for ID {actualValue} reference no ExtensionRecords entry.",
+            "ExtensionSettingsJsonInvalid" => $"Extension settings for ID {actualValue} contain invalid SettingsJson.",
+            _ => $"The host configuration snapshot failed completeness validation rule '{check}' for value {actualValue}."
+        };
         return false;
     }
 

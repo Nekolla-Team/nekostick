@@ -26,26 +26,22 @@ internal class ExtensionContractProxy<TContract> : DispatchProxy
 
     private volatile Binding _binding = null!;
     private Func<(ExtensionInstance Provider, object Target, ExtensionDispatchTurnstile Turnstile)?> _resolver = null!;
-    private string _providerId = string.Empty;
 
     /// <summary>Wraps one resolved contract object behind the provider's turnstile.</summary>
     /// <param name="target">The provider's contract implementation.</param>
     /// <param name="turnstile">The provider extension's dispatch turnstile.</param>
-    /// <param name="providerId">The provider extension identifier used in failure messages.</param>
     /// <param name="provider">The provider instance the target belongs to.</param>
     /// <param name="resolver">Re-resolves the import after a provider replacement; returns null when no provider is available.</param>
     /// <returns>The isolated contract reference handed to the consumer.</returns>
     internal static TContract Wrap(
         TContract target,
         ExtensionDispatchTurnstile turnstile,
-        string providerId,
         ExtensionInstance provider,
         Func<(ExtensionInstance Provider, object Target, ExtensionDispatchTurnstile Turnstile)?> resolver)
     {
         var proxy = Create<TContract, ExtensionContractProxy<TContract>>();
         var self = (ExtensionContractProxy<TContract>)(object)proxy;
         self._binding = new Binding(target, provider, turnstile);
-        self._providerId = providerId;
         self._resolver = resolver;
         return proxy;
     }
@@ -111,7 +107,7 @@ internal class ExtensionContractProxy<TContract> : DispatchProxy
 
             if (attempt >= 2 || !TryRebind(ref binding))
             {
-                throw Unavailable();
+                throw Unavailable(binding);
             }
         }
     }
@@ -131,7 +127,7 @@ internal class ExtensionContractProxy<TContract> : DispatchProxy
 
             if (attempt >= 2 || !TryRebind(ref binding))
             {
-                throw Unavailable();
+                throw Unavailable(binding);
             }
         }
     }
@@ -153,12 +149,11 @@ internal class ExtensionContractProxy<TContract> : DispatchProxy
         // concurrent callers observe one consistent binding.
         binding = new Binding((TContract)resolved.Target, resolved.Provider, resolved.Turnstile);
         _binding = binding;
-        _providerId = resolved.Provider.Manifest.Id;
         return true;
     }
 
-    private InvalidOperationException Unavailable() =>
-        new($"The contract provider '{_providerId}' is unavailable; it may be reloading or stopped.");
+    private static InvalidOperationException Unavailable(Binding binding) =>
+        new(binding.Turnstile.GetEntryFailureDetail(binding.Provider).Message);
 
     private static object? InvokeTarget(Binding binding, MethodInfo targetMethod, object?[]? args)
     {
@@ -241,7 +236,6 @@ internal static class ExtensionContractProxyFactory
     /// <param name="contractType">The shared contract interface type.</param>
     /// <param name="target">The provider's contract implementation.</param>
     /// <param name="turnstile">The provider extension's dispatch turnstile.</param>
-    /// <param name="providerId">The provider extension identifier used in failure messages.</param>
     /// <param name="provider">The provider instance the target belongs to.</param>
     /// <param name="resolver">Re-resolves the import after a provider replacement; returns null when no provider is available.</param>
     /// <returns>The isolated contract reference handed to the consumer.</returns>
@@ -249,11 +243,10 @@ internal static class ExtensionContractProxyFactory
         Type contractType,
         object target,
         ExtensionDispatchTurnstile turnstile,
-        string providerId,
         ExtensionInstance provider,
         Func<(ExtensionInstance Provider, object Target, ExtensionDispatchTurnstile Turnstile)?> resolver) =>
         s_closed.GetOrAdd(contractType, static type => typeof(ExtensionContractProxy<>)
                 .MakeGenericType(type)
                 .GetMethod("Wrap", BindingFlags.Static | BindingFlags.NonPublic)!)
-            .Invoke(null, [target, turnstile, providerId, provider, resolver])!;
+            .Invoke(null, [target, turnstile, provider, resolver])!;
 }

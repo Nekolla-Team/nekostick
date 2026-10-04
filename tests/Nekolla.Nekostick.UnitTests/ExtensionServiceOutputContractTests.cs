@@ -10,35 +10,59 @@ public sealed class ExtensionServiceOutputContractTests
 
 
     [Fact]
-    public void OutputStreamResultRequiresPayloadExactlyWhenSucceeded()
+    public void OutputStreamResultRequiresPayloadAndFailureDetailInvariants()
     {
         using var stream = new MemoryStream();
+        var failureDetail = new ExtensionErrorDetail("The configured service process is not running.");
 
         var opened = new ExtensionServiceOutputStreamResult(
             true,
             ExtensionServiceOutputCode.Opened,
             ServiceId,
-            stream);
+            stream,
+            detail: null);
         var failed = new ExtensionServiceOutputStreamResult(
             false,
             ExtensionServiceOutputCode.NotRunning,
             ServiceId,
-            null);
+            null,
+            failureDetail);
 
+        Assert.True(opened.Succeeded);
         Assert.Same(stream, opened.Stream);
+        Assert.Null(opened.Detail);
+        Assert.False(failed.Succeeded);
         Assert.Null(failed.Stream);
+        Assert.Same(failureDetail, failed.Detail);
         Assert.Throws<ArgumentNullException>(() =>
             new ExtensionServiceOutputStreamResult(
                 true,
                 ExtensionServiceOutputCode.Opened,
                 ServiceId,
-                null));
+                null,
+                detail: null));
         Assert.Throws<ArgumentException>(() =>
             new ExtensionServiceOutputStreamResult(
                 false,
                 ExtensionServiceOutputCode.Failed,
                 ServiceId,
-                new MemoryStream()));
+                stream,
+                new ExtensionErrorDetail("A failed result cannot include a stream.")));
+        Assert.Throws<ArgumentNullException>(() =>
+            new ExtensionServiceOutputStreamResult(
+                false,
+                ExtensionServiceOutputCode.NotRunning,
+                ServiceId,
+                null,
+                detail: null));
+        Assert.Throws<ArgumentException>(() =>
+            new ExtensionServiceOutputStreamResult(
+                true,
+                ExtensionServiceOutputCode.Opened,
+                ServiceId,
+                stream,
+                new ExtensionErrorDetail("A successful result cannot include error detail.")));
+
     }
 
 

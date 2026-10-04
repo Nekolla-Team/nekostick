@@ -51,7 +51,10 @@ public sealed partial class ExtensionRuntimeTests
             Assert.Contains("configRead=Unsupported", body, StringComparison.Ordinal);
             Assert.Contains("fullRead=Unsupported", body, StringComparison.Ordinal);
             Assert.Contains("routeRead=Unsupported", body, StringComparison.Ordinal);
-            Assert.Contains("serviceRead=Unsupported", body, StringComparison.Ordinal);
+            Assert.Contains(
+                "serviceRead=Unsupported:The extension host does not support extension service reads.",
+                body,
+                StringComparison.Ordinal);
             Assert.Contains("endpoints=0", body, StringComparison.Ordinal);
             Assert.Contains("api14=bridge14;serviceOutputOpen=Unsupported;serviceOutputSubscribe=Unsupported", body, StringComparison.Ordinal);
             Assert.Contains("start-lifecycle=reload=Unsupported;unload=Unsupported", body, StringComparison.Ordinal);
@@ -191,7 +194,8 @@ public sealed partial class ExtensionRuntimeTests
                 true,
                 ExtensionServiceOutputCode.Opened,
                 serviceId,
-                new MemoryStream()));
+                new MemoryStream(),
+                detail: null));
         public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
             Guid serviceId,
             IExtensionServiceLogSink sink,
@@ -201,7 +205,8 @@ public sealed partial class ExtensionRuntimeTests
                 true,
                 ExtensionServiceLogCode.Subscribed,
                 serviceId,
-                new RecordingSubscription()));
+                new RecordingSubscription(),
+                detail: null));
     }
 
 
@@ -224,7 +229,9 @@ public sealed partial class ExtensionRuntimeTests
             Interlocked.Increment(ref ReadCount);
             return ValueTask.FromResult(
                 ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        "The full configuration snapshot was not found by the version-gate test.")));
         }
 
         public ValueTask<ConfigurationWriteResult> ReplaceAsync(
@@ -235,7 +242,9 @@ public sealed partial class ExtensionRuntimeTests
             Interlocked.Increment(ref WriteCount);
             return ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        "The full configuration snapshot was not found by the version-gate test.")));
         }
     }
 }

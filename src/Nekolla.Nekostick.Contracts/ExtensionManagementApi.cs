@@ -93,7 +93,9 @@ public sealed record ExtensionScanSkip
     /// <summary>Creates a scan skip descriptor.</summary>
     /// <param name="directoryName">The leaf name of the skipped directory.</param>
     /// <param name="failureCode">The stable failure category name (a member name of the extension failure code enum).</param>
-    public ExtensionScanSkip(string directoryName, string failureCode)
+    /// <param name="detail">The required precise cause or additional context explaining why the directory was skipped.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="detail" /> is <see langword="null" />.</exception>
+    public ExtensionScanSkip(string directoryName, string failureCode, ExtensionErrorDetail detail)
     {
         DirectoryName = string.IsNullOrWhiteSpace(directoryName)
             ? throw new ArgumentException("A directory name is required.", nameof(directoryName))
@@ -101,6 +103,7 @@ public sealed record ExtensionScanSkip
         FailureCode = string.IsNullOrWhiteSpace(failureCode)
             ? throw new ArgumentException("A failure code is required.", nameof(failureCode))
             : failureCode;
+        Detail = detail ?? throw new ArgumentNullException(nameof(detail));
     }
 
     /// <summary>Gets the leaf name of the skipped directory.</summary>
@@ -108,6 +111,9 @@ public sealed record ExtensionScanSkip
 
     /// <summary>Gets the stable failure category name (a member name of the extension failure code enum).</summary>
     public string FailureCode { get; }
+
+    /// <summary>Gets the required precise cause or additional context explaining why the directory was skipped.</summary>
+    public ExtensionErrorDetail Detail { get; }
 }
 
 /// <summary>Summarizes extension records discovered during a refresh.</summary>
@@ -201,8 +207,8 @@ public interface IExtensionManagementApi
     /// publication failure is not reported to the caller.
     /// </remarks>
     /// <param name="extensionId">The stable extension identifier.</param>
-    /// <returns><see langword="true" /> when the reload was accepted for scheduling; otherwise <see langword="false" /> (invalid identifier, unsupported capability, or writes disallowed).</returns>
-    bool ReloadSoon(string extensionId);
+    /// <returns>The cached success singleton when the reload is accepted for scheduling, or a failure subtype carrying InvalidArgument, Unsupported, or WritesDisallowed and required precise detail.</returns>
+    ExtensionReloadScheduleResult ReloadSoon(string extensionId);
 
     /// <summary>Deletes an extension record and its owned configuration when the extension is absent from disk.</summary>
     /// <param name="extensionId">The stable extension identifier.</param>

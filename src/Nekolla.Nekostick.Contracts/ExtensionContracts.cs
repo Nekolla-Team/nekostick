@@ -161,6 +161,7 @@ public sealed record ExtensionHostInfoSnapshot
     /// <param name="lastSnapshotState">The most recent snapshot acceptance or rejection state.</param>
     /// <param name="lastSnapshotStateAt">The UTC time of the most recent snapshot state transition, when known.</param>
     /// <param name="readiness">The safe host readiness state.</param>
+    /// <param name="unavailableDetail">The optional detail describing why the snapshot is unavailable.</param>
     public ExtensionHostInfoSnapshot(
         string? nodeId,
         bool readOnly,
@@ -172,7 +173,8 @@ public sealed record ExtensionHostInfoSnapshot
         long? publishedConfigurationVersion,
         ExtensionHostSnapshotState lastSnapshotState,
         DateTimeOffset? lastSnapshotStateAt,
-        ExtensionHostReadinessState readiness)
+        ExtensionHostReadinessState readiness,
+        ExtensionErrorDetail? unavailableDetail = null)
     {
         if (nodeId is { Length: > 128 })
         {
@@ -195,6 +197,7 @@ public sealed record ExtensionHostInfoSnapshot
         LastSnapshotState = lastSnapshotState;
         LastSnapshotStateAt = lastSnapshotStateAt?.ToUniversalTime();
         Readiness = readiness;
+        UnavailableDetail = unavailableDetail;
     }
 
     /// <summary>Gets a safe unavailable host information snapshot.</summary>
@@ -210,6 +213,29 @@ public sealed record ExtensionHostInfoSnapshot
         lastSnapshotState: ExtensionHostSnapshotState.Unknown,
         lastSnapshotStateAt: null,
         readiness: ExtensionHostReadinessState.Unknown);
+
+    /// <summary>Creates a safe unavailable host information snapshot with a detail describing the unavailability.</summary>
+    /// <param name="detail">The detail describing why the snapshot is unavailable.</param>
+    /// <returns>A safe unavailable host information snapshot that carries the supplied detail.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="detail" /> is <see langword="null" />.</exception>
+    public static ExtensionHostInfoSnapshot UnavailableWithDetail(ExtensionErrorDetail detail)
+    {
+        ArgumentNullException.ThrowIfNull(detail);
+
+        return new ExtensionHostInfoSnapshot(
+            nodeId: null,
+            readOnly: false,
+            extensionsSkipped: false,
+            supervisorDisabled: false,
+            databaseAvailable: false,
+            snapshotAvailable: false,
+            configurationValid: false,
+            publishedConfigurationVersion: null,
+            lastSnapshotState: ExtensionHostSnapshotState.Unknown,
+            lastSnapshotStateAt: null,
+            readiness: ExtensionHostReadinessState.Unknown,
+            unavailableDetail: detail);
+    }
 
     /// <summary>Gets the stable node identifier, when available.</summary>
     public string? NodeId { get; }
@@ -241,6 +267,12 @@ public sealed record ExtensionHostInfoSnapshot
     /// <summary>Gets the UTC time of the most recent snapshot state transition, when known.</summary>
     public DateTimeOffset? LastSnapshotStateAt { get; }
 
+    /// <summary>
+    /// Gets the detail associated with an unavailable snapshot, or <see langword="null" /> for the cached
+    /// parameterless <see cref="Unavailable" /> instance.
+    /// </summary>
+    public ExtensionErrorDetail? UnavailableDetail { get; }
+
     /// <summary>Gets the safe host readiness state.</summary>
     /// <remarks>
     /// Lifecycle callbacks (for example <c>StartAsync</c>) run inside a publication: readiness is then
@@ -249,7 +281,8 @@ public sealed record ExtensionHostInfoSnapshot
     /// value as observational during lifecycle callbacks; do not gate the extension's main work on it there.
     /// </remarks>
     public ExtensionHostReadinessState Readiness { get; }
-}
+ }
+
 
 /// <summary>Contains one extension-owned immutable JSON settings document.</summary>
 public sealed record ExtensionSettingsConfiguration

@@ -38,11 +38,19 @@ internal static class HostCoreEventPublisher
             return;
         }
 
+        int? payloadLength = null;
         try
         {
             var payloadJson = JsonSerializer.Serialize(payload);
+            payloadLength = payloadJson.Length;
             if (payloadJson.Length > MaximumPayloadLength)
             {
+                HostLogMessages.CoreEventPayloadDropped(
+                    logger ?? HostLoggerDefaults.Logger,
+                    kind,
+                    payloadLength.Value,
+                    MaximumPayloadLength,
+                    targetExtensionId ?? "<broadcast>");
                 return;
             }
 
@@ -61,7 +69,9 @@ internal static class HostCoreEventPublisher
             HostLogMessages.CoreEventDeliveryFailed(
                 logger ?? HostLoggerDefaults.Logger,
                 exception,
-                kind);
+                kind,
+                payloadLength,
+                targetExtensionId ?? "<broadcast>");
             // Core-event delivery is best effort and must never change the Host transition outcome.
         }
     }

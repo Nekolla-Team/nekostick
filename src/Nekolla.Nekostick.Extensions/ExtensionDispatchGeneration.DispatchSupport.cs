@@ -63,7 +63,7 @@ internal sealed class ExtensionRouteRegistrationSet : IExtensionRouteEvents
 {
     private readonly object _gate = new();
     private readonly ImmutableHashSet<Guid> _ownedRoutes;
-    private readonly Func<Func<ExtensionEvent, CancellationToken, ValueTask>, bool>? _subscribeToQueue;
+    private readonly Func<Func<ExtensionEvent, CancellationToken, ValueTask>, ExtensionEventSubscribeResult>? _subscribeToQueue;
     private readonly List<ExtensionRouteSubscriptionRegistration> _subscriptions = new();
     private readonly List<ExtensionRouteHookRegistration> _hooks = new();
     private long _nextSequence;
@@ -72,7 +72,7 @@ internal sealed class ExtensionRouteRegistrationSet : IExtensionRouteEvents
     internal ExtensionRouteRegistrationSet(
         string extensionId,
         ImmutableArray<Guid> ownedRoutes,
-        Func<Func<ExtensionEvent, CancellationToken, ValueTask>, bool>? subscribeToQueue = null)
+        Func<Func<ExtensionEvent, CancellationToken, ValueTask>, ExtensionEventSubscribeResult>? subscribeToQueue = null)
     {
         if (string.IsNullOrWhiteSpace(extensionId))
         {
@@ -115,53 +115,87 @@ internal sealed class ExtensionRouteRegistrationSet : IExtensionRouteEvents
         }
     }
 
-    public bool TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback)
+    public ExtensionRouteRegistrationResult TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback)
     {
         if (callback is null)
         {
-            return false;
+            return ExtensionRouteRegistrationResult.Failure(
+                ExtensionRouteRegistrationFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("The route event subscription callback is null."));
         }
 
         lock (_gate)
         {
-            if (_retired || _subscriptions.Count >= ExtensionRouteHookLimits.MaximumSubscriptionRegistrations)
+            if (_retired)
             {
-                return false;
+                return ExtensionRouteRegistrationResult.Failure(
+                    ExtensionRouteRegistrationFailureCode.Unavailable,
+                    new ExtensionErrorDetail("The route registration generation has been retired."));
             }
 
-            if (_subscribeToQueue is not null && !_subscribeToQueue(callback))
+            if (_subscriptions.Count >= ExtensionRouteHookLimits.MaximumSubscriptionRegistrations)
             {
-                return false;
+                return ExtensionRouteRegistrationResult.Failure(
+                    ExtensionRouteRegistrationFailureCode.LimitReached,
+                    new ExtensionErrorDetail(
+                        $"The route subscription limit of {ExtensionRouteHookLimits.MaximumSubscriptionRegistrations} registrations has been reached."));
+            }
+
+            if (_subscribeToQueue is not null &&
+                _subscribeToQueue(callback) is ExtensionEventSubscribeFailureResult failure)
+            {
+                return ExtensionRouteRegistrationResult.Failure(
+                    ExtensionRouteRegistrationFailureCode.Unavailable,
+                    failure.Detail);
             }
 
             _subscriptions.Add(new ExtensionRouteSubscriptionRegistration(
                 NextSequenceLocked(),
                 callback));
-            return true;
+            return ExtensionRouteRegistrationResult.Success;
         }
     }
 
-    public bool TryRegisterHook(
+    public ExtensionRouteRegistrationResult TryRegisterHook(
         ExtensionRouteEventStage stage,
         Func<ExtensionRouteHookContext, CancellationToken, ValueTask<ExtensionRouteHookResult>> callback)
     {
-        if (stage is not (ExtensionRouteEventStage.Trigger or ExtensionRouteEventStage.Return) || callback is null)
+        if (stage is not (ExtensionRouteEventStage.Trigger or ExtensionRouteEventStage.Return))
         {
-            return false;
+            return ExtensionRouteRegistrationResult.Failure(
+                ExtensionRouteRegistrationFailureCode.InvalidStage,
+                new ExtensionErrorDetail($"Route hook stage '{stage}' is not supported."));
+        }
+
+        if (callback is null)
+        {
+            return ExtensionRouteRegistrationResult.Failure(
+                ExtensionRouteRegistrationFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("The route hook callback is null."));
         }
 
         lock (_gate)
         {
-            if (_retired || _hooks.Count >= ExtensionRouteHookLimits.MaximumHookRegistrations)
+            if (_retired)
             {
-                return false;
+                return ExtensionRouteRegistrationResult.Failure(
+                    ExtensionRouteRegistrationFailureCode.Unavailable,
+                    new ExtensionErrorDetail("The route registration generation has been retired."));
+            }
+
+            if (_hooks.Count >= ExtensionRouteHookLimits.MaximumHookRegistrations)
+            {
+                return ExtensionRouteRegistrationResult.Failure(
+                    ExtensionRouteRegistrationFailureCode.LimitReached,
+                    new ExtensionErrorDetail(
+                        $"The route hook limit of {ExtensionRouteHookLimits.MaximumHookRegistrations} registrations has been reached."));
             }
 
             _hooks.Add(new ExtensionRouteHookRegistration(
                 stage,
                 NextSequenceLocked(),
                 callback));
-            return true;
+            return ExtensionRouteRegistrationResult.Success;
         }
     }
 

@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Host;
 using Xunit;
 
@@ -40,5 +42,42 @@ public sealed class HostServiceEndpointLeaseTests
             TestContext.Current.CancellationToken);
 
         Assert.False(result.IsAvailable);
+    }
+
+    [Fact]
+    public async Task ExtensionEndpointResolutionUsesNotFoundForMissingAndExpiredLeases()
+    {
+        const string extensionId = "fixture.extension";
+        var expiredLease = new HostServiceEndpointLease(
+            ServiceId,
+            23456,
+            DateTimeOffset.UtcNow.AddSeconds(-1),
+            extensionId);
+        var accessor = new SnapshotAccessor(
+            ImmutableDictionary<Guid, HostServiceEndpointLease>.Empty.Add(ServiceId, expiredLease));
+        var facade = new ExtensionEndpointFacade(extensionId, accessor);
+        var missingServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000003");
+
+        var missing = await facade.ResolveAsync(
+            missingServiceId,
+            TestContext.Current.CancellationToken);
+        var expired = await facade.ResolveAsync(
+            ServiceId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Same(ExtensionEndpointResolutionResult.NotFound, missing);
+        Assert.Same(ExtensionEndpointResolutionResult.NotFound, expired);
+        Assert.False(missing.Succeeded);
+        var failure = Assert.IsType<ExtensionEndpointResolutionFailureResult>(expired);
+        Assert.Equal(ExtensionEndpointResolutionFailureCode.NotFound, failure.Code);
+        Assert.Equal("No active endpoint lease was found for the service.", failure.Detail.Message);
+    }
+
+    private sealed class SnapshotAccessor : IHostServiceEndpointSnapshotAccessor
+    {
+        internal SnapshotAccessor(ImmutableDictionary<Guid, HostServiceEndpointLease> current) =>
+            Current = current;
+
+        public ImmutableDictionary<Guid, HostServiceEndpointLease> Current { get; }
     }
 }

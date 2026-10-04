@@ -1,3 +1,5 @@
+using Nekolla.Nekostick.Contracts;
+
 namespace Nekolla.Nekostick.Extensions;
 
 /// <summary>Coordinates dispatch entry for one extension identifier across instance replacements.</summary>
@@ -20,6 +22,29 @@ internal sealed class ExtensionDispatchTurnstile
 
     private static TaskCompletionSource NewCompletionSource() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    internal ExtensionErrorDetail GetEntryFailureDetail(ExtensionInstance target)
+    {
+        ExtensionInstance? current;
+        bool suspended;
+        lock (_gate)
+        {
+            current = _current;
+            suspended = _suspended;
+        }
+
+        var currentGenerationState = current?.GetStatus().State.ToString() ?? "unavailable";
+        var targetState = target.GetStatus().State.ToString();
+        return new ExtensionErrorDetail(
+            $"Extension '{target.Manifest.Id}' could not enter dispatch; turnstile state is '{(suspended ? "suspended" : "open")}', current generation state is '{currentGenerationState}', target state is '{targetState}', and entry timeout budget is '{EntryTimeout}'.");
+    }
+
+    internal static ExtensionErrorDetail CreateEntryFailureDetail(ExtensionInstance target)
+    {
+        var generationState = target.GetStatus().State.ToString();
+        return new ExtensionErrorDetail(
+            $"Extension '{target.Manifest.Id}' could not enter dispatch; generation state is '{generationState}' and entry timeout budget is '{EntryTimeout}'.");
+    }
 
     /// <summary>Points open entries at the given instance without changing the suspension state.</summary>
     /// <param name="instance">The instance entrants dispatch to, or null when none is loaded.</param>

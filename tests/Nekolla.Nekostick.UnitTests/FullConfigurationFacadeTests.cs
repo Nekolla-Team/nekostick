@@ -181,7 +181,9 @@ public sealed class FullConfigurationFacadeTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"Extension settings for '{extensionId}' were not found.")));
 
         public ValueTask<ConfigurationWriteResult> WriteExtensionSettingsAsync(
             string extensionId,
@@ -190,6 +192,8 @@ public sealed class FullConfigurationFacadeTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Unsupported,
+                        "The test host configuration API does not support extension-settings writes.")));
     }
 }

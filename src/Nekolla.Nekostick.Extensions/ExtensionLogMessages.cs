@@ -189,6 +189,7 @@ internal static partial class ExtensionLogMessages
         Message = "Extension streaming request was cancelled. ExtensionId: {ExtensionId}. Operation: {Operation}.")]
     internal static partial void ExtensionStreamingRequestCancelled(
         ILogger logger,
+        Exception exception,
         string extensionId,
         string operation);
 
@@ -229,6 +230,7 @@ internal static partial class ExtensionLogMessages
         Message = "Extension streaming request read timed out. ExtensionId: {ExtensionId}. Operation: {Operation}.")]
     internal static partial void ExtensionStreamingReadTimedOut(
         ILogger logger,
+        Exception exception,
         string extensionId,
         string operation);
 

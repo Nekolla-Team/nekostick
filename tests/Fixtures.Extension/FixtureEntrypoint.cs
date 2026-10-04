@@ -54,16 +54,33 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
         if (options.TypedContractExchange)
         {
             const string contractId = "fixture.logger";
-            if (!context.Contracts.TryExport<IExtensionLogger>(
-                    contractId,
-                    new FixtureContractLogger()) ||
-                !context.Contracts.TryImport<IExtensionLogger>(contractId, out var imported) ||
-                imported is null)
+            var exportResult = context.Contracts.TryExport<IExtensionLogger>(
+                contractId,
+                new FixtureContractLogger());
+            if (exportResult is ExtensionContractExportFailureResult exportFailure)
             {
-                throw new InvalidOperationException("Fixture typed contract exchange failed.");
+                throw new InvalidOperationException(
+                    $"Fixture typed contract export failed with {exportFailure.Code}: {exportFailure.Detail.Message}");
             }
 
-            state.TypedContractExchangeSucceeded = true;
+            if (!ReferenceEquals(exportResult, ExtensionContractExportResult.Success))
+            {
+                throw new InvalidOperationException("Fixture typed contract export returned an unknown result type.");
+            }
+
+            switch (context.Contracts.TryImport<IExtensionLogger>(contractId))
+            {
+                case ExtensionContractImportSuccessResult<IExtensionLogger> imported:
+                    imported.Contract.Report(ExtensionLogLevel.Information, "fixture-contract-imported");
+                    state.TypedContractExchangeSucceeded = true;
+                    break;
+                case ExtensionContractImportFailureResult<IExtensionLogger> importFailure:
+                    throw new InvalidOperationException(
+                        $"Fixture typed contract import failed with {importFailure.Code}: {importFailure.Detail.Message}");
+                default:
+                    throw new InvalidOperationException(
+                        "Fixture typed contract import returned an unknown result type.");
+            }
         }
         _state = state;
         if (options.RequestLifecycleFromStart)
@@ -83,55 +100,54 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
 
         if (options.SubscribeSettingsChanged)
         {
-            if (!context.Host.Events.TrySubscribe(async (@event, token) =>
-                {
-                    if (!string.Equals(
-                            @event.Type,
-                            nameof(ExtensionCoreEventKind.ExtensionSettingsChanged),
-                            StringComparison.Ordinal))
-                    {
-                        return;
-                    }
-
-                    Interlocked.Increment(ref state.SettingsChangedEventCount);
-                    var read = await context.Host.ConfigurationApi.ReadSettingsAsync(token)
-                        .ConfigureAwait(false);
-                    state.SettingsChangedReadResult = read.IsSuccess
-                        ? $"Success:{read.Value?.ExtensionId ?? "null"}"
-                        : read.Errors.IsDefaultOrEmpty
-                            ? "Unknown"
-                            : read.Errors[0].Code.ToString();
-                    state.SettingsChangedComplete.TrySetResult(true);
-                }))
+            var subscriptionResult = context.Host.Events.TrySubscribe(async (@event, token) =>
             {
-                throw new InvalidOperationException("Fixture settings-changed subscription failed.");
-            }
+                if (!string.Equals(
+                        @event.Type,
+                        nameof(ExtensionCoreEventKind.ExtensionSettingsChanged),
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                Interlocked.Increment(ref state.SettingsChangedEventCount);
+                var read = await context.Host.ConfigurationApi.ReadSettingsAsync(token)
+                    .ConfigureAwait(false);
+                state.SettingsChangedReadResult = read.IsSuccess
+                    ? $"Success:{read.Value?.ExtensionId ?? "null"}"
+                    : read.Errors.IsDefaultOrEmpty
+                        ? "Unknown"
+                        : read.Errors[0].Code.ToString();
+                state.SettingsChangedComplete.TrySetResult(true);
+            });
+            EnsureEventSubscriptionSucceeded(subscriptionResult, "Fixture settings-changed subscription");
         }
 
-        if (options.RegisterHandler &&
-            !context.Registration.TryRegisterHandler(
-                new FixtureHandler(state, options.HandlerId)))
+        if (options.RegisterHandler)
         {
-            throw new InvalidOperationException("Fixture handler registration failed.");
+            EnsureRegistrationSucceeded(
+                context.Registration.TryRegisterHandler(new FixtureHandler(state, options.HandlerId)),
+                "Fixture handler registration");
         }
 
-        if (options.RegisterStreamingHandler &&
-            !context.Registration.TryRegisterStreamingHandler(
-                new FixtureStreamingHandler(state, options.StreamingHandlerId)))
+        if (options.RegisterStreamingHandler)
         {
-            throw new InvalidOperationException("Fixture streaming handler registration failed.");
+            EnsureRegistrationSucceeded(
+                context.Registration.TryRegisterStreamingHandler(
+                    new FixtureStreamingHandler(state, options.StreamingHandlerId)),
+                "Fixture streaming handler registration");
         }
 
-        if ((options.RegisterFallback || options.DuplicateFallback) &&
-            !context.Registration.TryRegisterFallback(new FixtureFallback(state)))
+        if (options.RegisterFallback || options.DuplicateFallback)
         {
-            throw new InvalidOperationException("Fixture fallback registration failed.");
+            EnsureRegistrationSucceeded(
+                context.Registration.TryRegisterFallback(new FixtureFallback(state)),
+                "Fixture fallback registration");
         }
 
         if (options.DuplicateHandler)
         {
-            // The runtime must reject the second distinct owner even if an entrypoint
-            // ignores the false return value from its registration surface.
+            // ignores the failure result from its registration surface.
             _ = context.Registration.TryRegisterHandler(
                 new FixtureHandler(state, options.HandlerId));
         }
@@ -145,17 +161,17 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
         if (!string.IsNullOrWhiteSpace(options.AttemptUnregisterHandlerId))
         {
             state.HandlerUnregisterResult = context.Registration.TryUnregisterHandler(
-                options.AttemptUnregisterHandlerId);
+                options.AttemptUnregisterHandlerId).Succeeded;
         }
 
         if (options.AttemptUnregisterFallback)
         {
-            state.FallbackUnregisterResult = context.Registration.TryUnregisterFallback();
+            state.FallbackUnregisterResult = context.Registration.TryUnregisterFallback().Succeeded;
         }
 
         if (options.StartTask || options.RequestLifecycleFromTask)
         {
-            _ = await context.Host.Tasks.StartAsync(
+            var startResult = await context.Host.Tasks.StartAsync(
                 options.RequestLifecycleFromTask
                     ? "fixture.lifecycle-task"
                     : "fixture.long-lived-task",
@@ -170,44 +186,42 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
 
                     await Task.Delay(Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
                 }).ConfigureAwait(false);
+            EnsureTaskStartSucceeded(startResult, "Fixture task start");
         }
 
         if (options.PublishOrderedEvents || options.PublishCoreEvents || options.RequestLifecycleFromEvent)
         {
             var expected = options.EventCount;
-            if (!context.Host.Events.TrySubscribe(async (@event, _) =>
-                {
-                    if (options.RequestLifecycleFromEvent)
-                    {
-                        state.EventLifecycleResult = await state.RequestLifecycleAsync().ConfigureAwait(false);
-                        state.CallbackComplete.TrySetResult(true);
-                    }
-
-                    if (options.PublishCoreEvents ||
-                        string.Equals(@event.Type, "fixture.ordered", StringComparison.Ordinal))
-                    {
-                        state.EventPayloads.Enqueue(@event.PayloadJson);
-                        if (state.EventPayloads.Count >= expected)
-                        {
-                            state.EventsComplete.TrySetResult(true);
-                        }
-                    }
-
-                    return;
-                }))
+            var subscriptionResult = context.Host.Events.TrySubscribe(async (@event, _) =>
             {
-                throw new InvalidOperationException("Fixture event subscription failed.");
-            }
+                if (options.RequestLifecycleFromEvent)
+                {
+                    state.EventLifecycleResult = await state.RequestLifecycleAsync().ConfigureAwait(false);
+                    state.CallbackComplete.TrySetResult(true);
+                }
+
+                if (options.PublishCoreEvents ||
+                    string.Equals(@event.Type, "fixture.ordered", StringComparison.Ordinal))
+                {
+                    state.EventPayloads.Enqueue(@event.PayloadJson);
+                    if (state.EventPayloads.Count >= expected)
+                    {
+                        state.EventsComplete.TrySetResult(true);
+                    }
+                }
+
+                return;
+            });
+            EnsureEventSubscriptionSucceeded(subscriptionResult, "Fixture event subscription");
 
             if (options.PublishOrderedEvents)
             {
                 for (var index = 0; index < expected; index++)
                 {
-                    if (!context.Host.Events.TryPublish(
-                            new ExtensionEvent("fixture.ordered", 1, $"event-{index}")))
-                    {
-                        throw new InvalidOperationException("Fixture ordered event was dropped unexpectedly.");
-                    }
+                    EnsureEventPublished(
+                        context.Host.Events.TryPublish(
+                            new ExtensionEvent("fixture.ordered", 1, $"event-{index}")),
+                        "Fixture ordered event publication");
                 }
             }
         }
@@ -216,34 +230,40 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
         {
             var callbackStarted = new TaskCompletionSource<bool>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!context.Host.Events.TrySubscribe(async (@event, token) =>
+            var subscriptionResult = context.Host.Events.TrySubscribe(async (@event, token) =>
+            {
+                if (string.Equals(@event.Type, "fixture.block", StringComparison.Ordinal))
                 {
-                    if (string.Equals(@event.Type, "fixture.block", StringComparison.Ordinal))
-                    {
-                        callbackStarted.TrySetResult(true);
-                        await Task.Delay(Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
-                    }
-                }))
-            {
-                throw new InvalidOperationException("Fixture bounded event subscription failed.");
-            }
+                    callbackStarted.TrySetResult(true);
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token).ConfigureAwait(false);
+                }
+            });
+            EnsureEventSubscriptionSucceeded(subscriptionResult, "Fixture bounded event subscription");
 
-            if (!context.Host.Events.TryPublish(new ExtensionEvent("fixture.block", 1, "block")))
-            {
-                throw new InvalidOperationException("Fixture blocking event was dropped unexpectedly.");
-            }
+            EnsureEventPublished(
+                context.Host.Events.TryPublish(new ExtensionEvent("fixture.block", 1, "block")),
+                "Fixture blocking event publication");
 
             await callbackStarted.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             for (var index = 0; index < 1024; index++)
             {
-                if (!context.Host.Events.TryPublish(
-                        new ExtensionEvent("fixture.bounded", 1, $"queued-{index}")))
-                {
-                    throw new InvalidOperationException("Fixture bounded queue filled too early.");
-                }
+                EnsureEventPublished(
+                    context.Host.Events.TryPublish(
+                        new ExtensionEvent("fixture.bounded", 1, $"queued-{index}")),
+                    "Fixture bounded event publication");
             }
 
-            _ = context.Host.Events.TryPublish(new ExtensionEvent("fixture.bounded", 1, "newest"));
+            var newestResult = context.Host.Events.TryPublish(
+                new ExtensionEvent("fixture.bounded", 1, "newest"));
+            if (newestResult is not ExtensionEventPublishFailureResult
+                { Code: ExtensionEventPublishFailureCode.QueueFull })
+            {
+                throw newestResult is ExtensionEventPublishFailureResult failure
+                    ? new InvalidOperationException(
+                        $"Fixture bounded event publication failed with {failure.Code}: {failure.Detail.Message}")
+                    : new InvalidOperationException(
+                        "Fixture bounded event was accepted when the queue was expected to be full.");
+            }
         }
 
         if (options.StartDelayMilliseconds > 0)
@@ -292,6 +312,69 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
         if (state is not null)
         {
             state.PreviousStopped = true;
+        }
+    }
+    private static void EnsureEventSubscriptionSucceeded(
+        ExtensionEventSubscribeResult result,
+        string operation)
+    {
+        if (result is ExtensionEventSubscribeFailureResult failure)
+        {
+            throw new InvalidOperationException(
+                $"{operation} failed with {failure.Code}: {failure.Detail.Message}");
+        }
+
+        if (!ReferenceEquals(result, ExtensionEventSubscribeResult.Success))
+        {
+            throw new InvalidOperationException($"{operation} returned an unknown result type.");
+        }
+    }
+
+    private static void EnsureRegistrationSucceeded(
+        ExtensionRegistrationResult result,
+        string operation)
+    {
+        if (result is ExtensionRegistrationFailureResult failure)
+        {
+            throw new InvalidOperationException(
+                $"{operation} failed with {failure.Code}: {failure.Detail.Message}");
+        }
+
+        if (!ReferenceEquals(result, ExtensionRegistrationResult.Success))
+        {
+            throw new InvalidOperationException($"{operation} returned an unknown result type.");
+        }
+    }
+
+    private static void EnsureTaskStartSucceeded(
+        ExtensionTaskStartResult result,
+        string operation)
+    {
+        if (result is ExtensionTaskStartFailureResult failure)
+        {
+            throw new InvalidOperationException(
+                $"{operation} failed with {failure.Code}: {failure.Detail.Message}");
+        }
+
+        if (!ReferenceEquals(result, ExtensionTaskStartResult.Success))
+        {
+            throw new InvalidOperationException($"{operation} returned an unknown result type.");
+        }
+    }
+
+    private static void EnsureEventPublished(
+        ExtensionEventPublishResult result,
+        string operation)
+    {
+        if (result is ExtensionEventPublishFailureResult failure)
+        {
+            throw new InvalidOperationException(
+                $"{operation} failed with {failure.Code}: {failure.Detail.Message}");
+        }
+
+        if (!ReferenceEquals(result, ExtensionEventPublishResult.Success))
+        {
+            throw new InvalidOperationException($"{operation} returned an unknown result type.");
         }
     }
 }

@@ -24,10 +24,14 @@ public enum ExtensionInvocationState
 /// <summary>Contains a framework-neutral handler dispatch result.</summary>
 public sealed class ExtensionInvocationResult
 {
-    private ExtensionInvocationResult(ExtensionInvocationState state, ExtensionHandlerResponse? response)
+    private ExtensionInvocationResult(
+        ExtensionInvocationState state,
+        ExtensionHandlerResponse? response,
+        ExtensionErrorDetail? failureDetail)
     {
         State = state;
         Response = response;
+        FailureDetail = failureDetail;
     }
 
     /// <summary>Gets the dispatch outcome.</summary>
@@ -36,19 +40,21 @@ public sealed class ExtensionInvocationResult
     /// <summary>Gets the response when the callback handled the request.</summary>
     public ExtensionHandlerResponse? Response { get; }
 
-    /// <summary>Gets a safe unavailable result.</summary>
-    public static ExtensionInvocationResult Unavailable { get; } =
-        new(ExtensionInvocationState.Unavailable, null);
+    /// <summary>Gets the precise failure cause, or <see langword="null" /> when no failure occurred.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
 
     /// <summary>Gets a safe not-handled result.</summary>
     public static ExtensionInvocationResult NotHandled { get; } =
-        new(ExtensionInvocationState.NotHandled, null);
+        new(ExtensionInvocationState.NotHandled, null, null);
+
+    internal static ExtensionInvocationResult Unavailable(ExtensionErrorDetail detail) =>
+        new(ExtensionInvocationState.Unavailable, null, detail);
 
     internal static ExtensionInvocationResult Handled(ExtensionHandlerResponse response) =>
-        new(ExtensionInvocationState.Handled, response);
+        new(ExtensionInvocationState.Handled, response, null);
 
-    internal static ExtensionInvocationResult Failed =>
-        new(ExtensionInvocationState.Failed, null);
+    internal static ExtensionInvocationResult Failed(ExtensionErrorDetail detail) =>
+        new(ExtensionInvocationState.Failed, null, detail);
 }
 
 /// <summary>Contains one safe extension runtime operation result.</summary>
@@ -57,11 +63,13 @@ public sealed class ExtensionRuntimeOperationResult
     private ExtensionRuntimeOperationResult(
         bool succeeded,
         ExtensionFailureCode failureCode,
-        ExtensionRuntimeStatus? status)
+        ExtensionRuntimeStatus? status,
+        ExtensionErrorDetail? failureDetail)
     {
         Succeeded = succeeded;
         FailureCode = failureCode;
         Status = status;
+        FailureDetail = failureDetail;
     }
 
     /// <summary>Gets whether the operation completed successfully.</summary>
@@ -73,13 +81,22 @@ public sealed class ExtensionRuntimeOperationResult
     /// <summary>Gets the resulting safe status when available.</summary>
     public ExtensionRuntimeStatus? Status { get; }
 
+    /// <summary>Gets the precise operation failure cause, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
+
     internal static ExtensionRuntimeOperationResult Success(ExtensionRuntimeStatus status) =>
-        new(true, ExtensionFailureCode.None, status);
+        new(true, ExtensionFailureCode.None, status, null);
 
     internal static ExtensionRuntimeOperationResult Failure(
         ExtensionFailureCode code,
+        ExtensionErrorDetail failureDetail,
         ExtensionRuntimeStatus? status = null) =>
-        new(false, code, status);
+        new(false, code, status, failureDetail);
+    internal static ExtensionRuntimeOperationResult Failure(
+        ExtensionFailureCode code,
+        string failureMessage,
+        ExtensionRuntimeStatus? status = null) =>
+        Failure(code, new ExtensionErrorDetail(failureMessage), status);
 }
 
 /// <summary>Exposes safe observable state for one loaded extension.</summary>
@@ -98,7 +115,8 @@ public sealed record ExtensionRuntimeStatus
         long droppedEvents,
         ExtensionFailureCode lastFailure,
         ExtensionStatusKind? reportedStatusKind = null,
-        string? reportedStatusCode = null)
+        string? reportedStatusCode = null,
+        ExtensionErrorDetail? lastFailureDetail = null)
     {
         ExtensionId = extensionId;
         Version = version;
@@ -112,6 +130,7 @@ public sealed record ExtensionRuntimeStatus
         LastFailure = lastFailure;
         ReportedStatusKind = reportedStatusKind;
         ReportedStatusCode = reportedStatusCode;
+        LastFailureDetail = lastFailureDetail;
     }
 
     /// <summary>Gets the stable extension identifier.</summary>
@@ -143,6 +162,8 @@ public sealed record ExtensionRuntimeStatus
 
     /// <summary>Gets the last safe failure category.</summary>
     public ExtensionFailureCode LastFailure { get; }
+    /// <summary>Gets the precise cause of the latest runtime failure, when available.</summary>
+    public ExtensionErrorDetail? LastFailureDetail { get; }
 
     /// <summary>Gets the latest status kind reported by the extension, or <see langword="null" /> when none was reported.</summary>
     public ExtensionStatusKind? ReportedStatusKind { get; }

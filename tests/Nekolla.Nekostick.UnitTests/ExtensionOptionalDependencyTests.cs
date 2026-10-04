@@ -254,19 +254,24 @@ public sealed class ExtensionOptionalDependencyTests
         using var selfMismatched = new ExtensionContractRegistry(
             [new ExtensionContractExport("shared.logger", new SemVersion(1, 0, 0), SharedAssembly, ContractType)],
             [new ExtensionContractImport("shared.logger", Range(">=2.0.0"), SharedAssembly, ContractType, optional: true)],
-            (_, _, _) => null);
+            static (_, _, _) => ExtensionContractProviderResolution.Failure(
+                new ExtensionErrorDetail("No compatible provider is configured for this contract range test.")));
         var logger = new TestLogger();
-        Assert.True(selfMismatched.TryExport<IExtensionLogger>("shared.logger", logger));
-        Assert.False(selfMismatched.TryImport<IExtensionLogger>("shared.logger", out var mismatched));
-        Assert.Null(mismatched);
+        Assert.Same(ExtensionContractExportResult.Success, selfMismatched.TryExport<IExtensionLogger>("shared.logger", logger));
+        var mismatchedImport = Assert.IsType<ExtensionContractImportFailureResult<IExtensionLogger>>(
+            selfMismatched.TryImport<IExtensionLogger>("shared.logger"));
+        Assert.Equal(ExtensionContractImportFailureCode.VersionMismatch, mismatchedImport.Code);
+        Assert.Contains(">=2.0.0", mismatchedImport.Detail.Message, StringComparison.Ordinal);
 
         using var selfSatisfied = new ExtensionContractRegistry(
             [new ExtensionContractExport("shared.logger", new SemVersion(1, 0, 0), SharedAssembly, ContractType)],
             [new ExtensionContractImport("shared.logger", Range(">=1.0.0"), SharedAssembly, ContractType, optional: true)],
-            (_, _, _) => null);
-        Assert.True(selfSatisfied.TryExport<IExtensionLogger>("shared.logger", logger));
-        Assert.True(selfSatisfied.TryImport<IExtensionLogger>("shared.logger", out var satisfied));
-        Assert.Same(logger, satisfied);
+            static (_, _, _) => ExtensionContractProviderResolution.Failure(
+                new ExtensionErrorDetail("No compatible provider is configured for this contract range test.")));
+        Assert.Same(ExtensionContractExportResult.Success, selfSatisfied.TryExport<IExtensionLogger>("shared.logger", logger));
+        var satisfiedImport = Assert.IsType<ExtensionContractImportSuccessResult<IExtensionLogger>>(
+            selfSatisfied.TryImport<IExtensionLogger>("shared.logger"));
+        Assert.Same(logger, satisfiedImport.Contract);
 
         SemVersionRange? observedRange = null;
         using var providerPath = new ExtensionContractRegistry(
@@ -275,10 +280,11 @@ public sealed class ExtensionOptionalDependencyTests
             (_, _, requiredRange) =>
             {
                 observedRange = requiredRange;
-                return logger;
+                return ExtensionContractProviderResolution.Success(logger);
             });
-        Assert.True(providerPath.TryImport<IExtensionLogger>("shared.logger", out var provided));
-        Assert.Same(logger, provided);
+        var providedImport = Assert.IsType<ExtensionContractImportSuccessResult<IExtensionLogger>>(
+            providerPath.TryImport<IExtensionLogger>("shared.logger"));
+        Assert.Same(logger, providedImport.Contract);
         Assert.Equal(">=2.0.0", observedRange!.Expression);
     }
 
@@ -293,10 +299,11 @@ public sealed class ExtensionOptionalDependencyTests
             extra: ",\n  \"imports\": [{\"contractId\": \"shared.logger\", \"versionRange\": \">=1.0.0\", \"assemblyIdentity\": \"" +
                 SharedAssembly + "\", \"typeIdentity\": \"" + ContractType + "\"}]"));
         var manifest = Discover(manifestDirectory);
+        var expectedLogger = new TestLogger();
         using var contracts = new ExtensionContractRegistry(
             ImmutableArray<ExtensionContractExport>.Empty,
             manifest.Imports,
-            (_, _, _) => new TestLogger());
+            (_, _, _) => ExtensionContractProviderResolution.Success(expectedLogger));
         var availableVersions = new Dictionary<string, SemVersion>(StringComparer.Ordinal)
         {
             ["present.extension"] = new(1, 4, 0),
@@ -310,23 +317,34 @@ public sealed class ExtensionOptionalDependencyTests
         Assert.False(present.IsOptional);
         Assert.Equal("^1.0.0", present.VersionRange);
         Assert.Equal("1.4.0", present.InstalledVersion);
-        Assert.True(present.TryImport<IExtensionLogger>("shared.logger", out var imported));
-        Assert.NotNull(imported);
+        var presentImport = present.TryImport<IExtensionLogger>("shared.logger");
+        var imported = Assert.IsType<ExtensionContractImportSuccessResult<IExtensionLogger>>(presentImport);
+        Assert.Same(expectedLogger, imported.Contract);
 
         var stale = api.GetDependencyContext("stale.extension");
         Assert.Equal(ExtensionDependencyState.VersionMismatch, stale.State);
         Assert.True(stale.IsOptional);
         Assert.Equal("1.0.0", stale.InstalledVersion);
-        Assert.False(stale.TryImport<IExtensionLogger>("shared.logger", out _));
+        var staleImport = Assert.IsType<ExtensionContractImportFailureResult<IExtensionLogger>>(
+            stale.TryImport<IExtensionLogger>("shared.logger"));
+        Assert.Equal(ExtensionContractImportFailureCode.DependencyUnsatisfied, staleImport.Code);
+        Assert.Contains("VersionMismatch", staleImport.Detail.Message, StringComparison.Ordinal);
+        Assert.Contains(">=2.0.0", staleImport.Detail.Message, StringComparison.Ordinal);
 
         var absent = api.GetDependencyContext("absent.extension");
         Assert.Equal(ExtensionDependencyState.NotInstalled, absent.State);
         Assert.Null(absent.InstalledVersion);
-        Assert.False(absent.TryImport<IExtensionLogger>("shared.logger", out _));
+        var absentImport = Assert.IsType<ExtensionContractImportFailureResult<IExtensionLogger>>(
+            absent.TryImport<IExtensionLogger>("shared.logger"));
+        Assert.Equal(ExtensionContractImportFailureCode.DependencyUnsatisfied, absentImport.Code);
+        Assert.Contains("NotInstalled", absentImport.Detail.Message, StringComparison.Ordinal);
 
         var undeclared = api.GetDependencyContext("other.extension");
         Assert.Equal(ExtensionDependencyState.NotDeclared, undeclared.State);
-        Assert.False(undeclared.TryImport<IExtensionLogger>("shared.logger", out _));
+        var undeclaredImport = Assert.IsType<ExtensionContractImportFailureResult<IExtensionLogger>>(
+            undeclared.TryImport<IExtensionLogger>("shared.logger"));
+        Assert.Equal(ExtensionContractImportFailureCode.DependencyUnsatisfied, undeclaredImport.Code);
+        Assert.Contains("NotDeclared", undeclaredImport.Detail.Message, StringComparison.Ordinal);
 
         Assert.ThrowsAny<ArgumentException>(() => api.GetDependencyContext(" "));
     }

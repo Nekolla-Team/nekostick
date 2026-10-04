@@ -18,6 +18,7 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
     private Action? _onFallbackUnregistered;
     private bool _fallbackUnregistered;
     private bool _registrationRejected;
+    private ExtensionErrorDetail? _registrationFailureDetail;
 
     internal bool RegistrationRejected
     {
@@ -26,6 +27,16 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
             lock (_gate)
             {
                 return _registrationRejected;
+            }
+        }
+    }
+    internal ExtensionErrorDetail? RegistrationFailureDetail
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _registrationFailureDetail;
             }
         }
     }
@@ -72,124 +83,131 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
         }
     }
 
-    public bool TryRegisterHandler(IExtensionHandler handler)
+    public ExtensionRegistrationResult TryRegisterHandler(IExtensionHandler handler)
     {
         if (handler is null)
         {
-            return false;
+            return InvalidRegistrationArgument("The handler argument is null.");
         }
 
         var handlerId = handler.HandlerId;
         if (!ExtensionIdentifierSyntax.IsValid(handlerId))
         {
-            return false;
+            return InvalidRegistrationArgument(
+                $"The handler.HandlerId value {ExtensionDiagnosticText.Value(handlerId)} is invalid; handler identifiers must be {ExtensionDiagnosticText.IdentifierSyntaxRule}.");
         }
 
         lock (_gate)
         {
             if (_unregisteredHandlers.Contains(handlerId) || _streamingHandlers.ContainsKey(handlerId))
             {
-                _registrationRejected = true;
-                return false;
+                return RegistrationConflict(
+                    $"Handler identifier '{handlerId}' is already retired or reserved by a streaming handler.",
+                    rejectStart: true);
             }
 
             if (_handlers.TryGetValue(handlerId, out var existing))
             {
-                if (ReferenceEquals(existing, handler))
-                {
-                    return true;
-                }
-
-                _registrationRejected = true;
-                return false;
+                return ReferenceEquals(existing, handler)
+                    ? ExtensionRegistrationResult.Success
+                    : RegistrationConflict(
+                        $"A different handler is already registered with identifier '{handlerId}'.",
+                        rejectStart: true);
             }
 
             _handlers = _handlers.Add(handlerId, handler);
-            return true;
+            return ExtensionRegistrationResult.Success;
         }
     }
 
-    public bool TryRegisterStreamingHandler(IExtensionStreamingHandler handler)
+    public ExtensionRegistrationResult TryRegisterStreamingHandler(IExtensionStreamingHandler handler)
     {
         if (handler is null)
         {
-            return false;
+            return InvalidRegistrationArgument("The handler argument is null for TryRegisterStreamingHandler.");
         }
 
         var handlerId = handler.HandlerId;
         if (!ExtensionIdentifierSyntax.IsValid(handlerId))
         {
-            return false;
+            return InvalidRegistrationArgument(
+                $"The handler.HandlerId value {ExtensionDiagnosticText.Value(handlerId)} is invalid; handler identifiers must be {ExtensionDiagnosticText.IdentifierSyntaxRule}.");
         }
 
         lock (_gate)
         {
             if (_unregisteredHandlers.Contains(handlerId))
             {
-                return false;
+                return RegistrationConflict(
+                    $"Handler identifier '{handlerId}' was already unregistered and cannot be reused.",
+                    rejectStart: false);
             }
 
             if (_streamingHandlers.TryGetValue(handlerId, out var existing))
             {
-                if (ReferenceEquals(existing, handler))
-                {
-                    return true;
-                }
-
-                _registrationRejected = true;
-                return false;
+                return ReferenceEquals(existing, handler)
+                    ? ExtensionRegistrationResult.Success
+                    : RegistrationConflict(
+                        $"A different streaming handler is already registered with identifier '{handlerId}'.",
+                        rejectStart: true);
             }
 
             if (_handlers.ContainsKey(handlerId))
             {
-                _registrationRejected = true;
-                return false;
+                return RegistrationConflict(
+                    $"Handler identifier '{handlerId}' is already registered by a non-streaming handler.",
+                    rejectStart: true);
             }
 
             _streamingHandlers = _streamingHandlers.Add(handlerId, handler);
-            return true;
+            return ExtensionRegistrationResult.Success;
         }
     }
 
-    public bool TryRegisterFallback(IExtensionFallback fallback)
+    public ExtensionRegistrationResult TryRegisterFallback(IExtensionFallback fallback)
     {
         if (fallback is null)
         {
-            return false;
+            return InvalidRegistrationArgument("The fallback argument is null.");
         }
 
         lock (_gate)
         {
             if (_fallbackUnregistered)
             {
-                return false;
+                return RegistrationConflict(
+                    "The fallback was already unregistered and cannot be registered again.",
+                    rejectStart: false);
             }
 
             if (_fallback is not null)
             {
-                if (ReferenceEquals(_fallback, fallback))
-                {
-                    return true;
-                }
-
-                _registrationRejected = true;
-                return false;
+                return ReferenceEquals(_fallback, fallback)
+                    ? ExtensionRegistrationResult.Success
+                    : RegistrationConflict("A different fallback handler is already registered.", rejectStart: true);
             }
 
             _fallback = fallback;
-            return true;
+            return ExtensionRegistrationResult.Success;
         }
     }
 
-    public bool TryUnregisterHandler(string handlerId)
+    public ExtensionRegistrationResult TryUnregisterHandler(string handlerId)
     {
+        if (!ExtensionIdentifierSyntax.IsValid(handlerId))
+        {
+            return InvalidRegistrationArgument(
+                $"The handlerId argument {ExtensionDiagnosticText.Value(handlerId)} is invalid; handler identifiers must be {ExtensionDiagnosticText.IdentifierSyntaxRule}.");
+        }
+
         Action<string>? callback;
         lock (_gate)
         {
-            if (string.IsNullOrWhiteSpace(handlerId) ||
-                (!_handlers.ContainsKey(handlerId) && !_streamingHandlers.ContainsKey(handlerId)))
+            if (!_handlers.ContainsKey(handlerId) && !_streamingHandlers.ContainsKey(handlerId))
             {
-                return false;
+                return ExtensionRegistrationResult.Failure(
+                    ExtensionRegistrationFailureCode.NotFound,
+                    new ExtensionErrorDetail($"No handler is registered with identifier '{handlerId}'."));
             }
 
             _handlers = _handlers.Remove(handlerId);
@@ -199,17 +217,19 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
         }
 
         callback?.Invoke(handlerId);
-        return true;
+        return ExtensionRegistrationResult.Success;
     }
 
-    public bool TryUnregisterFallback()
+    public ExtensionRegistrationResult TryUnregisterFallback()
     {
         Action? callback;
         lock (_gate)
         {
             if (_fallback is null)
             {
-                return false;
+                return ExtensionRegistrationResult.Failure(
+                    ExtensionRegistrationFailureCode.NotFound,
+                    new ExtensionErrorDetail("No fallback handler is registered."));
             }
 
             _fallback = null;
@@ -218,7 +238,24 @@ internal sealed class ExtensionHandlerRegistry : IExtensionRegistration
         }
 
         callback?.Invoke();
-        return true;
+        return ExtensionRegistrationResult.Success;
+    }
+
+    private static ExtensionRegistrationResult InvalidRegistrationArgument(string message) =>
+        ExtensionRegistrationResult.Failure(
+            ExtensionRegistrationFailureCode.InvalidArgument,
+            new ExtensionErrorDetail(message));
+
+    private ExtensionRegistrationResult RegistrationConflict(string message, bool rejectStart)
+    {
+        var detail = new ExtensionErrorDetail(message);
+        if (rejectStart)
+        {
+            _registrationRejected = true;
+            _registrationFailureDetail ??= detail;
+        }
+
+        return ExtensionRegistrationResult.Failure(ExtensionRegistrationFailureCode.Conflict, detail);
     }
 
     internal void Clear()
@@ -386,18 +423,29 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
         }
     }
 
-    public ValueTask<bool> StartAsync(string taskName, Func<CancellationToken, ValueTask> callback)
+    public ValueTask<ExtensionTaskStartResult> StartAsync(string taskName, Func<CancellationToken, ValueTask> callback)
     {
         if (string.IsNullOrWhiteSpace(taskName) || taskName.Length > 128 || callback is null)
         {
-            return ValueTask.FromResult(false);
+            return ValueTask.FromResult(ExtensionTaskStartResult.Failure(
+                ExtensionTaskStartFailureCode.InvalidTask,
+                new ExtensionErrorDetail("The task name must be non-empty and no longer than 128 characters, and a callback is required.")));
         }
 
         lock (_gate)
         {
-            if (_stopped || _tasks.Count >= MaxTasks)
+            if (_stopped)
             {
-                return ValueTask.FromResult(false);
+                return ValueTask.FromResult(ExtensionTaskStartResult.Failure(
+                    ExtensionTaskStartFailureCode.Stopped,
+                    new ExtensionErrorDetail("The extension task scheduler has stopped.")));
+            }
+
+            if (_tasks.Count >= MaxTasks)
+            {
+                return ValueTask.FromResult(ExtensionTaskStartResult.Failure(
+                    ExtensionTaskStartFailureCode.LimitReached,
+                    new ExtensionErrorDetail($"The extension task limit of {MaxTasks} has been reached.")));
             }
 
             var task = RunTrackedAsync(callback);
@@ -415,7 +463,7 @@ internal sealed class ExtensionTaskTracker : IExtensionTaskScheduler, IDisposabl
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
-            return ValueTask.FromResult(true);
+            return ValueTask.FromResult(ExtensionTaskStartResult.Success);
         }
     }
 

@@ -313,6 +313,9 @@ internal static class HostConfigurationValueValidator
 
     [DoesNotReturn]
     internal static void Throw() => throw new HostConfigurationSemanticValidator.ConfigurationValidationException();
+    [DoesNotReturn]
+    internal static void Throw(string safeMessage) =>
+        throw new HostConfigurationSemanticValidator.ConfigurationValidationException(safeMessage);
 
     private static bool ContainsControlCharacter(string value) => value.Any(char.IsControl);
 

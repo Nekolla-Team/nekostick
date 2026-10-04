@@ -264,7 +264,8 @@ public sealed class EfExtensionRecordContentPersistence
         if (!Enum.IsDefined(state) || !IsValidContentHash(contentHash) ||
             state != ExtensionLoadState.Loaded)
         {
-            return ValueTask.FromResult(EfHostConfigRevisionHelper.ValidationWriteFailure());
+            return ValueTask.FromResult(EfHostConfigRevisionHelper.ValidationWriteFailure(
+                "SetLoadStateAndContentHashAsync requires a defined Loaded state and a null or valid SHA-256 content hash."));
         }
 
         return WriteAsync(
@@ -302,7 +303,8 @@ public sealed class EfExtensionRecordContentPersistence
         if (!HostConfigurationExtensionValidator.IsValidVersion(newVersion) ||
             !IsValidContentHash(contentHash))
         {
-            return ValueTask.FromResult(EfHostConfigRevisionHelper.ValidationWriteFailure());
+            return ValueTask.FromResult(EfHostConfigRevisionHelper.ValidationWriteFailure(
+                "UpdateInstalledVersionAndContentHashAsync requires a valid semantic version and a null or valid SHA-256 content hash."));
         }
 
         return WriteAsync(
@@ -332,7 +334,8 @@ public sealed class EfExtensionRecordContentPersistence
     {
         if (!IsValidContentHash(contentHash))
         {
-            return ValueTask.FromResult(EfHostConfigRevisionHelper.ValidationWriteFailure());
+            return ValueTask.FromResult(EfHostConfigRevisionHelper.ValidationWriteFailure(
+                "SetContentHashAsync requires a null or valid SHA-256 content hash."));
         }
 
         return WriteAsync(
@@ -359,7 +362,8 @@ public sealed class EfExtensionRecordContentPersistence
     {
         if (!HostConfigurationSemanticValidator.IsSafeExtensionId(extensionId) || expectedRecordVersion < 0)
         {
-            return EfHostConfigRevisionHelper.ValidationWriteFailure();
+            return EfHostConfigRevisionHelper.ValidationWriteFailure(
+                "WriteExtensionContent requires a safe extension ID and non-negative expected ExtensionRecord revision.");
         }
 
         await using var transaction = await _db.Database.BeginTransactionAsync(
@@ -377,18 +381,23 @@ public sealed class EfExtensionRecordContentPersistence
                 .ConfigureAwait(false);
             if (record is null || revision is null)
             {
-                return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+                return ConfigurationWriteResult.Failure(
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"ExtensionRecord '{extensionId}' or ConfigurationRevision '{PersistenceDatabaseDefaults.GlobalRevisionKey}' was not found."));
             }
 
             if (!HostConfigurationSemanticValidator.IsUuidV7(record.Id) ||
                 revision.Id != Guid.Parse(PersistenceDatabaseDefaults.SeedConfigurationRevisionId))
             {
-                return EfHostConfigRevisionHelper.ValidationWriteFailure();
+                return EfHostConfigRevisionHelper.ValidationWriteFailure(
+                    "WriteExtensionContent found an invalid ExtensionRecord identity or ConfigurationRevision identity.");
             }
 
             if (record.Version != expectedRecordVersion)
             {
-                return EfHostConfigRevisionHelper.ConflictWriteFailure();
+                return EfHostConfigRevisionHelper.ConflictWriteFailure(
+                    $"WriteExtensionContent expected ExtensionRecord revision {expectedRecordVersion}, but the actual revision is {record.Version}.");
             }
 
             if (!mutate(record))
@@ -417,37 +426,44 @@ public sealed class EfExtensionRecordContentPersistence
         catch (HostConfigurationSemanticValidator.ConfigurationValidationException)
         {
             PersistenceLogMessages.ValidationRejected(_logger, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.ValidationWriteFailure();
+            return EfHostConfigRevisionHelper.ValidationWriteFailure(
+                "WriteExtensionContent could not advance ExtensionRecord or ConfigurationRevision beyond the supported revision range.");
         }
         catch (DbUpdateConcurrencyException exception)
         {
             PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+            return EfHostConfigRevisionHelper.ConflictWriteFailure(
+                $"WriteExtensionContent expected ExtensionRecord revision {expectedRecordVersion}, but the actual revision changed during commit.");
         }
         catch (DbUpdateException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
             PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+            return EfHostConfigRevisionHelper.ConflictWriteFailure(
+                $"WriteExtensionContent expected ExtensionRecord revision {expectedRecordVersion}, but the actual revision could not be confirmed after a serialization, deadlock, or unique-constraint conflict.");
         }
         catch (InvalidOperationException exception) when (EfHostConfigRevisionHelper.IsTransactionConflict(exception))
         {
             PersistenceLogMessages.OperationConflict(_logger, exception, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.ConflictWriteFailure();
+            return EfHostConfigRevisionHelper.ConflictWriteFailure(
+                $"WriteExtensionContent expected ExtensionRecord revision {expectedRecordVersion}, but the actual revision could not be confirmed after a serialization, deadlock, or unique-constraint conflict.");
         }
         catch (InvalidOperationException)
         {
             PersistenceLogMessages.ValidationRejected(_logger, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.ValidationWriteFailure();
+            return EfHostConfigRevisionHelper.ValidationWriteFailure(
+                "WriteExtensionContent found an inconsistent ExtensionRecord identity or revision.");
         }
         catch (DbUpdateException exception)
         {
             PersistenceLogMessages.OperationFailed(_logger, exception, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.StorageWriteFailure();
+            return EfHostConfigRevisionHelper.StorageWriteFailure(
+                "WriteExtensionContent could not update ExtensionRecord or ConfigurationRevision because the database was unavailable or rejected an ExtensionRecord state, installed-version, or content-hash check constraint.");
         }
         catch (Exception exception)
         {
             PersistenceLogMessages.OperationFailed(_logger, exception, "WriteExtensionContent", extensionId);
-            return EfHostConfigRevisionHelper.StorageWriteFailure();
+            return EfHostConfigRevisionHelper.StorageWriteFailure(
+                "WriteExtensionContent could not update ExtensionRecord or ConfigurationRevision because the database was unavailable or rejected an ExtensionRecord state, installed-version, or content-hash check constraint.");
         }
     }
 

@@ -151,7 +151,8 @@ public sealed partial class ExtensionRuntimeTests
                 true,
                 ExtensionServiceOutputCode.Opened,
                 serviceId,
-                new MemoryStream()));
+                new MemoryStream(),
+                detail: null));
 
         public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
             Guid serviceId,
@@ -170,7 +171,8 @@ public sealed partial class ExtensionRuntimeTests
                 true,
                 ExtensionServiceLogCode.Subscribed,
                 serviceId,
-                new CompletedSubscription()));
+                new CompletedSubscription(),
+                detail: null));
         }
 
         public ValueTask DisposeAsync() => new(_cleanupRelease.Task);

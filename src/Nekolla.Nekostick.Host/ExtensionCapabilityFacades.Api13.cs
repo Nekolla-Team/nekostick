@@ -48,7 +48,9 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Unsupported,
+                        "The host service runtime snapshot accessor is unavailable; the current service runtime snapshot cannot be read.")));
         }
 
         try
@@ -74,7 +76,9 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
                 null);
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        "The host service runtime snapshot could not be read because the runtime provider failed while reading current service state.")));
         }
     }
     public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadForExtensionAsync(
@@ -86,14 +90,18 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Validation)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Validation,
+                        "The extensionId argument must be non-whitespace; the supplied value was null, empty, or whitespace.")));
         }
 
         if (_runtime is null)
         {
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Unsupported,
+                        $"The host service runtime snapshot accessor is unavailable; runtime snapshots for extension '{extensionId}' cannot be read.")));
         }
 
         try
@@ -119,7 +127,9 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
                 null);
             return ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        $"The host service runtime snapshot could not be read while filtering for extension '{extensionId}'.")));
         }
     }
 
@@ -133,7 +143,9 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             return ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Unsupported,
+                        $"The host service runtime snapshot accessor is unavailable; service '{serviceId}' cannot be queried.")));
         }
 
         try
@@ -161,7 +173,9 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
                 serviceId);
             return ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        $"The host service runtime snapshot could not be read for service '{serviceId}'.")));
         }
     }
 
@@ -191,7 +205,9 @@ internal sealed class ExtensionSupervisorFacade : IExtensionSupervisorApi
         {
             return ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Unsupported,
+                        $"The host service lifecycle coordinator is unavailable; service '{serviceId}' cannot be resumed or restarted.")));
         }
 
         // Management plane: no ownership filtering — extensions are trusted operators and

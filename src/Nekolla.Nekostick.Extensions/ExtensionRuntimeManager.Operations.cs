@@ -17,26 +17,32 @@ public sealed partial class ExtensionRuntimeManager
     {
         if (manifest is null)
         {
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                "A manifest is required to load an extension.");
         }
 
         if (cancellationToken.IsCancellationRequested)
         {
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
+            return ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                "Extension loading was canceled before it started.");
         }
 
         try
         {
             await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
             if (_logger is { } logger)
             {
                 ExtensionLogMessages.ExtensionOperationCancelled(logger, manifest.Id, nameof(LoadAsync));
             }
 
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
+            return ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                ExtensionErrorDetail.FromException(exception));
         }
 
         try
@@ -45,12 +51,23 @@ public sealed partial class ExtensionRuntimeManager
             {
                 if (_disposed)
                 {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped);
+                    return ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.AlreadyStopped,
+                        "The extension runtime has already stopped.");
                 }
 
-                if (_publishedDispatchGeneration is not null || _instances.ContainsKey(manifest.Id))
+                if (_publishedDispatchGeneration is not null)
                 {
-                    return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+                    return ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.RuntimeUnavailable,
+                        "A published dispatch generation prevents legacy extension loading.");
+                }
+
+                if (_instances.ContainsKey(manifest.Id))
+                {
+                    return ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.RuntimeUnavailable,
+                        $"Extension '{manifest.Id}' is already loaded.");
                 }
             }
 
@@ -58,20 +75,42 @@ public sealed partial class ExtensionRuntimeManager
                 .ConfigureAwait(false);
             if (!candidate.Succeeded || candidate.Instance is null)
             {
-                return ExtensionRuntimeOperationResult.Failure(candidate.FailureCode);
+                return ExtensionRuntimeOperationResult.Failure(
+                    candidate.FailureCode,
+                    candidate.FailureDetail!);
             }
 
             var instance = candidate.Instance;
             ExtensionFailureCode failureCode;
+            string failureMessage;
             lock (_gate)
             {
-                if (_disposed || _publishedDispatchGeneration is not null || _instances.ContainsKey(manifest.Id))
+                if (_disposed)
+                {
+                    failureCode = ExtensionFailureCode.AlreadyStopped;
+                    failureMessage = "The extension runtime stopped before the candidate could be committed.";
+                }
+                else if (_publishedDispatchGeneration is not null)
                 {
                     failureCode = ExtensionFailureCode.RuntimeUnavailable;
+                    failureMessage = "A published dispatch generation appeared before the candidate could be committed.";
+                }
+                else if (_instances.ContainsKey(manifest.Id))
+                {
+                    failureCode = ExtensionFailureCode.RuntimeUnavailable;
+                    failureMessage = $"Extension '{manifest.Id}' was loaded while its candidate was starting.";
                 }
                 else
                 {
                     failureCode = GetRegistrationConflict(instance, null);
+                    failureMessage = failureCode switch
+                    {
+                        ExtensionFailureCode.HandlerConflict =>
+                            $"Extension '{manifest.Id}' could not register because a handler identifier is already owned by another extension.",
+                        ExtensionFailureCode.FallbackConflict =>
+                            $"Extension '{manifest.Id}' could not register because another extension owns the fallback handler.",
+                        _ => string.Empty
+                    };
                     if (failureCode == ExtensionFailureCode.None)
                     {
                         CommitInstance(instance);
@@ -81,7 +120,7 @@ public sealed partial class ExtensionRuntimeManager
             }
 
             await instance.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-            return ExtensionRuntimeOperationResult.Failure(failureCode);
+            return ExtensionRuntimeOperationResult.Failure(failureCode, failureMessage);
         }
         finally
         {
@@ -107,7 +146,9 @@ public sealed partial class ExtensionRuntimeManager
             // finally resume suspensions the handoff owns.
             if (_activePreparation is not null || _publishedDispatchGeneration is not null)
             {
-                return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+                return ExtensionRuntimeOperationResult.Failure(
+                    ExtensionFailureCode.RuntimeUnavailable,
+                    "An extension dispatch generation is already being prepared or is published.");
             }
         }
 
@@ -288,12 +329,16 @@ public sealed partial class ExtensionRuntimeManager
     {
         if (replacement is null)
         {
-            return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.InvalidArgument), null);
+            return (ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                "A replacement manifest is required to reload an extension."), null);
         }
 
         if (cancellationToken.IsCancellationRequested)
         {
-            return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
+            return (ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                "Extension reload was canceled before it started."), null);
         }
 
         // Suspend only after the dispatch gate is held, and resume only when this operation
@@ -307,14 +352,16 @@ public sealed partial class ExtensionRuntimeManager
             {
                 await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException exception)
             {
                 if (_logger is { } logger)
                 {
                     ExtensionLogMessages.ExtensionOperationCancelled(logger, replacement.Id, nameof(ReloadAsync));
                 }
 
-                return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled), null);
+                return (ExtensionRuntimeOperationResult.Failure(
+                    ExtensionFailureCode.Cancelled,
+                    ExtensionErrorDetail.FromException(exception)), null);
             }
 
             try
@@ -324,17 +371,23 @@ public sealed partial class ExtensionRuntimeManager
                 {
                     if (_disposed)
                     {
-                        return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped), null);
+                        return (ExtensionRuntimeOperationResult.Failure(
+                            ExtensionFailureCode.AlreadyStopped,
+                            "The extension runtime has already stopped."), null);
                     }
 
                     if (_publishedDispatchGeneration is not null)
                     {
-                        return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable), null);
+                        return (ExtensionRuntimeOperationResult.Failure(
+                            ExtensionFailureCode.RuntimeUnavailable,
+                            "A published dispatch generation prevents legacy extension reloads."), null);
                     }
 
                     if (!_instances.TryGetValue(replacement.Id, out previous) || previous is null)
                     {
-                        return (ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded), null);
+                        return (ExtensionRuntimeOperationResult.Failure(
+                            ExtensionFailureCode.ExtensionNotLoaded,
+                            $"Extension '{replacement.Id}' is not loaded."), null);
                     }
                 }
 
@@ -349,10 +402,14 @@ public sealed partial class ExtensionRuntimeManager
                     .ConfigureAwait(false);
                 if (!candidateResult.Succeeded || candidateResult.Instance is not { } candidate)
                 {
+                    var failureCode = candidateResult.FailureCode == ExtensionFailureCode.None
+                        ? ExtensionFailureCode.ReplacementPreserved
+                        : candidateResult.FailureCode;
+                    var failureDetail = candidateResult.FailureDetail ?? new ExtensionErrorDetail(
+                        $"Replacement candidate for extension '{replacement.Id}' failed without a reported cause.");
                     return (ExtensionRuntimeOperationResult.Failure(
-                        candidateResult.FailureCode == ExtensionFailureCode.None
-                            ? ExtensionFailureCode.ReplacementPreserved
-                            : candidateResult.FailureCode,
+                        failureCode,
+                        failureDetail,
                         previous.GetStatus()), null);
                 }
 
@@ -375,6 +432,7 @@ public sealed partial class ExtensionRuntimeManager
                     await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                     return (ExtensionRuntimeOperationResult.Failure(
                         ExtensionFailureCode.ReplacementPreserved,
+                        $"The live instance of extension '{replacement.Id}' changed while its replacement was starting.",
                         previous.GetStatus()), null);
                 }
 
@@ -393,9 +451,12 @@ public sealed partial class ExtensionRuntimeManager
                     previous.MarkStopped();
                     PublishExtensionState(previous, ExtensionLoadState.Stopped);
                     await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                    var previousStatus = previous.GetStatus();
                     return (ExtensionRuntimeOperationResult.Failure(
                         ExtensionFailureCode.StopFailed,
-                        previous.GetStatus()), null);
+                        previousStatus.LastFailureDetail ?? new ExtensionErrorDetail(
+                            $"The previous generation of extension '{replacement.Id}' could not be stopped within the lifecycle timeout."),
+                        previousStatus), null);
                 }
 
                 if (!await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
@@ -412,9 +473,12 @@ public sealed partial class ExtensionRuntimeManager
                     previous.MarkStopped();
                     PublishExtensionState(previous, ExtensionLoadState.Stopped);
                     await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
+                    var previousStatus = previous.GetStatus();
                     return (ExtensionRuntimeOperationResult.Failure(
                         ExtensionFailureCode.LifecycleFailed,
-                        previous.GetStatus()), null);
+                        candidate.GetStatus().LastFailureDetail ?? new ExtensionErrorDetail(
+                            $"The replacement lifecycle callback for extension '{replacement.Id}' failed."),
+                        previousStatus), null);
                 }
 
                 var conflict = ExtensionFailureCode.None;
@@ -443,7 +507,13 @@ public sealed partial class ExtensionRuntimeManager
                 if (conflict != ExtensionFailureCode.None)
                 {
                     await candidate.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
-                    return (ExtensionRuntimeOperationResult.Failure(conflict, previous.GetStatus()), null);
+                    var conflictMessage = conflict == ExtensionFailureCode.HandlerConflict
+                        ? $"Extension '{replacement.Id}' could not register because a handler identifier is already owned by another extension."
+                        : $"Extension '{replacement.Id}' could not register because another extension owns the fallback handler.";
+                    return (ExtensionRuntimeOperationResult.Failure(
+                        conflict,
+                        conflictMessage,
+                        previous.GetStatus()), null);
                 }
 
                 await previous.ReleaseAsync().ConfigureAwait(false);
@@ -479,12 +549,16 @@ public sealed partial class ExtensionRuntimeManager
     {
         if (string.IsNullOrWhiteSpace(extensionId))
         {
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                "An extension identifier is required to unload an extension.");
         }
 
         if (cancellationToken.IsCancellationRequested)
         {
-            return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
+            return ExtensionRuntimeOperationResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                "Extension unload was canceled before it started.");
         }
 
         // Suspend only after the dispatch gate is held, and resume only when this operation
@@ -497,14 +571,16 @@ public sealed partial class ExtensionRuntimeManager
             {
                 await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException exception)
             {
                 if (_logger is { } logger)
                 {
                     ExtensionLogMessages.ExtensionOperationCancelled(logger, extensionId, nameof(UnloadAsync));
                 }
 
-                return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.Cancelled);
+                return ExtensionRuntimeOperationResult.Failure(
+                    ExtensionFailureCode.Cancelled,
+                    ExtensionErrorDetail.FromException(exception));
             }
 
             try
@@ -517,17 +593,23 @@ public sealed partial class ExtensionRuntimeManager
                 {
                     if (_disposed)
                     {
-                        return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.AlreadyStopped);
+                        return ExtensionRuntimeOperationResult.Failure(
+                            ExtensionFailureCode.AlreadyStopped,
+                            "The extension runtime has already stopped.");
                     }
 
                     if (_publishedDispatchGeneration is not null)
                     {
-                        return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.RuntimeUnavailable);
+                        return ExtensionRuntimeOperationResult.Failure(
+                            ExtensionFailureCode.RuntimeUnavailable,
+                            "A published dispatch generation prevents legacy extension unloads.");
                     }
 
                     if (!_instances.TryGetValue(extensionId, out instance) || instance is null)
                     {
-                        return ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.ExtensionNotLoaded);
+                        return ExtensionRuntimeOperationResult.Failure(
+                            ExtensionFailureCode.ExtensionNotLoaded,
+                            $"Extension '{extensionId}' is not loaded.");
                     }
 
                     RemoveInstanceRegistrations(instance);
@@ -549,9 +631,14 @@ public sealed partial class ExtensionRuntimeManager
                         version);
                 }
 
+                var status = instance.GetStatus();
                 return stopped
-                    ? ExtensionRuntimeOperationResult.Success(instance.GetStatus())
-                    : ExtensionRuntimeOperationResult.Failure(ExtensionFailureCode.StopFailed, instance.GetStatus());
+                    ? ExtensionRuntimeOperationResult.Success(status)
+                    : ExtensionRuntimeOperationResult.Failure(
+                        ExtensionFailureCode.StopFailed,
+                        status.LastFailureDetail ?? new ExtensionErrorDetail(
+                            $"Extension '{extensionId}' could not be stopped within the lifecycle timeout."),
+                        status);
             }
             finally
             {
@@ -585,7 +672,10 @@ public sealed partial class ExtensionRuntimeManager
     {
         if (string.IsNullOrWhiteSpace(handlerId) || request is null)
         {
-            return ExtensionInvocationResult.Unavailable;
+            var message = string.IsNullOrWhiteSpace(handlerId)
+                ? "A non-empty handler identifier is required."
+                : "An extension handler request is required.";
+            return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(message));
         }
 
         HandlerBinding? binding;
@@ -596,7 +686,8 @@ public sealed partial class ExtensionRuntimeManager
             {
                 if (_activePreparation is not null || _publishedDispatchGeneration is not null)
                 {
-                    return ExtensionInvocationResult.Unavailable;
+                    return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                        "The legacy handler API is unavailable while an extension dispatch generation is being prepared or published."));
                 }
 
                 _handlers.TryGetValue(handlerId, out binding);
@@ -605,14 +696,16 @@ public sealed partial class ExtensionRuntimeManager
             if (binding is null || binding.Handler is null ||
                 !binding.Instance.IsHandlerOwned(handlerId))
             {
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                    $"No available non-streaming handler is registered with identifier '{handlerId}'."));
             }
 
             if (ReferenceEquals(binding, tried))
             {
                 // The same binding already refused entry (its instance is stopped but still
                 // registered); retrying would spin without progress.
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(
+                    GetTurnstile(binding.Instance.Manifest.Id).GetEntryFailureDetail(binding.Instance));
             }
 
             tried = binding;
@@ -626,9 +719,9 @@ public sealed partial class ExtensionRuntimeManager
                     break;
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException exception)
             {
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(ExtensionErrorDetail.FromException(exception));
             }
         }
 
@@ -640,10 +733,11 @@ public sealed partial class ExtensionRuntimeManager
         {
             var response = await handler.HandleAsync(request, cancellationToken).ConfigureAwait(false);
             return response is null
-                ? ExtensionInvocationResult.Failed
+                ? ExtensionInvocationResult.Failed(new ExtensionErrorDetail(
+                    $"Extension handler '{handlerId}' returned no response."))
                 : ExtensionInvocationResult.Handled(response);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
             if (_logger is { } logger)
             {
@@ -653,7 +747,7 @@ public sealed partial class ExtensionRuntimeManager
                     nameof(HandleAsync));
             }
 
-            return ExtensionInvocationResult.Failed;
+            return ExtensionInvocationResult.Failed(ExtensionErrorDetail.FromException(exception));
         }
         catch (Exception exception)
         {
@@ -670,7 +764,7 @@ public sealed partial class ExtensionRuntimeManager
                     occurrences);
             }
 
-            return ExtensionInvocationResult.Failed;
+            return ExtensionInvocationResult.Failed(ExtensionErrorDetail.FromException(exception));
         }
         finally
         {
@@ -763,7 +857,7 @@ public sealed partial class ExtensionRuntimeManager
                     occurrences);
             }
 
-            return ExtensionInvocationResult.Failed;
+            return ExtensionInvocationResult.Failed(ExtensionErrorDetail.FromException(exception));
         }
         finally
         {
@@ -861,24 +955,26 @@ public sealed partial class ExtensionRuntimeManager
 
                     return ExtensionStreamingInvocationResult.Failed;
                 }
-                catch (ExtensionRequestReadTimeoutException)
+                catch (ExtensionRequestReadTimeoutException exception)
                 {
                     if (_logger is { } logger)
                     {
                         ExtensionLogMessages.ExtensionStreamingReadTimedOut(
                             logger,
+                            exception,
                             binding.Instance.Manifest.Id,
                             nameof(HandleStreamingAsync));
                     }
 
                     return ExtensionStreamingInvocationResult.Failed;
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException exception)
                 {
                     if (_logger is { } logger)
                     {
                         ExtensionLogMessages.ExtensionStreamingRequestCancelled(
                             logger,
+                            exception,
                             binding.Instance.Manifest.Id,
                             nameof(HandleStreamingAsync));
                     }

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -13,7 +14,9 @@ public static class ExtensionManifestDiscovery
     {
         if (!CanonicalPath.TryCanonicalDirectory(extensionDirectory, out var root, logger))
         {
-            return ManifestDiscoveryResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return ManifestDiscoveryResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("The supplied extension directory is missing, invalid, or inaccessible."));
         }
 
         var manifestFiles = new List<(string Name, ManifestSourceFormat Format)>();
@@ -23,19 +26,26 @@ public static class ExtensionManifestDiscovery
 
         if (manifestFiles.Count == 0)
         {
-            return ManifestDiscoveryResult.Failure(ExtensionFailureCode.ManifestMissing);
+            return ManifestDiscoveryResult.Failure(
+                ExtensionFailureCode.ManifestMissing,
+                new ExtensionErrorDetail("The extension directory contains no supported manifest file."));
         }
 
         if (manifestFiles.Count != 1)
         {
-            return ManifestDiscoveryResult.Failure(ExtensionFailureCode.DuplicateManifest);
+            return ManifestDiscoveryResult.Failure(
+                ExtensionFailureCode.DuplicateManifest,
+                new ExtensionErrorDetail("The extension directory contains more than one supported manifest file."));
         }
 
         var selected = manifestFiles[0];
         var manifestPath = Path.Combine(root, selected.Name);
         if (!CanonicalPath.TryCanonicalFileInRoot(root, manifestPath, out var canonicalManifestPath, logger))
         {
-            return ManifestDiscoveryResult.Failure(ExtensionFailureCode.UnsafePath, selected.Format);
+            return ManifestDiscoveryResult.Failure(
+                ExtensionFailureCode.UnsafePath,
+                new ExtensionErrorDetail("The selected manifest file resolves outside the extension directory."),
+                selected.Format);
         }
 
         return selected.Format == ManifestSourceFormat.Json

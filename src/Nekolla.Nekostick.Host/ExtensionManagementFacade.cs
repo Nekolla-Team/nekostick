@@ -62,7 +62,9 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (hostConfig is null)
         {
             return ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+                new ConfigurationError(
+                    ConfigurationErrorCode.Unsupported,
+                    "The host configuration API is unavailable; extension management records cannot be listed."));
         }
 
         var snapshotResult = await hostConfig.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -76,7 +78,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (!scan.Succeeded)
         {
             return ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>.Failure(
-                new ConfigurationError(scan.ErrorCode));
+                new ConfigurationError(scan.ErrorCode, scan.ErrorMessage));
         }
 
         var runtimeStatuses = _runtimeManager.GetStatuses()
@@ -117,24 +119,28 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
             // Management writes must not run inside lifecycle callbacks: the publish trigger would deadlock on the publication gate.
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                "EnableAsync cannot run from an active extension lifecycle callback because publication could wait on the callback.");
         }
 
         if (!CanManage(extensionId))
         {
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation,
+                InvalidExtensionIdentifierMessage(extensionId));
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"Extension '{extensionId}' cannot be enabled because the host disallows extension configuration writes.");
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"The host extension persistence API is unavailable; extension '{extensionId}' cannot be enabled.");
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -147,24 +153,38 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.NotFound);
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.NotFound,
+                $"Extension record '{extensionId}' was not found.");
         }
 
         if (record.LoadState is not (ExtensionLoadState.Disabled or ExtensionLoadState.Stopped or ExtensionLoadState.Failed))
         {
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation,
+                $"Extension record '{extensionId}' has load state '{record.LoadState}'; enabling requires Disabled, Stopped, or Failed.");
         }
 
         var scan = ScanExtensions(cancellationToken);
         if (!scan.Succeeded)
         {
-            return FailureWrite(scan.ErrorCode);
+            return FailureWrite(scan.ErrorCode, scan.ErrorMessage);
         }
 
-        if (!scan.Manifests.TryGetValue(extensionId, out var manifest) ||
-            !string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal))
+        if (!scan.Manifests.TryGetValue(extensionId, out var manifest))
         {
-            return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(
+                nameof(EnableAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"No valid manifest was found for extension record '{extensionId}'.");
+        }
+
+        if (!string.Equals(record.Version, manifest.Version.ToString(), StringComparison.Ordinal))
+        {
+            return Reject(
+                nameof(EnableAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"Extension record '{extensionId}' stores version '{record.Version}', but its manifest declares version '{manifest.Version}'.");
         }
 
         foreach (var dependency in manifest.Dependencies)
@@ -177,16 +197,50 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
 
             var dependencyRecord = snapshot.ExtensionRecords.FirstOrDefault(value =>
                 string.Equals(value.ExtensionId, dependency.Id, StringComparison.Ordinal));
-            if (dependencyRecord is null ||
-                dependencyRecord.LoadState != ExtensionLoadState.Loaded ||
-                !scan.Manifests.TryGetValue(dependency.Id, out var dependencyManifest) ||
-                !string.Equals(
-                    dependencyRecord.Version,
-                    dependencyManifest.Version.ToString(),
-                    StringComparison.Ordinal) ||
-                !dependency.VersionRange.IsSatisfiedBy(dependencyManifest.Version))
+            if (dependencyRecord is null)
             {
-                return Reject(nameof(EnableAsync), extensionId, ConfigurationErrorCode.Validation);
+                return Reject(
+                    nameof(EnableAsync),
+                    extensionId,
+                    ConfigurationErrorCode.Validation,
+                    $"Required dependency '{dependency.Id}' for extension '{extensionId}' has no persisted extension record.");
+            }
+
+            if (dependencyRecord.LoadState != ExtensionLoadState.Loaded)
+            {
+                return Reject(
+                    nameof(EnableAsync),
+                    extensionId,
+                    ConfigurationErrorCode.Validation,
+                    $"Required dependency '{dependency.Id}' for extension '{extensionId}' has load state '{dependencyRecord.LoadState}', but must be Loaded.");
+            }
+
+            if (!scan.Manifests.TryGetValue(dependency.Id, out var dependencyManifest))
+            {
+                return Reject(
+                    nameof(EnableAsync),
+                    extensionId,
+                    ConfigurationErrorCode.Validation,
+                    $"Required dependency '{dependency.Id}' for extension '{extensionId}' has no valid installed manifest.");
+            }
+
+            var actualVersion = dependencyManifest.Version.ToString();
+            if (!string.Equals(dependencyRecord.Version, actualVersion, StringComparison.Ordinal))
+            {
+                return Reject(
+                    nameof(EnableAsync),
+                    extensionId,
+                    ConfigurationErrorCode.Validation,
+                    $"Required dependency '{dependency.Id}' for extension '{extensionId}' has persisted version '{dependencyRecord.Version}', but its installed manifest declares '{actualVersion}'.");
+            }
+
+            if (!dependency.VersionRange.IsSatisfiedBy(dependencyManifest.Version))
+            {
+                return Reject(
+                    nameof(EnableAsync),
+                    extensionId,
+                    ConfigurationErrorCode.Validation,
+                    $"Required dependency '{dependency.Id}' for extension '{extensionId}' has installed version '{actualVersion}', which does not satisfy required range '{dependency.VersionRange}'.");
             }
         }
 
@@ -237,7 +291,9 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                     "Enable",
                     _callerExtensionId,
                     extensionId);
-                result = FailureWrite(ConfigurationErrorCode.StorageUnavailable);
+                result = FailureWrite(
+                    ConfigurationErrorCode.StorageUnavailable,
+                    $"Extension record '{extensionId}' could not be enabled because the host database operation failed while updating its load state and content hash.");
             }
         }
         if (result.IsSuccess)
@@ -260,24 +316,28 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                "DisableAsync cannot run from an active extension lifecycle callback because publication could wait on the callback.");
         }
 
         if (!CanManage(extensionId))
         {
-            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Validation,
+                InvalidExtensionIdentifierMessage(extensionId));
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"Extension '{extensionId}' cannot be disabled because the host disallows extension configuration writes.");
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"The host extension persistence API is unavailable; extension '{extensionId}' cannot be disabled.");
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -290,7 +350,8 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.NotFound);
+            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.NotFound,
+                $"Extension record '{extensionId}' was not found.");
         }
 
         if (record.LoadState == ExtensionLoadState.Disabled)
@@ -305,13 +366,18 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         var scan = ScanExtensions(cancellationToken);
         if (!scan.Succeeded)
         {
-            return FailureWrite(scan.ErrorCode);
+            return FailureWrite(scan.ErrorCode, scan.ErrorMessage);
         }
 
         // Disabling is rejected while a loaded extension declares a dependency on the target.
-        if (HasLoadedDependent(snapshot, scan, extensionId))
+        var loadedDependent = FindLoadedDependent(snapshot, scan, extensionId);
+        if (loadedDependent is { } dependentId)
         {
-            return Reject(nameof(DisableAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(
+                nameof(DisableAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"Loaded extension '{dependentId}' declares a required dependency on extension '{extensionId}', so the target cannot be disabled.");
         }
 
         ConfigurationWriteResult result;
@@ -344,24 +410,28 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                "ReloadAsync cannot run from an active extension lifecycle callback because publication could wait on the callback.");
         }
 
         if (!CanManage(extensionId))
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation,
+                InvalidExtensionIdentifierMessage(extensionId));
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"Extension '{extensionId}' cannot be reloaded because the host disallows extension configuration writes.");
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
         if (hostConfig is null)
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"The host configuration API is unavailable; extension '{extensionId}' cannot be reloaded.");
         }
 
         var snapshotResult = await hostConfig.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -374,24 +444,38 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.NotFound);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.NotFound,
+                $"Extension record '{extensionId}' was not found.");
         }
 
         if (record.LoadState != ExtensionLoadState.Loaded)
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation,
+                $"Extension record '{extensionId}' has load state '{record.LoadState}'; reloading requires Loaded.");
         }
 
         var scan = ScanExtensions(cancellationToken);
         if (!scan.Succeeded)
         {
-            return FailureWrite(scan.ErrorCode);
+            return FailureWrite(scan.ErrorCode, scan.ErrorMessage);
         }
 
-        if (!scan.Manifests.TryGetValue(extensionId, out var scannedManifest) ||
-            !string.Equals(record.Version, scannedManifest.Version.ToString(), StringComparison.Ordinal))
+        if (!scan.Manifests.TryGetValue(extensionId, out var scannedManifest))
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(
+                nameof(ReloadAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"No valid installed manifest was found for extension '{extensionId}'.");
+        }
+
+        if (!string.Equals(record.Version, scannedManifest.Version.ToString(), StringComparison.Ordinal))
+        {
+            return Reject(
+                nameof(ReloadAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"Extension record '{extensionId}' stores version '{record.Version}', but its installed manifest declares '{scannedManifest.Version}'.");
         }
 
         if (ExtensionCallbackGuard.IsSelfReplacementUnsafe)
@@ -399,12 +483,14 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             // Reload awaits generation replacement synchronously; from a route/event/scheduler
             // callback the publish may need to drain the calling extension itself (its manifest can
             // be drifted even when the target is another extension), which would deadlock.
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"Reloading extension '{extensionId}' from this callback could wait for the caller's own generation to drain.");
         }
 
         if (_publisher is null)
         {
-            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(ReloadAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"The extension reload publisher is unavailable; extension '{extensionId}' cannot be reloaded.");
         }
 
         var publication = await _publisher
@@ -437,23 +523,78 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             HostConfigurationPublisher.ExtensionReloadPublicationStatus.Published =>
                 ConfigurationWriteResult.Success(publication.CommittedVersion),
             HostConfigurationPublisher.ExtensionReloadPublicationStatus.TargetUnavailable =>
-                ValidationWriteFailure(),
-            _ => FailureWrite(ConfigurationErrorCode.StorageUnavailable)
+                ValidationWriteFailure(
+                    publication.FailureDetail?.Message ??
+                    $"Extension '{extensionId}' became unavailable before its reload could be published."),
+            HostConfigurationPublisher.ExtensionReloadPublicationStatus.Failed =>
+                FailureWrite(
+                    ConfigurationErrorCode.Unsupported,
+                    publication.FailureDetail?.Message ??
+                    $"Extension '{extensionId}' reload publication returned status '{publication.Status}' without a precise failure detail."),
+            _ => FailureWrite(
+                ConfigurationErrorCode.Unsupported,
+                $"Extension '{extensionId}' reload publication returned unrecognized status '{publication.Status}'.")
         };
     }
 
     /// <inheritdoc />
-    public bool ReloadSoon(string extensionId)
+    public ExtensionReloadScheduleResult ReloadSoon(string extensionId)
     {
-        // No callback-guard veto and no durable validation here: scheduling never blocks on
-        // generation replacement, and the deferred publish revalidates the target against the
-        // latest durable snapshot (missing/disabled/drifted targets simply do not reload).
-        if (!CanManage(extensionId) ||
-            !_runtimeState.ExtensionConfigurationWritesAllowed ||
-            _publisher is null ||
-            _snapshotReader is null)
+        if (!CanManage(extensionId))
         {
-            return false;
+            if (_logger is { } logger)
+            {
+                HostLogMessages.ExtensionManagementRejected(
+                    logger,
+                    nameof(ReloadSoon),
+                    _callerExtensionId,
+                    extensionId,
+                    ConfigurationErrorCode.Validation);
+            }
+
+            return ExtensionReloadScheduleResult.Failure(
+                ExtensionReloadScheduleFailureCode.InvalidArgument,
+                new ExtensionErrorDetail(InvalidExtensionIdentifierMessage(extensionId)));
+        }
+
+        if (!_runtimeState.ExtensionConfigurationWritesAllowed)
+        {
+            if (_logger is { } logger)
+            {
+                HostLogMessages.ExtensionManagementRejected(
+                    logger,
+                    nameof(ReloadSoon),
+                    _callerExtensionId,
+                    extensionId,
+                    ConfigurationErrorCode.Unsupported);
+            }
+
+            return ExtensionReloadScheduleResult.Failure(
+                ExtensionReloadScheduleFailureCode.WritesDisallowed,
+                new ExtensionErrorDetail(
+                    $"Extension '{extensionId}' cannot be reloaded because the host disallows extension configuration writes."));
+        }
+
+        if (_publisher is null || _snapshotReader is null)
+        {
+            if (_logger is { } logger)
+            {
+                HostLogMessages.ExtensionManagementRejected(
+                    logger,
+                    nameof(ReloadSoon),
+                    _callerExtensionId,
+                    extensionId,
+                    ConfigurationErrorCode.Unsupported);
+            }
+
+            var failureMessage = _publisher is null
+                ? _snapshotReader is null
+                    ? $"Extension '{extensionId}' cannot be scheduled for reload because the host extension reload publisher and configuration snapshot reader are unavailable."
+                    : $"Extension '{extensionId}' cannot be scheduled for reload because the host extension reload publisher is unavailable."
+                : $"Extension '{extensionId}' cannot be scheduled for reload because the host configuration snapshot reader is unavailable.";
+            return ExtensionReloadScheduleResult.Failure(
+                ExtensionReloadScheduleFailureCode.Unsupported,
+                new ExtensionErrorDetail(failureMessage));
         }
 
         TriggerReloadDeferred(extensionId);
@@ -461,7 +602,7 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             _logger,
             _callerExtensionId,
             extensionId);
-        return true;
+        return ExtensionReloadScheduleResult.Success;
     }
 
     /// <inheritdoc />
@@ -471,24 +612,28 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                "DeleteRecordAsync cannot run from an active extension lifecycle callback because publication could wait on the callback.");
         }
 
         if (!CanManage(extensionId))
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation,
+                InvalidExtensionIdentifierMessage(extensionId));
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"Extension record '{extensionId}' cannot be deleted because the host disallows extension configuration writes.");
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported);
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Unsupported,
+                $"The host extension persistence API is unavailable; extension record '{extensionId}' cannot be deleted.");
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -501,30 +646,53 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
         if (record is null)
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.NotFound);
+            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.NotFound,
+                $"Extension record '{extensionId}' was not found.");
         }
 
         var scan = ScanExtensions(cancellationToken);
         if (!scan.Succeeded)
         {
-            return FailureWrite(scan.ErrorCode);
+            return FailureWrite(scan.ErrorCode, scan.ErrorMessage);
         }
 
-        if (scan.Manifests.ContainsKey(extensionId) || scan.DuplicateIds.Contains(extensionId))
+        if (scan.DuplicateIds.Contains(extensionId))
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(
+                nameof(DeleteRecordAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"Multiple installed manifests declare extension identifier '{extensionId}', so its record cannot be deleted safely.");
+        }
+
+        if (scan.Manifests.ContainsKey(extensionId))
+        {
+            return Reject(
+                nameof(DeleteRecordAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"An installed manifest still declares extension identifier '{extensionId}', so its record cannot be deleted.");
         }
 
         if (scan.HasUnreadableDirectories)
         {
-            // Unreadable directories make the absence check unreliable; refuse the delete.
-            return FailureWrite(ConfigurationErrorCode.StorageUnavailable);
+            var skippedDirectoryNames = string.Join(
+                ", ",
+                scan.Skipped.Select(static skipped => skipped.DirectoryName).OrderBy(static name => name, StringComparer.Ordinal));
+            return FailureWrite(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Extension record '{extensionId}' cannot be deleted because scanning skipped directories '{skippedDirectoryNames}' and could not verify that the extension is absent.");
         }
 
         // Deleting is rejected while a loaded extension declares a dependency on the target.
-        if (HasLoadedDependent(snapshot, scan, extensionId))
+        var loadedDependent = FindLoadedDependent(snapshot, scan, extensionId);
+        if (loadedDependent is { } dependentId)
         {
-            return Reject(nameof(DeleteRecordAsync), extensionId, ConfigurationErrorCode.Validation);
+            return Reject(
+                nameof(DeleteRecordAsync),
+                extensionId,
+                ConfigurationErrorCode.Validation,
+                $"Loaded extension '{dependentId}' declares a required dependency on extension '{extensionId}', so the target cannot be deleted.");
         }
 
         if (_lifecycle is not null)
@@ -561,19 +729,28 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
     {
         if (ExtensionCallbackGuard.IsLifecycleActive)
         {
-            return RefreshRejected(nameof(RequestRefreshAsync), ConfigurationErrorCode.Unsupported);
+            return RefreshRejected(
+                nameof(RequestRefreshAsync),
+                ConfigurationErrorCode.Unsupported,
+                "RequestRefreshAsync cannot run from an active extension lifecycle callback because publication could wait on the callback.");
         }
 
         if (!_runtimeState.ExtensionConfigurationWritesAllowed)
         {
-            return RefreshRejected(nameof(RequestRefreshAsync), ConfigurationErrorCode.Unsupported);
+            return RefreshRejected(
+                nameof(RequestRefreshAsync),
+                ConfigurationErrorCode.Unsupported,
+                "Extension configuration writes are disallowed, so extension records cannot be refreshed.");
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var api = scope.ServiceProvider.GetService<EfHostConfigApi>();
         if (api is null)
         {
-            return RefreshRejected(nameof(RequestRefreshAsync), ConfigurationErrorCode.Unsupported);
+            return RefreshRejected(
+                nameof(RequestRefreshAsync),
+                ConfigurationErrorCode.Unsupported,
+                "The host extension persistence API is unavailable; extension records cannot be refreshed.");
         }
 
         var snapshotResult = await api.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -587,13 +764,18 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         if (!scan.Succeeded)
         {
             return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
-                new ConfigurationError(scan.ErrorCode));
+                new ConfigurationError(scan.ErrorCode, scan.ErrorMessage));
         }
 
         if (scan.DuplicateIds.Count != 0)
         {
+            var duplicateIds = string.Join(
+                ", ",
+                scan.DuplicateIds.OrderBy(static id => id, StringComparer.Ordinal));
             return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Validation));
+                new ConfigurationError(
+                    ConfigurationErrorCode.Validation,
+                    $"Extension refresh found duplicate extension identifiers: {duplicateIds}."));
         }
 
         var records = snapshot.ExtensionRecords.ToDictionary(
@@ -726,7 +908,9 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                         "RequestRefresh",
                         _callerExtensionId,
                         null);
-                    updated = FailureWrite(ConfigurationErrorCode.StorageUnavailable);
+                    updated = FailureWrite(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        $"Extension record '{pair.Key}' could not be updated during refresh because the backing database operation failed while persisting its {(versionChanged ? "installed version and content hash" : "content hash")}.");
                 }
             }
 
@@ -799,6 +983,40 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         !string.IsNullOrWhiteSpace(extensionId) &&
         extensionId.Length <= 128 &&
         !extensionId.Any(char.IsControl);
+
+    private static string InvalidExtensionIdentifierMessage(string? extensionId)
+    {
+        if (extensionId is null)
+        {
+            return "The extensionId argument is null; it must be non-whitespace, no longer than 128 characters, and contain no control characters.";
+        }
+
+        if (extensionId.Length == 0)
+        {
+            return "The extensionId argument is empty; it must be non-whitespace, no longer than 128 characters, and contain no control characters.";
+        }
+
+        if (string.IsNullOrWhiteSpace(extensionId))
+        {
+            return "The extensionId argument is whitespace; it must be non-whitespace, no longer than 128 characters, and contain no control characters.";
+        }
+
+        if (extensionId.Length > 128)
+        {
+            return $"The extensionId argument has actual length {extensionId.Length}; maximum allowed length is 128.";
+        }
+
+        foreach (var character in extensionId)
+        {
+            if (char.IsControl(character))
+            {
+                return $"The extensionId argument contains control character U+{(int)character:X4}; control characters are not allowed.";
+            }
+        }
+
+        return "The extensionId argument violates the identifier rules; it must be non-whitespace, no longer than 128 characters, and contain no control characters.";
+    }
+
     internal static (bool ShouldPublish, string Reason) GetRefreshPublishDecision(
         int addedCount,
         int versionUpdatedCount,
@@ -821,17 +1039,18 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             : (false, "NoChanges");
     }
 
-    private static bool HasLoadedDependent(
+    private static string? FindLoadedDependent(
         HostConfigurationSnapshot snapshot,
         ExtensionScanResult scan,
         string extensionId) =>
         snapshot.ExtensionRecords
             .Where(value => value.LoadState == ExtensionLoadState.Loaded &&
                 !string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal))
-            .Any(value => scan.Manifests.TryGetValue(value.ExtensionId, out var dependentManifest) &&
+            .FirstOrDefault(value => scan.Manifests.TryGetValue(value.ExtensionId, out var dependentManifest) &&
                 dependentManifest.Dependencies.Any(dependency =>
                     !dependency.Optional &&
-                    string.Equals(dependency.Id, extensionId, StringComparison.Ordinal)));
+                    string.Equals(dependency.Id, extensionId, StringComparison.Ordinal)))
+            ?.ExtensionId;
 
     private async ValueTask CompletePublishTriggerAsync(CancellationToken cancellationToken)
     {
@@ -971,7 +1190,9 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         catch (Exception exception)
         {
             HostLogMessages.ExtensionScanFailed(_logger, exception, "EnumerateDirectories");
-            return ExtensionScanResult.Failure(ConfigurationErrorCode.StorageUnavailable);
+            return ExtensionScanResult.Failure(
+                ConfigurationErrorCode.StorageUnavailable,
+                "Extension directory scan could not enumerate directories under the configured extension root because the filesystem enumeration operation failed.");
         }
 
         foreach (var directory in directories)
@@ -986,17 +1207,24 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             catch (Exception exception)
             {
                 HostLogMessages.ExtensionScanFailed(_logger, exception, "DiscoverManifest");
+                var directoryName = DirectoryName(directory);
                 skipped.Add(new ExtensionScanSkip(
-                    DirectoryName(directory),
-                    ExtensionFailureCode.LoadFailed.ToString()));
+                    directoryName,
+                    ExtensionFailureCode.LoadFailed.ToString(),
+                    new ExtensionErrorDetail(
+                        $"Manifest discovery for extension directory '{directoryName}' failed with {exception.GetType().Name}.")));
                 continue;
             }
 
             if (!discovered.Succeeded || discovered.Manifest is not { } manifest)
             {
+                var directoryName = DirectoryName(directory);
+                var failureMessage = discovered.FailureDetail?.Message ??
+                    $"Manifest discovery for extension directory '{directoryName}' returned failure code '{discovered.FailureCode}' without a manifest.";
                 skipped.Add(new ExtensionScanSkip(
-                    DirectoryName(directory),
-                    discovered.FailureCode.ToString()));
+                    directoryName,
+                    discovered.FailureCode.ToString(),
+                    new ExtensionErrorDetail(failureMessage)));
                 continue;
             }
 
@@ -1031,22 +1259,17 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
         ImmutableArray<ConfigurationError> errors) =>
         ConfigurationWriteResult.Failure(errors.ToArray());
 
-    private static ConfigurationWriteResult FailureWrite(ConfigurationErrorCode code) =>
-        ConfigurationWriteResult.Failure(new ConfigurationError(code));
+    private static ConfigurationWriteResult FailureWrite(ConfigurationErrorCode code, string message) =>
+        ConfigurationWriteResult.Failure(new ConfigurationError(code, message));
 
-    private static ConfigurationWriteResult ValidationWriteFailure() =>
-        FailureWrite(ConfigurationErrorCode.Validation);
-
-    private static ConfigurationWriteResult NotFoundWriteFailure() =>
-        FailureWrite(ConfigurationErrorCode.NotFound);
-
-    private static ConfigurationWriteResult UnsupportedWriteFailure() =>
-        FailureWrite(ConfigurationErrorCode.Unsupported);
+    private static ConfigurationWriteResult ValidationWriteFailure(string message) =>
+        FailureWrite(ConfigurationErrorCode.Validation, message);
 
     /// <summary>Reports one rejected refresh and returns its safe failure.</summary>
     private ConfigurationReadResult<ExtensionRefreshSummary> RefreshRejected(
         string operation,
-        ConfigurationErrorCode errorCode)
+        ConfigurationErrorCode errorCode,
+        string message)
     {
         if (_logger is { } logger)
         {
@@ -1058,14 +1281,16 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 errorCode);
         }
 
-        return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(new ConfigurationError(errorCode));
+        return ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
+            new ConfigurationError(errorCode, message));
     }
 
     /// <summary>Reports one rejected management operation and returns its safe failure.</summary>
     private ConfigurationWriteResult Reject(
         string operation,
         string? targetExtensionId,
-        ConfigurationErrorCode errorCode)
+        ConfigurationErrorCode errorCode,
+        string message)
     {
         if (_logger is { } logger)
         {
@@ -1077,12 +1302,13 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
                 errorCode);
         }
 
-        return FailureWrite(errorCode);
+        return FailureWrite(errorCode, message);
     }
 
     private sealed record ExtensionScanResult(
         bool Succeeded,
         ConfigurationErrorCode ErrorCode,
+        string ErrorMessage,
         ImmutableDictionary<string, ExtensionManifest> Manifests,
         ImmutableDictionary<string, string?> ContentHashes,
         ImmutableHashSet<string> DuplicateIds,
@@ -1098,15 +1324,19 @@ internal sealed class ExtensionManagementFacade : IExtensionManagementApi
             new(
                 true,
                 ConfigurationErrorCode.Validation,
+                string.Empty,
                 manifests.ToImmutableDictionary(StringComparer.Ordinal),
                 contentHashes.ToImmutableDictionary(StringComparer.Ordinal),
                 duplicateIds.ToImmutableHashSet(StringComparer.Ordinal),
                 skipped.ToImmutableArray());
 
-        internal static ExtensionScanResult Failure(ConfigurationErrorCode errorCode) =>
+        internal static ExtensionScanResult Failure(
+            ConfigurationErrorCode errorCode,
+            string errorMessage) =>
             new(
                 false,
                 errorCode,
+                errorMessage,
                 ImmutableDictionary<string, ExtensionManifest>.Empty,
                 ImmutableDictionary<string, string?>.Empty,
                 ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal),

@@ -44,13 +44,12 @@ public interface IExtensionDependencyContext
     /// <summary>Imports one strongly typed implementation from this dependency when it is satisfied.</summary>
     /// <typeparam name="TContract">The approved shared contract type.</typeparam>
     /// <param name="contractId">The declared stable contract ID.</param>
-    /// <param name="contract">The resolved implementation when available.</param>
     /// <returns>
-    /// <see langword="true" /> when the dependency is <see cref="ExtensionDependencyState.Satisfied" /> and a
-    /// compatible provider exported the contract during startup; otherwise <see langword="false" />. Like
-    /// <see cref="IExtensionContractRegistry.TryImport{TContract}" />, the exchange is startup-only.
+    /// A result base type carrying a newly allocated success subtype with the implementation when
+    /// available, or a failure subtype with required precise detail when the dependency or import fails.
+    /// Like <see cref="IExtensionContractRegistry.TryImport{TContract}" />, the exchange is startup-only.
     /// </returns>
-    bool TryImport<TContract>(string contractId, out TContract? contract)
+    ExtensionContractImportResult<TContract> TryImport<TContract>(string contractId)
         where TContract : class;
 }
 

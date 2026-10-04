@@ -230,7 +230,7 @@ public sealed class HostRouteTargetExecutorHookIntegrationTests
             Func<string, bool> handlerIsOwned,
             IExtensionRouteEvents routeEvents)
         {
-            Assert.True(routeEvents.TryRegisterHook(
+            Assert.Same(ExtensionRouteRegistrationResult.Success, routeEvents.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 (context, _) =>
                 {
@@ -246,7 +246,7 @@ public sealed class HostRouteTargetExecutorHookIntegrationTests
                             context.Request.Body.ToArray(),
                             context.Request.IsHttps)));
                 }));
-            Assert.True(routeEvents.TryRegisterHook(
+            Assert.Same(ExtensionRouteRegistrationResult.Success, routeEvents.TryRegisterHook(
                 ExtensionRouteEventStage.Return,
                 (context, _) =>
                 {
@@ -281,9 +281,11 @@ public sealed class HostRouteTargetExecutorHookIntegrationTests
 
         public ValueTask StartAsync(IExtensionStartContext context, CancellationToken cancellationToken)
         {
-            if (!context.Registration.TryRegisterHandler(new EchoHandler()))
+            var registration = context.Registration.TryRegisterHandler(new EchoHandler());
+            if (registration is ExtensionRegistrationFailureResult failure)
             {
-                throw new InvalidOperationException("The route hook integration handler could not be registered.");
+                throw new InvalidOperationException(
+                    $"The route hook integration handler could not be registered: {failure.Code}: {failure.Detail.Message}");
             }
 
             return ValueTask.CompletedTask;

@@ -348,20 +348,19 @@ public sealed record ExtensionCoreEvent
 /// <summary>Exposes startup-only typed exchange over approved shared contract types.</summary>
 public interface IExtensionContractRegistry
 {
-    /// <summary>Exports one strongly typed implementation for a manifest declaration.</summary>
+    /// <summary>Attempts to export one strongly typed implementation for a manifest declaration.</summary>
     /// <typeparam name="TContract">The approved shared contract type.</typeparam>
     /// <param name="contractId">The declared stable contract ID.</param>
     /// <param name="implementation">The implementation instance.</param>
-    /// <returns><see langword="true" /> when the declaration and type identity match.</returns>
-    bool TryExport<TContract>(string contractId, TContract implementation)
+    /// <returns>The cached success singleton without per-call result allocation, or an allocated failure subtype carrying the rejection code and required precise detail.</returns>
+    ExtensionContractExportResult TryExport<TContract>(string contractId, TContract implementation)
         where TContract : class;
 
-    /// <summary>Imports one strongly typed implementation for a manifest declaration.</summary>
+    /// <summary>Attempts to import one strongly typed implementation for a manifest declaration.</summary>
     /// <typeparam name="TContract">The approved shared contract type.</typeparam>
     /// <param name="contractId">The declared stable contract ID.</param>
-    /// <param name="contract">The resolved implementation when available.</param>
-    /// <returns><see langword="true" /> when a compatible provider was available during startup.</returns>
-    bool TryImport<TContract>(string contractId, out TContract? contract)
+    /// <returns>A newly allocated success subtype carrying the imported contract, exposed through the generic result base type, or an allocated failure subtype carrying the rejection code and required precise detail.</returns>
+    ExtensionContractImportResult<TContract> TryImport<TContract>(string contractId)
         where TContract : class;
 }
 
@@ -378,8 +377,8 @@ public interface IExtensionTaskScheduler
     /// <summary>Starts one tracked task that is cancelled during extension stop.</summary>
     /// <param name="taskName">A non-sensitive task category.</param>
     /// <param name="callback">The extension callback.</param>
-    /// <returns><see langword="true" /> when capacity accepted the task.</returns>
-    ValueTask<bool> StartAsync(string taskName, Func<CancellationToken, ValueTask> callback);
+    /// <returns>The cached success singleton when accepted, or an allocated failure subtype carrying InvalidTask, LimitReached, or Stopped and required precise detail.</returns>
+    ValueTask<ExtensionTaskStartResult> StartAsync(string taskName, Func<CancellationToken, ValueTask> callback);
 }
 
 /// <summary>Publishes and subscribes to the extension-local ordered event stream.</summary>
@@ -387,8 +386,8 @@ public interface IExtensionEventPublisher
 {
     /// <summary>Attempts to enqueue one event.</summary>
     /// <param name="event">The immutable event.</param>
-    /// <returns><see langword="true" /> when the event was queued.</returns>
-    bool TryPublish(
+    /// <returns>The cached success singleton when queued, or an allocated failure subtype carrying InvalidArgument, QueueFull, or Unavailable and required precise detail.</returns>
+    ExtensionEventPublishResult TryPublish(
         [SuppressMessage(
             "Naming",
             "CA1716:Identifiers should not match keywords",
@@ -397,8 +396,8 @@ public interface IExtensionEventPublisher
 
     /// <summary>Subscribes one callback to ordered best-effort delivery.</summary>
     /// <param name="callback">The callback invoked serially by the queue.</param>
-    /// <returns><see langword="true" /> when the subscription was accepted.</returns>
-    bool TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback);
+    /// <returns>The cached success singleton when accepted, or an allocated failure subtype carrying InvalidArgument or Unavailable and required precise detail.</returns>
+    ExtensionEventSubscribeResult TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback);
 }
 
 /// <summary>Reports safe extension status codes.</summary>
@@ -429,31 +428,36 @@ public interface IExtensionLogWriter
 }
 
 
-/// <summary>Registers stable handler IDs during extension startup.</summary>
+/// <summary>Registers stable handler IDs during extension startup and supports future-dispatch tombstones.</summary>
 public interface IExtensionRegistration
 {
     /// <summary>Attempts to register one handler ID.</summary>
-    bool TryRegisterHandler(IExtensionHandler handler);
+    /// <param name="handler">The handler to register.</param>
+    /// <returns>The cached success singleton when accepted, or an allocated failure subtype carrying InvalidArgument or Conflict and required precise detail.</returns>
+    ExtensionRegistrationResult TryRegisterHandler(IExtensionHandler handler);
 
     /// <summary>Attempts to register one streaming handler ID.</summary>
-    /// <remarks>The extension consumes this registration path for streaming handlers; the Host implements it.</remarks>
+    /// <remarks>The extension consumes this registration path for streaming handlers; the Host implements it. An implementation using the default method reports Unsupported.</remarks>
     /// <param name="handler">The streaming handler to register.</param>
-    /// <returns><see langword="true" /> when the Host accepted the handler.</returns>
-    bool TryRegisterStreamingHandler(IExtensionStreamingHandler handler) => false;
+    /// <returns>The cached success singleton when accepted, an allocated failure subtype carrying InvalidArgument or Conflict and required precise detail, or the cached Unsupported failure from the default implementation.</returns>
+    ExtensionRegistrationResult TryRegisterStreamingHandler(IExtensionStreamingHandler handler) =>
+        ExtensionRegistrationResult.StreamingUnsupported;
 
     /// <summary>Attempts to register the sole global fallback.</summary>
-    bool TryRegisterFallback(IExtensionFallback fallback);
+    /// <param name="fallback">The fallback to register.</param>
+    /// <returns>The cached success singleton when accepted, or an allocated failure subtype carrying InvalidArgument or Conflict and required precise detail.</returns>
+    ExtensionRegistrationResult TryRegisterFallback(IExtensionFallback fallback);
 
     /// <summary>Attempts to unregister one handler ID owned by this extension.</summary>
     /// <remarks>The operation is a nonblocking future-dispatch tombstone; an active invocation may finish.</remarks>
     /// <param name="handlerId">The stable handler identifier.</param>
-    /// <returns><see langword="true" /> when the handler was tombstoned for future dispatch.</returns>
-    bool TryUnregisterHandler(string handlerId);
+    /// <returns>The cached success singleton when tombstoned, or an allocated failure subtype carrying InvalidArgument or NotFound and required precise detail.</returns>
+    ExtensionRegistrationResult TryUnregisterHandler(string handlerId);
 
     /// <summary>Attempts to unregister this extension's fallback.</summary>
     /// <remarks>The operation is a nonblocking future-dispatch tombstone; an active invocation may finish.</remarks>
-    /// <returns><see langword="true" /> when the fallback was tombstoned for future dispatch.</returns>
-    bool TryUnregisterFallback();
+    /// <returns>The cached success singleton when tombstoned, or an allocated failure subtype carrying NotFound and required precise detail.</returns>
+    ExtensionRegistrationResult TryUnregisterFallback();
 }
 
 

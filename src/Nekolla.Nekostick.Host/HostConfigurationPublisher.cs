@@ -8,14 +8,48 @@ using Nekolla.Nekostick.Extensions;
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Describes the outcome of a configuration publication attempt.</summary>
-internal enum PublishOutcome
+internal readonly struct PublishOutcome : IEquatable<PublishOutcome>
 {
-    /// <summary>The snapshot is live and every requested force reload was satisfied.</summary>
-    Published,
-    /// <summary>The attempt did not complete, but the holder already runs an equal-or-newer committed version.</summary>
-    Superseded,
-    /// <summary>The publication genuinely failed.</summary>
-    Failed
+    private enum Status
+    {
+        Failed,
+        Published,
+        Superseded
+    }
+
+    private readonly Status _status;
+
+    private PublishOutcome(Status status, ExtensionErrorDetail? failureDetail)
+    {
+        _status = status;
+        FailureDetail = failureDetail;
+    }
+
+    internal static readonly PublishOutcome Failed = new(Status.Failed, null);
+    internal static readonly PublishOutcome Published = new(Status.Published, null);
+    internal static readonly PublishOutcome Superseded = new(Status.Superseded, null);
+
+    internal ExtensionErrorDetail? FailureDetail { get; }
+
+    internal static PublishOutcome WithFailureDetail(
+        PublishOutcome outcome,
+        ExtensionErrorDetail? failureDetail) =>
+        failureDetail is null || outcome._status == Status.Published
+            ? outcome
+            : new PublishOutcome(outcome._status, failureDetail);
+
+    // Failure detail enriches the result without changing status-based publication semantics.
+    public bool Equals(PublishOutcome other) => _status == other._status;
+
+    public override bool Equals(object? obj) => obj is PublishOutcome other && Equals(other);
+
+    public override int GetHashCode() => (int)_status;
+
+    public static bool operator ==(PublishOutcome left, PublishOutcome right) => left.Equals(right);
+
+    public static bool operator !=(PublishOutcome left, PublishOutcome right) => !left.Equals(right);
+
+    public override string ToString() => _status.ToString();
 }
 
 /// <summary>Serializes configuration publication with staged extension generation handoff.</summary>
@@ -71,6 +105,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
     /// <param name="snapshot">The configuration snapshot to publish.</param>
     /// <param name="forceReloadIds">The optional extension identifiers whose runtime instances must be reloaded.</param>
     /// <param name="scheduleRecovery">Whether a failed generation handoff schedules one recovery publication.</param>
+    /// <param name="requestedExtensionId">The extension identifier whose reload request initiated this publication.</param>
     /// <param name="cancellationToken">The publication cancellation token.</param>
     /// <returns>
     /// <see cref="PublishOutcome.Published"/> when publication and requested force reloads complete,
@@ -81,10 +116,14 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         HostConfigurationSnapshot snapshot,
         ImmutableHashSet<string>? forceReloadIds = null,
         bool scheduleRecovery = true,
+        string? requestedExtensionId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         var requestedForceReloadIds = forceReloadIds ?? EmptyForceReloadIds;
+        var extensionIdForFailureDetail = requestedExtensionId ??
+            requestedForceReloadIds.FirstOrDefault() ??
+            "<unspecified>";
         var outcome = PublishOutcome.Failed;
         if (Volatile.Read(ref _disposed) != 0)
         {
@@ -188,7 +227,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 .ConfigureAwait(false);
             if (!preparedResult.Succeeded || preparedResult.Preparation is null)
             {
-                return outcome = PublishOutcome.Failed;
+                return outcome = PublishOutcome.WithFailureDetail(
+                    PublishOutcome.Failed,
+                    preparedResult.FailureDetail);
             }
 
             var preparation = preparedResult.Preparation;
@@ -204,7 +245,10 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 .ConfigureAwait(false);
             if (publicationSnapshot is null)
             {
-                return outcome = PublishOutcome.Failed;
+                return outcome = PublishOutcome.WithFailureDetail(
+                    PublishOutcome.Failed,
+                    new ExtensionErrorDetail(
+                        $"Extension '{extensionIdForFailureDetail}' could not be reloaded because the snapshot-read stage returned no configuration snapshot."));
             }
 
             var changeSummary = HostConfigurationSnapshotChangeSummary.Create(
@@ -245,6 +289,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     preparation.Generation.Bindings
                         .Where(static binding => !binding.Available)
                         .Select(static binding => $"{binding.ExtensionId ?? "unknown"}={binding.FailureCode}"));
+                var unavailableBindingFailureDetail = preparation.Generation.Bindings
+                    .FirstOrDefault(static binding => !binding.Available)
+                    ?.FailureDetail;
                 HostLogMessages.UnsafeUnavailableBindingFallback(
                     _logger,
                     preparation.Generation.GenerationId,
@@ -254,12 +301,17 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 // report Superseded when it cannot satisfy the forced reload.
                 if (fallbackOutcome == PublishOutcome.Failed)
                 {
-                    return outcome = PublishOutcome.Failed;
+                    return outcome = PublishOutcome.WithFailureDetail(
+                        PublishOutcome.Failed,
+                        unavailableBindingFailureDetail);
                 }
 
-                return outcome = requestedForceReloadIds.Count == 0
+                var fallbackResult = requestedForceReloadIds.Count == 0
                     ? PublishOutcome.Published
                     : PublishOutcome.Superseded;
+                return outcome = PublishOutcome.WithFailureDetail(
+                    fallbackResult,
+                    unavailableBindingFailureDetail);
             }
 
             var ready = await preparation.ReadyToPublishAsync(cancellationToken).ConfigureAwait(false);
@@ -285,21 +337,27 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
                 if (fallbackOutcome == PublishOutcome.Failed)
                 {
-                    return outcome = PublishOutcome.Failed;
+                    return outcome = PublishOutcome.WithFailureDetail(
+                        PublishOutcome.Failed,
+                        ready.FailureDetail);
                 }
 
-                return outcome = requestedForceReloadIds.Count == 0
+                var fallbackResult = requestedForceReloadIds.Count == 0
                     ? PublishOutcome.Published
                     : PublishOutcome.Superseded;
+                return outcome = PublishOutcome.WithFailureDetail(fallbackResult, ready.FailureDetail);
             }
             var publishedGeneration = ready.Generation!;
 
             var publicationStageAdmission = _snapshotHolder.TryStage(publicationSnapshot);
             if (publicationStageAdmission != SnapshotAdmission.Accepted)
             {
-                return outcome = publicationStageAdmission == SnapshotAdmission.Superseded
-                    ? PublishOutcome.Superseded
-                    : PublishOutcome.Failed;
+                return outcome = PublishOutcome.WithFailureDetail(
+                    publicationStageAdmission == SnapshotAdmission.Superseded
+                        ? PublishOutcome.Superseded
+                        : PublishOutcome.Failed,
+                    new ExtensionErrorDetail(
+                        $"Extension '{extensionIdForFailureDetail}' could not be reloaded because snapshot staging failed with admission '{publicationStageAdmission}'."));
             }
 
             stagedSnapshot = publicationSnapshot;
@@ -318,9 +376,12 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 publicationServiceOwners);
             if (publicationAdmission != SnapshotAdmission.Accepted)
             {
-                return outcome = publicationAdmission == SnapshotAdmission.Superseded
-                    ? PublishOutcome.Superseded
-                    : PublishOutcome.Failed;
+                return outcome = PublishOutcome.WithFailureDetail(
+                    publicationAdmission == SnapshotAdmission.Superseded
+                        ? PublishOutcome.Superseded
+                        : PublishOutcome.Failed,
+                    new ExtensionErrorDetail(
+                        $"Extension '{extensionIdForFailureDetail}' could not be reloaded because snapshot replacement failed with admission '{publicationAdmission}'."));
             }
 
             // TryReplace makes the prepared generation the live publication. It
@@ -459,22 +520,36 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(snapshot);
         if (string.IsNullOrWhiteSpace(extensionId))
         {
-            return ExtensionReloadPublication.Failed;
+            var suppliedExtensionId = extensionId is null ? "<null>" : $"'{extensionId}'";
+            return ExtensionReloadPublication.Failure(
+                new ExtensionErrorDetail(
+                    $"Reload publication for extension identifier {suppliedExtensionId} was rejected because the identifier must be non-empty and non-whitespace."));
         }
 
         var latest = await ReadLatestSnapshotAsync(snapshot, cancellationToken).ConfigureAwait(false);
         if (latest is null)
         {
-            return ExtensionReloadPublication.Failed;
+            return ExtensionReloadPublication.Failure(
+                new ExtensionErrorDetail(
+                    $"Extension '{extensionId}' could not be reloaded because no durable configuration snapshot at version '{snapshot.Version}' or newer was available."));
         }
 
         // Revalidate against the latest durable snapshot: a concurrent disable/delete may have
         // removed the target after the caller validated its own stale snapshot.
         var target = latest.ExtensionRecords.FirstOrDefault(value =>
             string.Equals(value.ExtensionId, extensionId, StringComparison.Ordinal));
-        if (target is null || target.LoadState != ExtensionLoadState.Loaded)
+        if (target is null)
         {
-            return ExtensionReloadPublication.TargetUnavailable;
+            return ExtensionReloadPublication.TargetUnavailable(
+                new ExtensionErrorDetail(
+                    $"Extension record '{extensionId}' was not present in the latest durable configuration snapshot."));
+        }
+
+        if (target.LoadState != ExtensionLoadState.Loaded)
+        {
+            return ExtensionReloadPublication.TargetUnavailable(
+                new ExtensionErrorDetail(
+                    $"Extension record '{extensionId}' has load state '{target.LoadState}' in the latest durable configuration snapshot; reloading requires Loaded."));
         }
 
         // Restart the recorded contract consumers in the same generation so they re-import from
@@ -486,27 +561,48 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         var outcome = await PublishAsync(
                 latest,
                 forceReloadIds,
+                requestedExtensionId: extensionId,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        return outcome == PublishOutcome.Published
-            ? new ExtensionReloadPublication(ExtensionReloadPublicationStatus.Published, latest.Version)
-            : ExtensionReloadPublication.Failed;
+        if (outcome == PublishOutcome.Published)
+        {
+            return new ExtensionReloadPublication(
+                ExtensionReloadPublicationStatus.Published,
+                latest.Version,
+                null);
+        }
+
+        return ExtensionReloadPublication.Failure(
+            outcome.FailureDetail ?? new ExtensionErrorDetail(
+                $"Extension '{extensionId}' reload publication returned status '{outcome}' without a failure detail from any known publication path."));
     }
 
     /// <summary>Describes one forced extension reload publication.</summary>
     /// <param name="Status">The publication outcome.</param>
     /// <param name="CommittedVersion">The committed snapshot version when published; otherwise zero.</param>
+    /// <param name="FailureDetail">The precise generation or Host publication failure, or <see langword="null" /> when published.</param>
     internal readonly record struct ExtensionReloadPublication(
         ExtensionReloadPublicationStatus Status,
-        long CommittedVersion)
+        long CommittedVersion,
+        ExtensionErrorDetail? FailureDetail)
     {
-        /// <summary>Gets the generic publication failure result.</summary>
-        internal static ExtensionReloadPublication Failed =>
-            new(ExtensionReloadPublicationStatus.Failed, 0);
+        /// <summary>Creates a failure with its required precise detail.</summary>
+        /// <param name="failureDetail">The precise generation or Host publication failure.</param>
+        /// <returns>A failed reload publication carrying <paramref name="failureDetail" />.</returns>
+        internal static ExtensionReloadPublication Failure(ExtensionErrorDetail failureDetail)
+        {
+            ArgumentNullException.ThrowIfNull(failureDetail);
+            return new(ExtensionReloadPublicationStatus.Failed, 0, failureDetail);
+        }
 
-        /// <summary>Gets the result for a target that is missing or no longer loaded in the latest snapshot.</summary>
-        internal static ExtensionReloadPublication TargetUnavailable =>
-            new(ExtensionReloadPublicationStatus.TargetUnavailable, 0);
+        /// <summary>Creates a target-unavailable result with its precise snapshot cause.</summary>
+        /// <param name="failureDetail">The precise reason the target extension cannot be reloaded.</param>
+        /// <returns>A target-unavailable result carrying <paramref name="failureDetail" />.</returns>
+        internal static ExtensionReloadPublication TargetUnavailable(ExtensionErrorDetail failureDetail)
+        {
+            ArgumentNullException.ThrowIfNull(failureDetail);
+            return new(ExtensionReloadPublicationStatus.TargetUnavailable, 0, failureDetail);
+        }
     }
 
     /// <summary>Identifies forced reload publication outcomes.</summary>

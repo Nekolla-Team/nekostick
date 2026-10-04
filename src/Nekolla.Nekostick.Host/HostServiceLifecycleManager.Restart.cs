@@ -21,27 +21,35 @@ public sealed partial class HostServiceLifecycleManager
         cancellationToken.ThrowIfCancellationRequested();
         if (IsStopping)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Service '{serviceId}' cannot be resumed because the host service lifecycle is stopping."));
         }
 
         var snapshot = _snapshotHolder.Current;
         if (snapshot is null)
         {
+            var hasRuntimeSlot = _slots.ContainsKey(serviceId);
             return ConfigurationWriteResult.Failure(new ConfigurationError(
-                _slots.ContainsKey(serviceId)
-                    ? ConfigurationErrorCode.StorageUnavailable
-                    : ConfigurationErrorCode.NotFound));
+                hasRuntimeSlot ? ConfigurationErrorCode.StorageUnavailable : ConfigurationErrorCode.NotFound,
+                hasRuntimeSlot
+                    ? $"The current host configuration snapshot is unavailable, so service '{serviceId}' cannot be resumed."
+                    : $"Service '{serviceId}' could not be located for resume because no runtime slot exists and the current host configuration snapshot is unavailable."));
         }
 
         var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
         if (service is null)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.NotFound,
+                $"Service '{serviceId}' was not found in the current host configuration."));
         }
 
         if (!_runtimeState.NewServicesAllowed)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Service '{serviceId}' cannot be resumed because the host service-runtime gate disallows new service operations."));
         }
 
         if (!_slots.TryGetValue(serviceId, out var slot))
@@ -81,22 +89,29 @@ public sealed partial class HostServiceLifecycleManager
             {
                 HostServiceReadinessStatus.Ready => ConfigurationWriteResult.Success(),
                 HostServiceReadinessStatus.DatabaseUnavailable => ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)),
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        $"Service '{serviceId}' could not be resumed because the database gate is unavailable.")),
                 HostServiceReadinessStatus.Disabled => ConfigurationWriteResult.NoOp(),
                 HostServiceReadinessStatus.Cancelled => ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)),
-                // The retry finished without the service becoming ready: the prerequisite is
-                // still missing, so no resume actually happened.
-                _ => ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation)),
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        $"The host cancelled the readiness retry for service '{serviceId}' before it became ready.")),
+                _ => ConfigurationWriteResult.Failure(
+                    new ConfigurationError(
+                        ConfigurationErrorCode.Validation,
+                        $"Service '{serviceId}' did not become ready during resume; the lifecycle manager returned readiness status '{result.Status}'.")),
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch
+        catch (Exception exception)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.Validation,
+                $"The readiness retry for service '{serviceId}' failed with {exception.GetType().Name}."));
         }
         finally
         {
@@ -119,32 +134,49 @@ public sealed partial class HostServiceLifecycleManager
         cancellationToken.ThrowIfCancellationRequested();
         if (IsStopping)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Service '{serviceId}' cannot be restarted because the host service lifecycle is stopping."));
         }
 
         var snapshot = _snapshotHolder.Current;
         if (snapshot is null)
         {
+            var hasRuntimeSlot = _slots.ContainsKey(serviceId);
             return ConfigurationWriteResult.Failure(new ConfigurationError(
-                _slots.ContainsKey(serviceId)
-                    ? ConfigurationErrorCode.StorageUnavailable
-                    : ConfigurationErrorCode.NotFound));
+                hasRuntimeSlot ? ConfigurationErrorCode.StorageUnavailable : ConfigurationErrorCode.NotFound,
+                hasRuntimeSlot
+                    ? $"The current host configuration snapshot is unavailable, so service '{serviceId}' cannot be restarted."
+                    : $"Service '{serviceId}' could not be located for restart because no runtime slot exists and the current host configuration snapshot is unavailable."));
         }
 
         var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
         if (service is null)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.NotFound));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.NotFound,
+                $"Service '{serviceId}' was not found in the current host configuration."));
         }
 
-        if (!service.Enabled || !IsServiceEnabledForSnapshot(snapshot, serviceId))
+        if (!service.Enabled)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Validation));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.Validation,
+                $"Service '{serviceId}' has Enabled=false; restarting requires Enabled=true."));
+        }
+
+        if (!IsServiceEnabledForSnapshot(snapshot, serviceId))
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.Validation,
+                $"Service '{serviceId}' is disabled by the effective host configuration; restart requires effective enablement, which is currently false."));
         }
 
         if (!_runtimeState.NewServicesAllowed)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Service '{serviceId}' cannot be restarted because the host service-runtime gate disallows new service operations."));
         }
 
         Task<HostServiceReadinessResult>? existingStartup = null;
@@ -171,7 +203,9 @@ public sealed partial class HostServiceLifecycleManager
         await WithdrawAsync(serviceId, CancellationToken.None).ConfigureAwait(false);
         if (IsStopping)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Service '{serviceId}' cannot be restarted because the host service lifecycle stopped during endpoint withdrawal."));
         }
 
         var readiness = await EnsureReadyAsync(snapshot, serviceId, cancellationToken).ConfigureAwait(false);
@@ -182,7 +216,9 @@ public sealed partial class HostServiceLifecycleManager
 
         if (readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable)
         {
-            return ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                $"Service '{serviceId}' could not be restarted because the database gate is unavailable."));
         }
 
         return ConfigurationWriteResult.Success();

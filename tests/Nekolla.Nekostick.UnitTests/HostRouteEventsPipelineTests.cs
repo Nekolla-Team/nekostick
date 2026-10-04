@@ -31,7 +31,7 @@ public sealed class HostRouteEventsPipelineTests
         {
             Configure = events =>
             {
-                Assert.True(events.TrySubscribe(async (@event, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TrySubscribe(async (@event, _) =>
                 {
                     if (@event.Type is not (ExtensionRouteEventTypes.Trigger or ExtensionRouteEventTypes.Return))
                     {
@@ -85,14 +85,14 @@ public sealed class HostRouteEventsPipelineTests
         {
             Configure = events =>
             {
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context, _) =>
                 {
                     order.Add(1);
                     return ValueTask.FromResult(new ExtensionRouteHookResult(
                         ExtensionRouteHookAction.ReplaceRequest,
                         Request("/first")));
                 }));
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context, _) =>
                 {
                     order.Add(context.Request.Path == "/first" ? 2 : -2);
                     return ValueTask.FromResult(new ExtensionRouteHookResult(
@@ -129,14 +129,14 @@ public sealed class HostRouteEventsPipelineTests
         {
             Configure = events =>
             {
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
                 {
                     statuses.Add(context.Response!.StatusCode);
                     return ValueTask.FromResult(new ExtensionRouteHookResult(
                         ExtensionRouteHookAction.ReplaceResponse,
                         response: new ExtensionRouteResponseSnapshot(201)));
                 }));
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
                 {
                     statuses.Add(context.Response!.StatusCode);
                     return ValueTask.FromResult(new ExtensionRouteHookResult(
@@ -172,11 +172,11 @@ public sealed class HostRouteEventsPipelineTests
         {
             Configure = events =>
             {
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (_, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (_, _) =>
                     ValueTask.FromResult(new ExtensionRouteHookResult(
                         ExtensionRouteHookAction.ReplaceRequest,
                         Request("/partial")))));
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (_, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (_, _) =>
                     ValueTask.FromResult(new ExtensionRouteHookResult(
                         ExtensionRouteHookAction.ReplaceResponse,
                         response: new ExtensionRouteResponseSnapshot(200)))));
@@ -207,7 +207,7 @@ public sealed class HostRouteEventsPipelineTests
         var seenRouteId = Guid.Empty;
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 (context, _) =>
                 {
@@ -261,7 +261,7 @@ public sealed class HostRouteEventsPipelineTests
         var original = Request("/original");
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 async (_, token) =>
                 {
@@ -294,7 +294,7 @@ public sealed class HostRouteEventsPipelineTests
         var lateResult = NewSignal();
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 async (_, token) =>
                 {
@@ -331,7 +331,7 @@ public sealed class HostRouteEventsPipelineTests
         var release = NewSignal();
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 async (_, _) =>
                 {
@@ -360,9 +360,12 @@ public sealed class HostRouteEventsPipelineTests
         var result = await dispatch;
         AssertFailClosed(result, Request("/original"));
         Assert.True(await retirement);
-        Assert.False(factory.RouteEvents!.TryRegisterHook(
+        var registrationResult = factory.RouteEvents!.TryRegisterHook(
             ExtensionRouteEventStage.Trigger,
-            (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue))));
+            (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue)));
+        var failure = Assert.IsType<ExtensionRouteRegistrationFailureResult>(registrationResult);
+        Assert.Equal(ExtensionRouteRegistrationFailureCode.Unavailable, failure.Code);
+        Assert.NotNull(failure.Detail);
     }
 
     [Fact]
@@ -377,18 +380,34 @@ public sealed class HostRouteEventsPipelineTests
             {
                 for (var index = 0; index < ExtensionRouteHookLimits.MaximumHookRegistrations + 1; index++)
                 {
-                    Assert.Equal(
-                        index < ExtensionRouteHookLimits.MaximumHookRegistrations,
-                        events.TryRegisterHook(
-                            ExtensionRouteEventStage.Trigger,
-                            (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue))));
+                    var hookResult = events.TryRegisterHook(
+                        ExtensionRouteEventStage.Trigger,
+                        (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue)));
+                    if (index < ExtensionRouteHookLimits.MaximumHookRegistrations)
+                    {
+                        Assert.Same(ExtensionRouteRegistrationResult.Success, hookResult);
+                    }
+                    else
+                    {
+                        var failure = Assert.IsType<ExtensionRouteRegistrationFailureResult>(hookResult);
+                        Assert.Equal(ExtensionRouteRegistrationFailureCode.LimitReached, failure.Code);
+                        Assert.NotNull(failure.Detail);
+                    }
                 }
 
                 for (var index = 0; index < ExtensionRouteHookLimits.MaximumSubscriptionRegistrations + 1; index++)
                 {
-                    Assert.Equal(
-                        index < ExtensionRouteHookLimits.MaximumSubscriptionRegistrations,
-                        events.TrySubscribe((_, _) => ValueTask.CompletedTask));
+                    var subscriptionResult = events.TrySubscribe((_, _) => ValueTask.CompletedTask);
+                    if (index < ExtensionRouteHookLimits.MaximumSubscriptionRegistrations)
+                    {
+                        Assert.Same(ExtensionRouteRegistrationResult.Success, subscriptionResult);
+                    }
+                    else
+                    {
+                        var failure = Assert.IsType<ExtensionRouteRegistrationFailureResult>(subscriptionResult);
+                        Assert.Equal(ExtensionRouteRegistrationFailureCode.LimitReached, failure.Code);
+                        Assert.NotNull(failure.Detail);
+                    }
                 }
             }
         };
@@ -408,12 +427,12 @@ public sealed class HostRouteEventsPipelineTests
         {
             Configure = events =>
             {
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context, _) =>
                 {
                     triggerBody = context.Request.Body.ToArray();
                     return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
                 }));
-                Assert.True(events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
                 {
                     returnBody = context.Response!.Body.ToArray();
                     return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));

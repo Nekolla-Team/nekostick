@@ -98,7 +98,8 @@ public sealed class ExtensionCapabilityFactory : IExtensionCapabilityFactory, IE
                 logger: logger),
             new ExtensionEndpointFacade(
                 extensionId,
-                _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>()),
+                _serviceProvider.GetService<IHostServiceEndpointSnapshotAccessor>(),
+                logger: logger),
             new ExtensionFullConfigurationFacade(extensionId, _scopeFactory, _runtimeState),
             supervisor,
             routeEvents,
@@ -170,7 +171,9 @@ internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigura
         var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
         return hostConfig is null
             ? ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported))
+                new ConfigurationError(
+                    ConfigurationErrorCode.Unsupported,
+                    "The host configuration API is unavailable; the full configuration snapshot cannot be read."))
             : await hostConfig.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -182,7 +185,9 @@ internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigura
         if (!_runtimeState.ConfigurationWritesAllowed)
         {
             return ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+                new ConfigurationError(
+                    ConfigurationErrorCode.Unsupported,
+                    "The host runtime disallows writes to the full configuration snapshot."));
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
@@ -190,7 +195,9 @@ internal sealed class ExtensionFullConfigurationFacade : IExtensionFullConfigura
         if (hostConfig is null)
         {
             return ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.Unsupported));
+                new ConfigurationError(
+                    ConfigurationErrorCode.Unsupported,
+                    "The host configuration API is unavailable; the full configuration snapshot cannot be replaced."));
         }
 
         using var writeContext = HostConfigurationWriteContext.EnterExtension(_extensionId);
@@ -205,13 +212,16 @@ internal sealed class ExtensionEndpointFacade : IExtensionEndpointApi
 {
     private readonly string _extensionId;
     private readonly IHostServiceEndpointSnapshotAccessor? _accessor;
+    private readonly ILogger _logger;
 
     internal ExtensionEndpointFacade(
         string extensionId,
-        IHostServiceEndpointSnapshotAccessor? accessor)
+        IHostServiceEndpointSnapshotAccessor? accessor,
+        ILogger? logger = null)
     {
         _extensionId = extensionId ?? throw new ArgumentNullException(nameof(extensionId));
         _accessor = accessor;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public ImmutableArray<ExtensionEndpointLease> Current
@@ -229,20 +239,63 @@ internal sealed class ExtensionEndpointFacade : IExtensionEndpointApi
         }
     }
 
-    public ValueTask<ExtensionEndpointLease?> ResolveAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    public ValueTask<ExtensionEndpointResolutionResult> ResolveAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var now = DateTimeOffset.UtcNow;
-        if (_accessor is null ||
-            !_accessor.Current.TryGetValue(serviceId, out var value) ||
-            !value.IsActive(now) ||
-            !string.Equals(value.OwnerExtensionId, _extensionId, StringComparison.Ordinal))
+        if (_accessor is null)
         {
-            return ValueTask.FromResult<ExtensionEndpointLease?>(null);
+            return ValueTask.FromResult(ExtensionEndpointResolutionResult.Unavailable);
         }
 
-        return ValueTask.FromResult<ExtensionEndpointLease?>(
-            new ExtensionEndpointLease(value.ServiceId, value.Port, value.ExpiresAt));
+        if (!_accessor.Current.TryGetValue(serviceId, out var value))
+        {
+            HostLogMessages.ExtensionEndpointResolutionNotFound(
+                _logger,
+                _extensionId,
+                serviceId,
+                "NoPublishedLease",
+                null);
+            return ValueTask.FromResult(ExtensionEndpointResolutionResult.NotFound);
+        }
+
+        if (!string.Equals(value.OwnerExtensionId, _extensionId, StringComparison.Ordinal))
+        {
+            HostLogMessages.ExtensionEndpointResolutionNotFound(
+                _logger,
+                _extensionId,
+                serviceId,
+                "OwnerMismatch",
+                value.OwnerExtensionId);
+            return ValueTask.FromResult(ExtensionEndpointResolutionResult.NotFound);
+        }
+        var now = DateTimeOffset.UtcNow;
+        if (value.ExpiresAt <= now)
+        {
+            HostLogMessages.ExtensionEndpointResolutionNotFound(
+                _logger,
+                _extensionId,
+                serviceId,
+                "ExpiredLease",
+                value.OwnerExtensionId);
+            return ValueTask.FromResult(ExtensionEndpointResolutionResult.NotFound);
+        }
+
+        if (!value.IsActive(now))
+        {
+            HostLogMessages.ExtensionEndpointResolutionNotFound(
+                _logger,
+                _extensionId,
+                serviceId,
+                "InactiveLease",
+                value.OwnerExtensionId);
+            return ValueTask.FromResult(ExtensionEndpointResolutionResult.NotFound);
+        }
+
+        return ValueTask.FromResult<ExtensionEndpointResolutionResult>(
+            ExtensionEndpointResolutionResult.Success(
+                new ExtensionEndpointLease(value.ServiceId, value.Port, value.ExpiresAt)));
     }
 }
 internal sealed class ExtensionConfigurationFacade : IExtensionConfigurationApi
@@ -318,15 +371,17 @@ internal sealed class ExtensionConfigurationFacade : IExtensionConfigurationApi
         if (store is null)
         {
             return typeof(T) == typeof(ConfigurationWriteResult)
-                ? (T)(object)UnsupportedWrite()
+                ? (T)(object)UnsupportedWrite("The extension-owned configuration store is unavailable; the write could not be completed.")
                 : throw new InvalidOperationException("The extension capability store is unavailable.");
         }
 
         return await operation(store, _extensionId, handlerIsOwned, cancellationToken).ConfigureAwait(false);
     }
 
-    private static ConfigurationWriteResult UnsupportedWrite() =>
-        ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported));
+    private static ConfigurationWriteResult UnsupportedWrite(
+        string message = "Extension configuration writes are disallowed by the host runtime.") =>
+        ConfigurationWriteResult.Failure(
+            new ConfigurationError(ConfigurationErrorCode.Unsupported, message));
 }
 
 internal sealed class ExtensionRouteFacade : IExtensionRouteApi
@@ -438,37 +493,87 @@ internal sealed class ExtensionServiceFacade : IExtensionServiceApi
     public ValueTask<ExtensionServiceOperationResult> StopAsync(
         Guid serviceId,
         CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId));
+        ValueTask.FromResult(Failure(
+            serviceId,
+            ExtensionServiceOperationCode.Unsupported,
+            $"The extension service API does not support stopping service '{serviceId}'."));
 
     public ValueTask<ExtensionServiceOperationResult> RestartAsync(
         Guid serviceId,
         CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId));
+        ValueTask.FromResult(Failure(
+            serviceId,
+            ExtensionServiceOperationCode.Unsupported,
+            $"The extension service API does not support restarting service '{serviceId}'."));
 
-    private async ValueTask<ExtensionServiceOperationResult> OperateAsync(Guid serviceId, CancellationToken cancellationToken)
+    private async ValueTask<ExtensionServiceOperationResult> OperateAsync(
+        Guid serviceId,
+        CancellationToken cancellationToken)
     {
-        if (!_runtimeState.ConfigurationWritesAllowed || _lifecycle is null)
+        if (!_runtimeState.ConfigurationWritesAllowed)
         {
-            return new(false, ExtensionServiceOperationCode.Unsupported, serviceId);
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Unsupported,
+                $"The host runtime disallows service lifecycle changes; service '{serviceId}' cannot be started.");
+        }
+
+        if (_lifecycle is null)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Unsupported,
+                $"The host service lifecycle coordinator is unavailable; service '{serviceId}' cannot be started.");
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var hostConfig = scope.ServiceProvider.GetService<IHostConfigApi>();
         if (hostConfig is null)
         {
-            return new(false, ExtensionServiceOperationCode.Unsupported, serviceId);
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Unsupported,
+                $"The host configuration API is unavailable; service '{serviceId}' cannot be started.");
         }
 
         var owned = await _configuration.ReadAsync(cancellationToken).ConfigureAwait(false);
-        if (!owned.IsSuccess || owned.Value is not { } ownedValue || !ownedValue.Services.Any(value => value.Id == serviceId))
+        if (!owned.IsSuccess)
         {
-            return new(false, ExtensionServiceOperationCode.NotFound, serviceId);
+            var reason = owned.Errors.IsDefaultOrEmpty
+                ? "the caller-owned service configuration could not be read"
+                : owned.Errors[0].Message;
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Failed,
+                $"Service '{serviceId}' ownership could not be verified because {reason}.");
+        }
+
+        if (owned.Value is not { } ownedValue || !ownedValue.Services.Any(value => value.Id == serviceId))
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.NotFound,
+                $"Service '{serviceId}' was not found in the caller's owned service configuration.");
         }
 
         var snapshot = await hostConfig.ReadSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        if (!snapshot.IsSuccess || snapshot.Value is not { } full)
+        if (!snapshot.IsSuccess)
         {
-            return new(false, ExtensionServiceOperationCode.Failed, serviceId);
+            var reason = snapshot.Errors.IsDefaultOrEmpty
+                ? "the host configuration snapshot could not be read"
+                : snapshot.Errors[0].Message;
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Failed,
+                $"Service '{serviceId}' could not be started because {reason}.");
+        }
+
+        if (snapshot.Value is not { } full)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Failed,
+                $"Service '{serviceId}' could not be started because the host configuration snapshot was unavailable.");
         }
 
         HostServiceReadinessResult readiness;
@@ -478,22 +583,90 @@ internal sealed class ExtensionServiceFacade : IExtensionServiceApi
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return new(false, ExtensionServiceOperationCode.Cancelled, serviceId);
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Cancelled,
+                $"Starting service '{serviceId}' was cancelled before the host could establish readiness.");
         }
         catch (Exception exception)
         {
             HostLogMessages.ExtensionServiceLifecycleFailed(_logger, exception, serviceId);
-            return new(false, ExtensionServiceOperationCode.Failed, serviceId);
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Failed,
+                $"The host lifecycle operation for service '{serviceId}' failed with {exception.GetType().Name}.");
         }
 
-        return readiness.Status switch
-        {
-            HostServiceReadinessStatus.Ready => new(true, ExtensionServiceOperationCode.Accepted, serviceId),
-            HostServiceReadinessStatus.Disabled => new(false, ExtensionServiceOperationCode.AlreadyStopped, serviceId),
-            HostServiceReadinessStatus.Cancelled => new(false, ExtensionServiceOperationCode.Cancelled, serviceId),
-            HostServiceReadinessStatus.DatabaseUnavailable => new(false, ExtensionServiceOperationCode.Unsupported, serviceId),
-            _ => new(false, ExtensionServiceOperationCode.Failed, serviceId)
-        };
+        return ToOperationResult(serviceId, readiness);
     }
+
+    private static ExtensionServiceOperationResult ToOperationResult(
+        Guid serviceId,
+        HostServiceReadinessResult readiness)
+    {
+        if (readiness.Status == HostServiceReadinessStatus.Ready)
+        {
+            return new ExtensionServiceOperationResult(
+                true,
+                ExtensionServiceOperationCode.Accepted,
+                serviceId);
+        }
+
+        if (readiness.Status == HostServiceReadinessStatus.Disabled)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.AlreadyStopped,
+                $"Service '{serviceId}' is disabled and cannot be started in its current configuration.");
+        }
+
+        if (readiness.Status == HostServiceReadinessStatus.Cancelled)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Cancelled,
+                $"The host cancelled the start request for service '{serviceId}'.");
+        }
+
+        var runtime = readiness.Snapshot;
+        if (runtime?.Reason == ServiceStateReasonCode.PortLeaseConflict)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Conflict,
+                $"The supervisor rejected service '{serviceId}' because its requested port lease conflicted with another lease.");
+        }
+
+        if (runtime?.Reason == ServiceStateReasonCode.Superseded)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Conflict,
+                $"The supervisor superseded the start request for service '{serviceId}' while using configuration version {readiness.ConfigurationVersion}.");
+        }
+
+        if (readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable ||
+            runtime?.Reason == ServiceStateReasonCode.DatabaseUnavailable)
+        {
+            return Failure(
+                serviceId,
+                ExtensionServiceOperationCode.Failed,
+                $"Service '{serviceId}' could not be started because the database gate prevents new service work.");
+        }
+
+        var rejectionReason = runtime is null
+            ? $"readiness status '{readiness.Status}' without a runtime snapshot"
+            : $"supervisor reason '{runtime.Reason}' (lifecycle '{runtime.ObservedLifecycle}', health '{runtime.Health}')";
+        return Failure(
+            serviceId,
+            ExtensionServiceOperationCode.Failed,
+            $"The supervisor did not make service '{serviceId}' ready because of {rejectionReason}.");
+    }
+
+    private static ExtensionServiceOperationResult Failure(
+        Guid serviceId,
+        ExtensionServiceOperationCode code,
+        string message) =>
+        new(false, code, serviceId, new ExtensionErrorDetail(message));
 }
 

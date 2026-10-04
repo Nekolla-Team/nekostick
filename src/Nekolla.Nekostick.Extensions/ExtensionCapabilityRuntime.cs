@@ -128,12 +128,22 @@ internal sealed class ExtensionLifecycleApi : IExtensionLifecycleApi
 
     public ValueTask<ExtensionLifecycleOperationResult> RequestReloadAsync(CancellationToken cancellationToken = default) =>
         ExtensionCallbackGuard.IsActive
-            ? ValueTask.FromResult(new ExtensionLifecycleOperationResult(false, ExtensionLifecycleOperationCode.Reentrant, _status()))
+            ? ValueTask.FromResult(
+                new ExtensionLifecycleOperationResult(
+                    false,
+                    ExtensionLifecycleOperationCode.Reentrant,
+                    _status(),
+                    new ExtensionErrorDetail("A reentrant extension reload request is not allowed from an extension callback.")))
             : _reload(cancellationToken);
 
     public ValueTask<ExtensionLifecycleOperationResult> RequestUnloadAsync(CancellationToken cancellationToken = default) =>
         ExtensionCallbackGuard.IsActive
-            ? ValueTask.FromResult(new ExtensionLifecycleOperationResult(false, ExtensionLifecycleOperationCode.Reentrant, _status()))
+            ? ValueTask.FromResult(
+                new ExtensionLifecycleOperationResult(
+                    false,
+                    ExtensionLifecycleOperationCode.Reentrant,
+                    _status(),
+                    new ExtensionErrorDetail("A reentrant extension unload request is not allowed from an extension callback.")))
             : _unload(cancellationToken);
 }
 
@@ -187,6 +197,17 @@ internal static class UnsupportedExtensionCapabilities
 
         return Guid.CreateVersion7();
     }
+    private static ConfigurationError UnsupportedConfigurationError(
+        string operation,
+        HostApiVersion? apiVersion = null) =>
+        new(
+            ConfigurationErrorCode.Unsupported,
+            apiVersion is { } version
+                ? $"The negotiated Host API version {version} does not support {operation}."
+                : $"The extension host does not support {operation}.");
+
+    private static ExtensionErrorDetail UnsupportedDetail(string capability) =>
+        new($"The extension host does not support {capability}.");
 
 
 
@@ -198,23 +219,21 @@ internal static class UnsupportedExtensionCapabilities
 
         public HostApiVersion ApiVersion => _apiVersion;
         public ValueTask<ConfigurationReadResult<ExtensionConfigurationSnapshot>> ReadAsync(CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ExtensionConfigurationSnapshot>.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationReadResult<ExtensionConfigurationSnapshot>.Failure(UnsupportedConfigurationError("extension configuration reads", _apiVersion)));
         public ValueTask<ConfigurationWriteResult> ApplyAsync(long expectedVersion, ExtensionConfigurationChangeSet changes, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationWriteResult.Failure(UnsupportedConfigurationError("extension configuration writes", _apiVersion)));
         public ValueTask<ConfigurationReadResult<ExtensionSettingsConfiguration>> ReadSettingsAsync(CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(UnsupportedConfigurationError("extension settings reads", _apiVersion)));
         public ValueTask<ConfigurationWriteResult> WriteSettingsAsync(long expectedVersion, ExtensionSettingsConfiguration settings, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationWriteResult.Failure(UnsupportedConfigurationError("extension settings writes", _apiVersion)));
     }
-
-
     private sealed class UnsupportedFullConfigurationApi : IExtensionFullConfigurationApi
     {
         public ValueTask<ConfigurationReadResult<HostConfigurationSnapshot>> ReadAsync(
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("full host configuration reads")));
 
         public ValueTask<ConfigurationWriteResult> ReplaceAsync(
             long expectedVersion,
@@ -222,17 +241,17 @@ internal static class UnsupportedExtensionCapabilities
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("full host configuration writes")));
     }
 
     private sealed class UnsupportedRouteApi : IExtensionRouteApi
     {
         public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionRouteConfiguration>>> ReadOwnedAsync(CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ImmutableArray<ExtensionRouteConfiguration>>.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationReadResult<ImmutableArray<ExtensionRouteConfiguration>>.Failure(UnsupportedConfigurationError("extension route reads")));
         public ValueTask<ConfigurationWriteResult> UpsertAsync(long expectedVersion, ExtensionRouteConfiguration route, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationWriteResult.Failure(UnsupportedConfigurationError("extension route writes")));
         public ValueTask<ConfigurationWriteResult> RemoveAsync(long expectedVersion, Guid routeId, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationWriteResult.Failure(UnsupportedConfigurationError("extension route writes")));
     }
     private sealed class UnsupportedDependencyApi : IExtensionDependencyApi
     {
@@ -253,17 +272,17 @@ internal static class UnsupportedExtensionCapabilities
     private sealed class UnsupportedServiceApi : IExtensionServiceApi
     {
         public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceConfiguration>>> ReadOwnedAsync(CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationReadResult<ImmutableArray<ExtensionServiceConfiguration>>.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationReadResult<ImmutableArray<ExtensionServiceConfiguration>>.Failure(UnsupportedConfigurationError("extension service reads")));
         public ValueTask<ConfigurationWriteResult> UpsertAsync(long expectedVersion, ExtensionServiceConfiguration service, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationWriteResult.Failure(UnsupportedConfigurationError("extension service writes")));
         public ValueTask<ConfigurationWriteResult> RemoveAsync(long expectedVersion, Guid serviceId, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+            ValueTask.FromResult(ConfigurationWriteResult.Failure(UnsupportedConfigurationError("extension service writes")));
         public ValueTask<ExtensionServiceOperationResult> StartAsync(Guid serviceId, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId));
+            ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId, UnsupportedDetail("service start operations")));
         public ValueTask<ExtensionServiceOperationResult> StopAsync(Guid serviceId, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId));
+            ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId, UnsupportedDetail("service stop operations")));
         public ValueTask<ExtensionServiceOperationResult> RestartAsync(Guid serviceId, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId));
+            ValueTask.FromResult(new ExtensionServiceOperationResult(false, ExtensionServiceOperationCode.Unsupported, serviceId, UnsupportedDetail("service restart operations")));
     }
     private sealed class UnsupportedServiceOutputApi : IExtensionServiceOutputApi
     {
@@ -276,7 +295,8 @@ internal static class UnsupportedExtensionCapabilities
                     false,
                     ExtensionServiceOutputCode.Unsupported,
                     SafeServiceId(serviceId),
-                    null));
+                    null,
+                    UnsupportedDetail("service output streaming")));
         public ValueTask<ExtensionServiceLogSubscriptionResult> SubscribeAsync(
             Guid serviceId,
             IExtensionServiceLogSink sink,
@@ -287,8 +307,8 @@ internal static class UnsupportedExtensionCapabilities
                     false,
                     ExtensionServiceLogCode.Unsupported,
                     SafeServiceId(serviceId),
-                    null));
-
+                    null,
+                    UnsupportedDetail("service log subscriptions")));
     }
     private sealed class UnsupportedServiceRuntimeStateApi : IExtensionServiceRuntimeStateApi
     {
@@ -299,15 +319,19 @@ internal static class UnsupportedExtensionCapabilities
                 new ExtensionServiceRuntimeStateSubscriptionResult(
                     false,
                     ExtensionServiceRuntimeStateSubscriptionCode.Unsupported,
-                    null));
+                    null,
+                    UnsupportedDetail("service runtime-state subscriptions")));
     }
 
 
     private sealed class UnsupportedEndpointApi : IExtensionEndpointApi
     {
         public ImmutableArray<ExtensionEndpointLease> Current => ImmutableArray<ExtensionEndpointLease>.Empty;
-        public ValueTask<ExtensionEndpointLease?> ResolveAsync(Guid serviceId, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult<ExtensionEndpointLease?>(null);
+        public ValueTask<ExtensionEndpointResolutionResult> ResolveAsync(Guid serviceId, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                ExtensionEndpointResolutionResult.Failure(
+                    ExtensionEndpointResolutionFailureCode.Unsupported,
+                    UnsupportedDetail("endpoint resolution")));
     }
     private sealed class UnsupportedLifecycleApi : IExtensionLifecycleApi
     {
@@ -319,7 +343,8 @@ internal static class UnsupportedExtensionCapabilities
                 new ExtensionLifecycleOperationResult(
                     false,
                     ExtensionLifecycleOperationCode.Unsupported,
-                    null));
+                    null,
+                    UnsupportedDetail("extension reload requests")));
 
         public ValueTask<ExtensionLifecycleOperationResult> RequestUnloadAsync(
             CancellationToken cancellationToken = default) =>
@@ -327,7 +352,8 @@ internal static class UnsupportedExtensionCapabilities
                 new ExtensionLifecycleOperationResult(
                     false,
                     ExtensionLifecycleOperationCode.Unsupported,
-                    null));
+                    null,
+                    UnsupportedDetail("extension unload requests")));
     }
 
     private sealed class UnsupportedSupervisorApi : IExtensionSupervisorApi
@@ -336,35 +362,35 @@ internal static class UnsupportedExtensionCapabilities
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("supervisor state reads")));
 
         public ValueTask<ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>> ReadForExtensionAsync(
             string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionServiceRuntimeSnapshot>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("supervisor state reads")));
 
         public ValueTask<ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>> GetAsync(
             Guid serviceId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("supervisor state reads")));
 
         public ValueTask<ConfigurationWriteResult> ResumeAsync(
             Guid serviceId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("supervisor resume operations")));
 
         public ValueTask<ConfigurationWriteResult> RestartAsync(
             Guid serviceId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("supervisor restart operations")));
     }
 
     private sealed class UnsupportedManagementApi : IExtensionManagementApi
@@ -379,53 +405,59 @@ internal static class UnsupportedExtensionCapabilities
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ImmutableArray<ExtensionManagementEntry>>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("extension management list operations", _apiVersion)));
 
         public ValueTask<ConfigurationWriteResult> EnableAsync(
             string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("extension management enable operations", _apiVersion)));
 
         public ValueTask<ConfigurationWriteResult> DisableAsync(
             string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("extension management disable operations", _apiVersion)));
 
         public ValueTask<ConfigurationWriteResult> ReloadAsync(
             string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("extension management reload operations", _apiVersion)));
 
-        public bool ReloadSoon(string extensionId) => false;
+        public ExtensionReloadScheduleResult ReloadSoon(string extensionId) =>
+            ExtensionReloadScheduleResult.Failure(
+                ExtensionReloadScheduleFailureCode.Unsupported,
+                new ExtensionErrorDetail(
+                    $"The negotiated Host API version {_apiVersion} does not support extension reload scheduling."));
 
         public ValueTask<ConfigurationWriteResult> DeleteRecordAsync(
             string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("extension management record deletion", _apiVersion)));
 
         public ValueTask<ConfigurationReadResult<ExtensionRefreshSummary>> RequestRefreshAsync(
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionRefreshSummary>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Unsupported)));
+                    UnsupportedConfigurationError("extension management refresh operations", _apiVersion)));
     }
 
     private sealed class UnsupportedRouteEvents : IExtensionRouteEvents
     {
-        public bool TrySubscribe(
-            Func<ExtensionEvent, CancellationToken, ValueTask> callback) => false;
+        public ExtensionRouteRegistrationResult TrySubscribe(
+            Func<ExtensionEvent, CancellationToken, ValueTask> callback) =>
+            ExtensionRouteRegistrationResult.Unsupported;
 
-        public bool TryRegisterHook(
+        public ExtensionRouteRegistrationResult TryRegisterHook(
             ExtensionRouteEventStage stage,
-            Func<ExtensionRouteHookContext, CancellationToken, ValueTask<ExtensionRouteHookResult>> callback) => false;
+            Func<ExtensionRouteHookContext, CancellationToken, ValueTask<ExtensionRouteHookResult>> callback) =>
+            ExtensionRouteRegistrationResult.Unsupported;
     }
 
     /// <summary>Represents the unsupported API 1.3 custom logging compatibility path.</summary>

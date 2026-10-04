@@ -9,6 +9,36 @@ internal static class YamlManifestParser
     private const int MaxManifestBytes = 1024 * 1024;
     private const int MaxManifestDepth = 32;
 
+    private enum DuplicateKeyScanResult
+    {
+        Valid,
+        Duplicate,
+        Invalid
+    }
+
+    private sealed class DuplicateKeyScanScope
+    {
+        internal DuplicateKeyScanScope(bool isMapping, string path)
+        {
+            IsMapping = isMapping;
+            Path = path;
+            Keys = isMapping ? new HashSet<string>(StringComparer.Ordinal) : null;
+            ExpectingKey = true;
+        }
+
+        internal bool IsMapping { get; }
+
+        internal string Path { get; }
+
+        internal bool ExpectingKey { get; set; }
+
+        internal HashSet<string>? Keys { get; }
+
+        internal string? PendingKey { get; set; }
+
+        internal int NextIndex { get; set; }
+    }
+
     internal static ManifestDiscoveryResult Parse(string root, string manifestPath)
     {
         try
@@ -16,91 +46,134 @@ internal static class YamlManifestParser
             var bytes = File.ReadAllBytes(manifestPath);
             if (bytes.Length > MaxManifestBytes)
             {
-                return Failure(ExtensionFailureCode.YamlInvalid);
+                return Failure(
+                    ExtensionFailureCode.YamlInvalid,
+                    $"YAML manifest {ExtensionDiagnosticText.Value(manifestPath)} is {bytes.Length} bytes; the maximum supported size is {MaxManifestBytes} bytes.");
             }
 
             var manifestText = System.Text.Encoding.UTF8.GetString(bytes);
-            var prepass = ScanDuplicateScalarKeys(manifestText);
+            var prepass = ScanDuplicateScalarKeys(
+                manifestText,
+                out var duplicatePath,
+                out var duplicateField,
+                out var duplicateLine);
             if (prepass == DuplicateKeyScanResult.Duplicate)
             {
-                return Failure(ExtensionFailureCode.DuplicateManifestField);
-            }
-
-            if (prepass == DuplicateKeyScanResult.Invalid)
-            {
-                return Failure(ExtensionFailureCode.YamlInvalid);
+                return Failure(
+                    ExtensionFailureCode.DuplicateManifestField,
+                    $"Duplicate manifest field {ExtensionDiagnosticText.Value(duplicateField)} at '{duplicatePath}' on line {duplicateLine}.");
             }
 
             using var reader = new StringReader(manifestText);
             var stream = new YamlStream();
             stream.Load(reader);
-
-            if (stream.Documents.Count != 1 || stream.Documents[0].RootNode is not YamlMappingNode mapping)
+            var rootNode = stream.Documents.Count > 0 ? stream.Documents[0].RootNode : null;
+            if (stream.Documents.Count != 1 || rootNode is not YamlMappingNode mapping)
             {
-                return Failure(ExtensionFailureCode.YamlInvalid);
+                return Failure(
+                    ExtensionFailureCode.YamlInvalid,
+                    $"YAML manifest must contain exactly one mapping document; found {stream.Documents.Count} document(s) with root value {DescribeNode(rootNode)}.");
             }
 
-            if (!ValidateShape(mapping, 1, out var shapeFailure))
+            if (!ValidateShape(mapping, 1, "root", out var shapeFailure, out var shapeFailureMessage))
             {
-                return Failure(shapeFailure);
+                return Failure(shapeFailure, shapeFailureMessage);
             }
 
-            if (!TryReadMapping(mapping, ManifestSchema.AllowedFields, out var fields, out var fieldFailure))
+            if (!TryReadMapping(
+                    mapping,
+                    ManifestSchema.AllowedFields,
+                    "root",
+                    out var fields,
+                    out var fieldFailure,
+                    out var fieldFailureMessage))
             {
-                return Failure(fieldFailure);
+                return Failure(fieldFailure, fieldFailureMessage);
             }
 
-            var requiredFieldCount = ManifestSchema.AllowedFields.Count - 2;
-            if (fields.Count < requiredFieldCount)
+            if (!TryReadRequiredFields(fields, ManifestSchema.RequiredFields, "root", out var missingMessage))
             {
-                return Failure(ExtensionFailureCode.ManifestSchemaInvalid);
+                return Failure(ExtensionFailureCode.ManifestSchemaInvalid, missingMessage);
             }
 
-            if (!TryReadInt(fields, "schemaVersion", out var schemaVersion) ||
-                !TryReadScalar(fields, "id", out var id) ||
-                !TryReadScalar(fields, "version", out var version) ||
-                !TryReadScalar(fields, "entryAssembly", out var entryAssembly) ||
-                !TryReadScalar(fields, "entryType", out var entryType) ||
-                !TryReadScalar(fields, "requiredHostApiVersion", out var hostApiVersion) ||
-                !fields.TryGetValue("dependencies", out var dependenciesNode) ||
-                dependenciesNode is not YamlSequenceNode dependencySequence)
+            if (!TryReadInt(fields, "schemaVersion", "root", out var schemaVersion, out var failureMessage))
             {
-                return Failure(ExtensionFailureCode.ManifestSchemaInvalid);
+                return Failure(ExtensionFailureCode.ManifestSchemaInvalid, failureMessage);
+            }
+
+            if (!TryReadScalar(fields, "id", "root", out var id, out failureMessage) ||
+                !TryReadScalar(fields, "version", "root", out var version, out failureMessage) ||
+                !TryReadScalar(fields, "entryAssembly", "root", out var entryAssembly, out failureMessage) ||
+                !TryReadScalar(fields, "entryType", "root", out var entryType, out failureMessage) ||
+                !TryReadScalar(fields, "requiredHostApiVersion", "root", out var hostApiVersion, out failureMessage))
+            {
+                return Failure(ExtensionFailureCode.ManifestSchemaInvalid, failureMessage);
+            }
+
+            if (!fields.TryGetValue("dependencies", out var dependenciesNode))
+            {
+                return Failure(ExtensionFailureCode.ManifestSchemaInvalid, "Required field 'dependencies' at root is missing.");
+            }
+
+            if (dependenciesNode is not YamlSequenceNode dependencySequence)
+            {
+                return Failure(
+                    ExtensionFailureCode.ManifestSchemaInvalid,
+                    $"Field 'root.dependencies' value {DescribeNode(dependenciesNode)} must be a YAML sequence.");
             }
 
             var dependencies = new List<ManifestDependencyValues?>();
+            var dependencyIndex = 0;
             foreach (var dependencyNode in dependencySequence.Children)
             {
+                var path = $"dependencies[{dependencyIndex}]";
+                dependencyIndex++;
                 if (dependencyNode is not YamlMappingNode dependencyMapping)
                 {
-                    return Failure(ExtensionFailureCode.ManifestSchemaInvalid);
+                    return Failure(
+                        ExtensionFailureCode.ManifestSchemaInvalid,
+                        $"Field '{path}' value {DescribeNode(dependencyNode)} must be a dependency mapping.");
                 }
 
                 if (!TryReadMapping(
                         dependencyMapping,
                         ManifestSchema.DependencyFields,
+                        path,
                         out var dependencyFields,
-                        out var dependencyFailure))
+                        out var dependencyFailure,
+                        out var dependencyFailureMessage))
                 {
-                    return Failure(dependencyFailure);
+                    return Failure(dependencyFailure, dependencyFailureMessage);
                 }
 
-                if (!TryReadScalar(dependencyFields, "id", out var dependencyId) ||
-                    !TryReadScalar(dependencyFields, "versionRange", out var dependencyRange) ||
-                    !TryReadOptionalBool(dependencyFields, "optional", out var dependencyOptional))
+                if (!TryReadRequiredFields(
+                        dependencyFields,
+                        ManifestSchema.DependencyRequiredFields,
+                        path,
+                        out missingMessage))
                 {
-                    return Failure(ExtensionFailureCode.ManifestSchemaInvalid);
+                    return Failure(ExtensionFailureCode.ManifestSchemaInvalid, missingMessage);
+                }
+
+                if (!TryReadScalar(dependencyFields, "id", path, out var dependencyId, out failureMessage) ||
+                    !TryReadScalar(dependencyFields, "versionRange", path, out var dependencyRange, out failureMessage) ||
+                    !TryReadOptionalBool(dependencyFields, "optional", path, out var dependencyOptional, out failureMessage))
+                {
+                    return Failure(ExtensionFailureCode.ManifestSchemaInvalid, failureMessage);
                 }
 
                 dependencies.Add(new ManifestDependencyValues(dependencyId, dependencyRange, dependencyOptional));
             }
 
-            var exportsValid = TryReadExports(fields, out var exports, out var exportFailure);
-            var importsValid = TryReadImports(fields, out var imports, out var importFailure);
+            var exportsValid = TryReadExports(fields, out var exports, out var exportFailure, out var exportFailureMessage);
+            var importsValid = TryReadImports(fields, out var imports, out var importFailure, out var importFailureMessage);
             if (!exportsValid || !importsValid)
             {
-                return Failure(exportFailure != ExtensionFailureCode.None ? exportFailure : importFailure);
+                return Failure(
+                    exportFailure != ExtensionFailureCode.None ? exportFailure : importFailure,
+                    exportsValid ? importFailureMessage : exportFailureMessage);
             }
+
             return ManifestParserCore.Validate(
                 root,
                 ManifestSourceFormat.Yaml,
@@ -115,41 +188,29 @@ internal static class YamlManifestParser
                     exports,
                     imports));
         }
-        catch (YamlException)
+        catch (YamlException exception)
         {
-            return Failure(ExtensionFailureCode.YamlInvalid);
+            return Failure(
+                ExtensionFailureCode.YamlInvalid,
+                $"YAML manifest syntax is invalid ({exception.GetType().Name}): {ExtensionDiagnosticText.Value(exception.Message)}.");
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            return Failure(ExtensionFailureCode.LoadFailed);
+            return Failure(
+                ExtensionFailureCode.LoadFailed,
+                $"Could not read YAML manifest {ExtensionDiagnosticText.Value(manifestPath)} ({exception.GetType().Name}): {ExtensionDiagnosticText.Value(exception.Message)}.");
         }
     }
 
-    private enum DuplicateKeyScanResult
+    private static DuplicateKeyScanResult ScanDuplicateScalarKeys(
+        string manifestText,
+        out string? duplicatePath,
+        out string? duplicateField,
+        out int duplicateLine)
     {
-        Valid,
-        Duplicate,
-        Invalid
-    }
-
-    private sealed class DuplicateKeyScanScope
-    {
-        internal DuplicateKeyScanScope(bool isMapping)
-        {
-            IsMapping = isMapping;
-            Keys = isMapping ? new HashSet<string>(StringComparer.Ordinal) : null;
-            ExpectingKey = true;
-        }
-
-        internal bool IsMapping { get; }
-
-        internal bool ExpectingKey { get; set; }
-
-        internal HashSet<string>? Keys { get; }
-    }
-
-    private static DuplicateKeyScanResult ScanDuplicateScalarKeys(string manifestText)
-    {
+        duplicatePath = null;
+        duplicateField = null;
+        duplicateLine = 0;
         using var reader = new StringReader(manifestText);
         var parser = new Parser(reader);
         if (!parser.MoveNext() || parser.Current is not StreamStart)
@@ -161,7 +222,6 @@ internal static class YamlManifestParser
         var documentActive = false;
         var rootCompleted = false;
         var streamEnded = false;
-        var duplicateFound = false;
 
         while (parser.MoveNext())
         {
@@ -200,7 +260,7 @@ internal static class YamlManifestParser
                         return DuplicateKeyScanResult.Invalid;
                     }
 
-                    scopes.Push(new DuplicateKeyScanScope(isMapping: true));
+                    scopes.Push(new DuplicateKeyScanScope(isMapping: true, path: GetNextScannedNodePath(scopes)));
                     break;
                 case SequenceStart:
                     if (!documentActive || streamEnded || (scopes.Count == 0 && rootCompleted))
@@ -208,7 +268,7 @@ internal static class YamlManifestParser
                         return DuplicateKeyScanResult.Invalid;
                     }
 
-                    scopes.Push(new DuplicateKeyScanScope(isMapping: false));
+                    scopes.Push(new DuplicateKeyScanScope(isMapping: false, path: GetNextScannedNodePath(scopes)));
                     break;
                 case MappingEnd:
                     if (!documentActive || scopes.Count == 0 ||
@@ -249,9 +309,17 @@ internal static class YamlManifestParser
                         return DuplicateKeyScanResult.Invalid;
                     }
 
-                    if (isMappingKey && !scopes.Peek().Keys!.Add(scalar.Value ?? string.Empty))
+                    if (isMappingKey)
                     {
-                        duplicateFound = true;
+                        var scope = scopes.Peek();
+                        var key = scalar.Value ?? string.Empty;
+                        scope.PendingKey = key;
+                        if (!scope.Keys!.Add(key) && duplicatePath is null)
+                        {
+                            duplicatePath = AppendFieldPath(scope.Path, key);
+                            duplicateField = key;
+                            duplicateLine = checked((int)(scalar.Start.Line + 1));
+                        }
                     }
 
                     if (!CompleteScannedNode(scopes, ref rootCompleted))
@@ -278,7 +346,25 @@ internal static class YamlManifestParser
             return DuplicateKeyScanResult.Invalid;
         }
 
-        return duplicateFound ? DuplicateKeyScanResult.Duplicate : DuplicateKeyScanResult.Valid;
+        return duplicatePath is null ? DuplicateKeyScanResult.Valid : DuplicateKeyScanResult.Duplicate;
+    }
+
+    private static string GetNextScannedNodePath(Stack<DuplicateKeyScanScope> scopes)
+    {
+        if (scopes.Count == 0)
+        {
+            return "root";
+        }
+
+        var parent = scopes.Peek();
+        if (!parent.IsMapping)
+        {
+            return $"{parent.Path}[{parent.NextIndex}]";
+        }
+
+        return parent.ExpectingKey
+            ? $"{parent.Path}.<key>"
+            : AppendFieldPath(parent.Path, parent.PendingKey ?? string.Empty);
     }
 
     private static bool CompleteScannedNode(
@@ -300,6 +386,14 @@ internal static class YamlManifestParser
         if (parent.IsMapping)
         {
             parent.ExpectingKey = !parent.ExpectingKey;
+            if (parent.ExpectingKey)
+            {
+                parent.PendingKey = null;
+            }
+        }
+        else
+        {
+            parent.NextIndex++;
         }
 
         return true;
@@ -308,16 +402,20 @@ internal static class YamlManifestParser
     private static bool TryReadMapping(
         YamlMappingNode mapping,
         IReadOnlySet<string> allowed,
+        string path,
         out Dictionary<string, YamlNode> fields,
-        out ExtensionFailureCode failure)
+        out ExtensionFailureCode failure,
+        out string failureMessage)
     {
         fields = new Dictionary<string, YamlNode>(StringComparer.Ordinal);
         failure = ExtensionFailureCode.None;
+        failureMessage = string.Empty;
         foreach (var pair in mapping.Children)
         {
             if (pair.Key is not YamlScalarNode scalarKey || string.IsNullOrEmpty(scalarKey.Value))
             {
                 failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                failureMessage = $"YAML mapping at '{path}' contains field key value {DescribeNode(pair.Key)}; field names must be non-empty strings.";
                 return false;
             }
 
@@ -325,12 +423,17 @@ internal static class YamlManifestParser
             if (!fields.TryAdd(key, pair.Value))
             {
                 failure = ExtensionFailureCode.DuplicateManifestField;
+                failureMessage =
+                    $"Duplicate manifest field {ExtensionDiagnosticText.Value(key)} at '{path}' with value {DescribeNode(pair.Value)}.";
                 return false;
             }
 
             if (!allowed.Contains(key))
             {
                 failure = ExtensionFailureCode.UnknownManifestField;
+                failureMessage = path == "root"
+                    ? $"Unknown root field {ExtensionDiagnosticText.Value(key)} has value {DescribeNode(pair.Value)}."
+                    : $"Unknown field {ExtensionDiagnosticText.Value(key)} at '{path}' has value {DescribeNode(pair.Value)}.";
                 return false;
             }
         }
@@ -338,66 +441,113 @@ internal static class YamlManifestParser
         return true;
     }
 
+    private static bool TryReadRequiredFields(
+        Dictionary<string, YamlNode> fields,
+        IReadOnlySet<string> requiredFields,
+        string path,
+        out string failureMessage)
+    {
+        foreach (var requiredField in requiredFields)
+        {
+            if (!fields.ContainsKey(requiredField))
+            {
+                failureMessage = $"Required field {ExtensionDiagnosticText.Value(requiredField)} at '{path}' is missing.";
+                return false;
+            }
+        }
+
+        failureMessage = string.Empty;
+        return true;
+    }
+
     private static bool TryReadScalar(
         IReadOnlyDictionary<string, YamlNode> fields,
         string name,
-        out string? value)
+        string path,
+        out string value,
+        out string failureMessage)
     {
-        value = null;
-        return fields.TryGetValue(name, out var node) &&
-            node is YamlScalarNode scalar &&
-            !string.IsNullOrEmpty(scalar.Value) &&
-            (value = scalar.Value) is not null;
+        value = string.Empty;
+        if (!fields.TryGetValue(name, out var node))
+        {
+            failureMessage = $"Required field '{path}.{name}' is missing.";
+            return false;
+        }
+
+        if (node is not YamlScalarNode scalar || string.IsNullOrEmpty(scalar.Value))
+        {
+            failureMessage = $"Field '{path}.{name}' value {DescribeNode(node)} must be a non-empty YAML scalar string.";
+            return false;
+        }
+
+        value = scalar.Value;
+        failureMessage = string.Empty;
+        return true;
     }
 
     private static bool TryReadInt(
         IReadOnlyDictionary<string, YamlNode> fields,
         string name,
-        out int? value)
+        string path,
+        out int value,
+        out string failureMessage)
     {
-        value = null;
-        if (!TryReadScalar(fields, name, out var text) ||
-
-            !int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+        value = 0;
+        if (!TryReadScalar(fields, name, path, out var text, out failureMessage))
         {
             return false;
         }
 
-        value = parsed;
+        if (!int.TryParse(
+                text,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out value))
+        {
+            failureMessage = $"Field '{path}.{name}' value {ExtensionDiagnosticText.Value(text)} must be a non-negative 32-bit integer.";
+            return false;
+        }
+
+        failureMessage = string.Empty;
         return true;
     }
+
     private static bool TryReadOptionalBool(
         Dictionary<string, YamlNode> fields,
         string name,
-        out bool value)
+        string path,
+        out bool value,
+        out string failureMessage)
     {
         value = false;
         if (!fields.TryGetValue(name, out var node))
         {
+            failureMessage = string.Empty;
             return true;
         }
 
-        if (node is not YamlScalarNode scalar)
+        if (node is not YamlScalarNode scalar ||
+            (!string.Equals(scalar.Value, "true", StringComparison.Ordinal) &&
+             !string.Equals(scalar.Value, "false", StringComparison.Ordinal)))
         {
+            failureMessage = $"Field '{path}.{name}' value {DescribeNode(node)} must be the YAML boolean 'true' or 'false'.";
             return false;
         }
 
-        if (string.Equals(scalar.Value, "true", StringComparison.Ordinal))
-        {
-            value = true;
-            return true;
-        }
-
-        return string.Equals(scalar.Value, "false", StringComparison.Ordinal);
+        value = string.Equals(scalar.Value, "true", StringComparison.Ordinal);
+        failureMessage = string.Empty;
+        return true;
     }
 
     private static bool TryReadExports(
         Dictionary<string, YamlNode> fields,
         out List<ManifestContractExportValues> exports,
-        out ExtensionFailureCode failure)
+        out ExtensionFailureCode failure,
+        out string failureMessage)
     {
         exports = new List<ManifestContractExportValues>();
         failure = ExtensionFailureCode.None;
+        failureMessage = string.Empty;
         if (!fields.TryGetValue("exports", out var node))
         {
             return true;
@@ -406,25 +556,37 @@ internal static class YamlManifestParser
         if (node is not YamlSequenceNode sequence)
         {
             failure = ExtensionFailureCode.ManifestSchemaInvalid;
+            failureMessage = $"Field 'root.exports' value {DescribeNode(node)} must be a YAML sequence.";
             return false;
         }
 
+        var index = 0;
         foreach (var child in sequence.Children)
         {
-            if (child is not YamlMappingNode mapping ||
-                !TryReadMapping(mapping, ManifestSchema.ExportFields, out var declaration, out failure))
+            var path = $"exports[{index}]";
+            index++;
+            if (child is not YamlMappingNode mapping)
             {
-                failure = failure == ExtensionFailureCode.None
-                    ? ExtensionFailureCode.ManifestSchemaInvalid
-                    : failure;
+                failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                failureMessage = $"Field '{path}' value {DescribeNode(child)} must be an export mapping.";
                 return false;
             }
 
-            if (declaration.Count != ManifestSchema.ExportFields.Count ||
-                !TryReadScalar(declaration, "contractId", out var id) ||
-                !TryReadScalar(declaration, "version", out var version) ||
-                !TryReadScalar(declaration, "assemblyIdentity", out var assemblyIdentity) ||
-                !TryReadScalar(declaration, "typeIdentity", out var typeIdentity))
+            if (!TryReadMapping(mapping, ManifestSchema.ExportFields, path, out var declaration, out failure, out failureMessage))
+            {
+                return false;
+            }
+
+            if (!TryReadRequiredFields(declaration, ManifestSchema.ExportFields, path, out failureMessage))
+            {
+                failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                return false;
+            }
+
+            if (!TryReadScalar(declaration, "contractId", path, out var id, out failureMessage) ||
+                !TryReadScalar(declaration, "version", path, out var version, out failureMessage) ||
+                !TryReadScalar(declaration, "assemblyIdentity", path, out var assemblyIdentity, out failureMessage) ||
+                !TryReadScalar(declaration, "typeIdentity", path, out var typeIdentity, out failureMessage))
             {
                 failure = ExtensionFailureCode.ManifestSchemaInvalid;
                 return false;
@@ -439,10 +601,12 @@ internal static class YamlManifestParser
     private static bool TryReadImports(
         Dictionary<string, YamlNode> fields,
         out List<ManifestContractImportValues> imports,
-        out ExtensionFailureCode failure)
+        out ExtensionFailureCode failure,
+        out string failureMessage)
     {
         imports = new List<ManifestContractImportValues>();
         failure = ExtensionFailureCode.None;
+        failureMessage = string.Empty;
         if (!fields.TryGetValue("imports", out var node))
         {
             return true;
@@ -451,25 +615,38 @@ internal static class YamlManifestParser
         if (node is not YamlSequenceNode sequence)
         {
             failure = ExtensionFailureCode.ManifestSchemaInvalid;
+            failureMessage = $"Field 'root.imports' value {DescribeNode(node)} must be a YAML sequence.";
             return false;
         }
 
+        var index = 0;
         foreach (var child in sequence.Children)
         {
-            if (child is not YamlMappingNode mapping ||
-                !TryReadMapping(mapping, ManifestSchema.ImportFields, out var declaration, out failure))
+            var path = $"imports[{index}]";
+            index++;
+            if (child is not YamlMappingNode mapping)
             {
-                failure = failure == ExtensionFailureCode.None
-                    ? ExtensionFailureCode.ManifestSchemaInvalid
-                    : failure;
+                failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                failureMessage = $"Field '{path}' value {DescribeNode(child)} must be an import mapping.";
                 return false;
             }
 
-            if (!TryReadScalar(declaration, "contractId", out var id) ||
-                !TryReadScalar(declaration, "versionRange", out var versionRange) ||
-                !TryReadScalar(declaration, "assemblyIdentity", out var assemblyIdentity) ||
-                !TryReadScalar(declaration, "typeIdentity", out var typeIdentity) ||
-                !TryReadOptionalBool(declaration, "optional", out var importOptional))
+            if (!TryReadMapping(mapping, ManifestSchema.ImportFields, path, out var declaration, out failure, out failureMessage))
+            {
+                return false;
+            }
+
+            if (!TryReadRequiredFields(declaration, ManifestSchema.ImportRequiredFields, path, out failureMessage))
+            {
+                failure = ExtensionFailureCode.ManifestSchemaInvalid;
+                return false;
+            }
+
+            if (!TryReadScalar(declaration, "contractId", path, out var id, out failureMessage) ||
+                !TryReadScalar(declaration, "versionRange", path, out var versionRange, out failureMessage) ||
+                !TryReadScalar(declaration, "assemblyIdentity", path, out var assemblyIdentity, out failureMessage) ||
+                !TryReadScalar(declaration, "typeIdentity", path, out var typeIdentity, out failureMessage) ||
+                !TryReadOptionalBool(declaration, "optional", path, out var importOptional, out failureMessage))
             {
                 failure = ExtensionFailureCode.ManifestSchemaInvalid;
                 return false;
@@ -481,19 +658,26 @@ internal static class YamlManifestParser
         return true;
     }
 
-    private static bool ValidateShape(YamlNode node, int depth, out ExtensionFailureCode failure)
+    private static bool ValidateShape(
+        YamlNode node,
+        int depth,
+        string path,
+        out ExtensionFailureCode failure,
+        out string failureMessage)
     {
         failure = ExtensionFailureCode.None;
+        failureMessage = string.Empty;
         if (depth > MaxManifestDepth)
         {
             failure = ExtensionFailureCode.YamlInvalid;
+            failureMessage = $"YAML field '{path}' exceeds maximum nesting depth {MaxManifestDepth}.";
             return false;
         }
 
-        if (node.GetType().Name.Contains("Alias", StringComparison.Ordinal) ||
-            HasUnsafeMetadata(node))
+        if (node.GetType().Name.Contains("Alias", StringComparison.Ordinal) || HasUnsafeMetadata(node))
         {
             failure = ExtensionFailureCode.YamlInvalid;
+            failureMessage = $"YAML field '{path}' value {DescribeNode(node)} uses an alias, anchor, or unsupported tag.";
             return false;
         }
 
@@ -502,8 +686,11 @@ internal static class YamlManifestParser
             case YamlMappingNode mapping:
                 foreach (var pair in mapping.Children)
                 {
-                    if (!ValidateShape(pair.Key, depth + 1, out failure) ||
-                        !ValidateShape(pair.Value, depth + 1, out failure))
+                    var valuePath = pair.Key is YamlScalarNode scalarKey && scalarKey.Value is not null
+                        ? AppendFieldPath(path, scalarKey.Value)
+                        : $"{path}.<value>";
+                    if (!ValidateShape(pair.Key, depth + 1, $"{path}.<key>", out failure, out failureMessage) ||
+                        !ValidateShape(pair.Value, depth + 1, valuePath, out failure, out failureMessage))
                     {
                         return false;
                     }
@@ -511,9 +698,9 @@ internal static class YamlManifestParser
 
                 return true;
             case YamlSequenceNode sequence:
-                foreach (var child in sequence.Children)
+                for (var index = 0; index < sequence.Children.Count; index++)
                 {
-                    if (!ValidateShape(child, depth + 1, out failure))
+                    if (!ValidateShape(sequence.Children[index], depth + 1, $"{path}[{index}]", out failure, out failureMessage))
                     {
                         return false;
                     }
@@ -524,17 +711,29 @@ internal static class YamlManifestParser
                 return true;
             default:
                 failure = ExtensionFailureCode.YamlInvalid;
+                failureMessage = $"YAML field '{path}' has unsupported value {DescribeNode(node)}.";
                 return false;
         }
     }
+
+    private static string AppendFieldPath(string path, string field) =>
+        $"{path}.{field}";
+
+    private static string DescribeNode(YamlNode? node) =>
+        node switch
+        {
+            null => "<missing>",
+            YamlScalarNode scalar => ExtensionDiagnosticText.Value(scalar.Value),
+            YamlMappingNode => "<mapping>",
+            YamlSequenceNode => "<sequence>",
+            _ => $"<{node.GetType().Name}>"
+        };
 
     private static bool HasUnsafeMetadata(YamlNode node)
     {
         var tag = GetEffectiveTagName(node);
         return !node.Anchor.IsEmpty ||
-            (tag.Length > 0 &&
-             tag != "!" &&
-             !IsAllowedCoreTag(node, tag));
+            (tag.Length > 0 && tag != "!" && !IsAllowedCoreTag(node, tag));
     }
 
     private static bool IsAllowedCoreTag(YamlNode node, string tag) =>
@@ -556,13 +755,13 @@ internal static class YamlManifestParser
         {
             return string.Empty;
         }
+
         var tag = node.Tag.ToString();
-        return tag.StartsWith("!<", StringComparison.Ordinal) &&
-            tag.EndsWith('>')
+        return tag.StartsWith("!<", StringComparison.Ordinal) && tag.EndsWith('>')
             ? tag[2..^1]
             : tag;
     }
 
-    private static ManifestDiscoveryResult Failure(ExtensionFailureCode code) =>
-        ManifestParserCore.Failure(ManifestSourceFormat.Yaml, code);
+    private static ManifestDiscoveryResult Failure(ExtensionFailureCode code, string message) =>
+        ManifestParserCore.Failure(ManifestSourceFormat.Yaml, code, message);
 }

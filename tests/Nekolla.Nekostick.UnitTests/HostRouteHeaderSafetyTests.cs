@@ -20,7 +20,7 @@ public sealed class HostRouteHeaderSafetyTests
         var routeId = RoutingTestData.Id(940);
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
                     ExtensionRouteHookAction.ReplaceRequest,
@@ -59,7 +59,7 @@ public sealed class HostRouteHeaderSafetyTests
         var routeId = RoutingTestData.Id(944);
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
                     ExtensionRouteHookAction.ReplaceRequest,
@@ -107,7 +107,7 @@ public sealed class HostRouteHeaderSafetyTests
         var routeId = RoutingTestData.Id(headerName == "Connection" ? 941 : 942);
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Return,
                 (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
                     ExtensionRouteHookAction.ReplaceResponse,
@@ -151,7 +151,7 @@ public sealed class HostRouteHeaderSafetyTests
         var routeId = RoutingTestData.Id(943);
         var factory = new RouteTestFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Return,
                 (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
                     ExtensionRouteHookAction.ReplaceResponse,

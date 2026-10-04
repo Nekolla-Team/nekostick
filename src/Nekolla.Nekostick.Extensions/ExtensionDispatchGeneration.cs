@@ -64,8 +64,14 @@ public sealed record ExtensionGenerationBindingStatus
         ExtensionFailureCode failureCode,
         ImmutableArray<string> requestedHandlerIds,
         ImmutableArray<string> unavailableHandlerIds,
-        bool fallbackAvailable)
+        bool fallbackAvailable,
+        ExtensionErrorDetail? failureDetail)
     {
+        if ((failureCode == ExtensionFailureCode.None) != (failureDetail is null))
+        {
+            throw new ArgumentException("Failure detail must be present exactly when a failure code is set.", nameof(failureDetail));
+        }
+
         ExtensionId = extensionId;
         Version = version;
         Available = available;
@@ -74,6 +80,7 @@ public sealed record ExtensionGenerationBindingStatus
         RequestedHandlerIds = requestedHandlerIds;
         UnavailableHandlerIds = unavailableHandlerIds;
         FallbackAvailable = fallbackAvailable;
+        FailureDetail = failureDetail;
     }
 
     /// <summary>Gets the stable extension ID, when one was supplied.</summary>
@@ -90,6 +97,8 @@ public sealed record ExtensionGenerationBindingStatus
 
     /// <summary>Gets the local binding failure category, if any.</summary>
     public ExtensionFailureCode FailureCode { get; }
+    /// <summary>Gets the precise local binding failure, when available.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
 
     /// <summary>Gets the explicitly requested handler IDs.</summary>
     public ImmutableArray<string> RequestedHandlerIds { get; }
@@ -107,11 +116,18 @@ public sealed class ExtensionGenerationPreparationResult
     private ExtensionGenerationPreparationResult(
         bool succeeded,
         ExtensionFailureCode failureCode,
-        ExtensionGenerationPreparation? preparation)
+        ExtensionGenerationPreparation? preparation,
+        ExtensionErrorDetail? failureDetail)
     {
+        if ((failureCode == ExtensionFailureCode.None) != (failureDetail is null))
+        {
+            throw new ArgumentException("Failure detail must be present exactly when a failure code is set.", nameof(failureDetail));
+        }
+
         Succeeded = succeeded;
         FailureCode = failureCode;
         Preparation = preparation;
+        FailureDetail = failureDetail;
     }
 
     /// <summary>Gets whether a preparation object was created.</summary>
@@ -119,15 +135,22 @@ public sealed class ExtensionGenerationPreparationResult
 
     /// <summary>Gets the global preparation failure category, if preparation was not created.</summary>
     public ExtensionFailureCode FailureCode { get; }
+    /// <summary>Gets the human-readable failure detail, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
 
     /// <summary>Gets the preparation on success.</summary>
     public ExtensionGenerationPreparation? Preparation { get; }
 
     internal static ExtensionGenerationPreparationResult Success(ExtensionGenerationPreparation preparation) =>
-        new(true, ExtensionFailureCode.None, preparation);
+        new(true, ExtensionFailureCode.None, preparation, null);
 
-    internal static ExtensionGenerationPreparationResult Failure(ExtensionFailureCode failureCode) =>
-        new(false, failureCode, null);
+    internal static ExtensionGenerationPreparationResult Failure(
+        ExtensionFailureCode failureCode,
+        ExtensionErrorDetail failureDetail)
+    {
+        ArgumentNullException.ThrowIfNull(failureDetail);
+        return new(false, failureCode, null, failureDetail);
+    }
 }
 
 /// <summary>Reports the bounded changed-binding handoff before Host publication.</summary>
@@ -136,11 +159,18 @@ public sealed class ExtensionGenerationCommitResult
     private ExtensionGenerationCommitResult(
         bool succeeded,
         ExtensionFailureCode failureCode,
+        ExtensionErrorDetail? failureDetail,
         ExtensionDispatchGeneration? generation,
         ExtensionDispatchGeneration? previousGeneration)
     {
+        if ((failureCode == ExtensionFailureCode.None) != (failureDetail is null))
+        {
+            throw new ArgumentException("Failure detail must be present exactly when a failure code is set.", nameof(failureDetail));
+        }
+
         Succeeded = succeeded;
         FailureCode = failureCode;
+        FailureDetail = failureDetail;
         Generation = generation;
         PreviousGeneration = previousGeneration;
     }
@@ -151,6 +181,9 @@ public sealed class ExtensionGenerationCommitResult
     /// <summary>Gets the safe handoff failure category, if any.</summary>
     public ExtensionFailureCode FailureCode { get; }
 
+    /// <summary>Gets the precise handoff failure detail, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
+
     /// <summary>Gets the immutable generation safe for Host holder exchange.</summary>
     public ExtensionDispatchGeneration? Generation { get; }
 
@@ -160,12 +193,16 @@ public sealed class ExtensionGenerationCommitResult
     internal static ExtensionGenerationCommitResult Success(
         ExtensionDispatchGeneration generation,
         ExtensionDispatchGeneration? previousGeneration) =>
-        new(true, ExtensionFailureCode.None, generation, previousGeneration);
+        new(true, ExtensionFailureCode.None, null, generation, previousGeneration);
 
     internal static ExtensionGenerationCommitResult Failure(
         ExtensionFailureCode failureCode,
-        ExtensionDispatchGeneration? previousGeneration) =>
-        new(false, failureCode, null, previousGeneration);
+        ExtensionErrorDetail failureDetail,
+        ExtensionDispatchGeneration? previousGeneration)
+    {
+        ArgumentNullException.ThrowIfNull(failureDetail);
+        return new(false, failureCode, failureDetail, null, previousGeneration);
+    }
 }
 
 /// <summary>Represents one immutable, Host-owned extension dispatch generation.</summary>
@@ -286,7 +323,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
     {
         using var lease = TryAcquireLease();
         return lease is null
-            ? ExtensionInvocationResult.Unavailable
+            ? ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                $"Extension dispatch generation '{GenerationId}' is no longer accepting handler calls."))
             : await lease.HandleAsync(handlerId, request, cancellationToken).ConfigureAwait(false);
     }
 
@@ -340,7 +378,10 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(handlerId) || request is null)
         {
-            return ExtensionInvocationResult.Unavailable;
+            var message = string.IsNullOrWhiteSpace(handlerId)
+                ? "A non-empty handler identifier is required."
+                : "An extension handler request is required.";
+            return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(message));
         }
 
         var generation = this;
@@ -353,7 +394,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                 binding.Handler is null ||
                 !binding.Context.Instance.IsHandlerOwned(handlerId))
             {
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                    $"Handler '{handlerId}' is not available in extension dispatch generation '{generation.GenerationId}'."));
             }
 
             try
@@ -365,9 +407,9 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     break;
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException exception)
             {
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(ExtensionErrorDetail.FromException(exception));
             }
 
             // The binding's instance is gone; re-resolve against the manager's published
@@ -379,14 +421,16 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
             // still covered by the instance drain grace (LifecycleTimeout) before any stop.
             if (ReferenceEquals(generation, triedGeneration))
             {
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(
+                    ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
             }
 
             triedGeneration = generation;
             var current = generation._currentGeneration();
             if (current is null || ReferenceEquals(current, generation))
             {
-                return ExtensionInvocationResult.Unavailable;
+                return ExtensionInvocationResult.Unavailable(
+                    ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
             }
 
             generation = current;
@@ -398,10 +442,11 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         {
             var response = await handler.HandleAsync(request, cancellationToken).ConfigureAwait(false);
             return response is null
-                ? ExtensionInvocationResult.Failed
+                ? ExtensionInvocationResult.Failed(new ExtensionErrorDetail(
+                    $"Extension handler '{handlerId}' returned no response."))
                 : ExtensionInvocationResult.Handled(response);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException exception)
         {
             if (_logger is { } logger)
             {
@@ -411,7 +456,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     nameof(HandleWithLeaseAsync));
             }
 
-            return ExtensionInvocationResult.Failed;
+            return ExtensionInvocationResult.Failed(ExtensionErrorDetail.FromException(exception));
         }
         catch (Exception exception)
         {
@@ -428,7 +473,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     occurrences);
             }
 
-            return ExtensionInvocationResult.Failed;
+            return ExtensionInvocationResult.Failed(ExtensionErrorDetail.FromException(exception));
         }
         finally
         {
@@ -521,24 +566,26 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
 
                     return ExtensionStreamingInvocationResult.Failed;
                 }
-                catch (ExtensionRequestReadTimeoutException)
+                catch (ExtensionRequestReadTimeoutException exception)
                 {
                     if (_logger is { } logger)
                     {
                         ExtensionLogMessages.ExtensionStreamingReadTimedOut(
                             logger,
+                            exception,
                             binding.Context.Instance.Manifest.Id,
                             nameof(HandleStreamingWithLeaseAsync));
                     }
 
                     return ExtensionStreamingInvocationResult.Failed;
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException exception)
                 {
                     if (_logger is { } logger)
                     {
                         ExtensionLogMessages.ExtensionStreamingRequestCancelled(
                             logger,
+                            exception,
                             binding.Context.Instance.Manifest.Id,
                             nameof(HandleStreamingWithLeaseAsync));
                     }
@@ -677,7 +724,7 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     occurrences);
             }
 
-            return ExtensionInvocationResult.Failed;
+            return ExtensionInvocationResult.Failed(ExtensionErrorDetail.FromException(exception));
         }
         finally
         {

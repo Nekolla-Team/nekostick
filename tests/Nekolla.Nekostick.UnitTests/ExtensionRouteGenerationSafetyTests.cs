@@ -20,7 +20,7 @@ public sealed class ExtensionRouteGenerationSafetyTests
         var release = NewSignal();
         var factory = new RouteFactory
         {
-            Configure = events => Assert.True(events.TryRegisterHook(
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                 ExtensionRouteEventStage.Trigger,
                 (context, _) =>
                 {
@@ -68,14 +68,14 @@ public sealed class ExtensionRouteGenerationSafetyTests
         {
             Configure = events =>
             {
-                Assert.True(events.TryRegisterHook(
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
                     ExtensionRouteEventStage.Trigger,
                     (_, _) =>
                     {
                         Interlocked.Increment(ref hookCalls);
                         return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
                     }));
-                Assert.True(events.TrySubscribe((@event, _) =>
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TrySubscribe((@event, _) =>
                 {
                     if (@event.Type is ExtensionRouteEventTypes.Trigger or ExtensionRouteEventTypes.Return)
                     {
@@ -124,7 +124,7 @@ public sealed class ExtensionRouteGenerationSafetyTests
         var dispatchedRouteId = RoutingTestData.Id(946);
         var factory = new RouteFactory
         {
-            Configure = events => Assert.True(events.TrySubscribe((_, _) => ValueTask.CompletedTask))
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TrySubscribe((_, _) => ValueTask.CompletedTask))
         };
         await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
         var generation = await PrepareAsync(manager, manifest, routeId);

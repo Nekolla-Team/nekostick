@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Nekolla.Nekostick.Contracts;
 using Microsoft.Extensions.Logging;
 
 namespace Nekolla.Nekostick.Extensions;
@@ -20,7 +21,9 @@ public static class ExtensionManifestGraph
     {
         if (manifests is null)
         {
-            return ExtensionGraphResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return ExtensionGraphResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("An extension manifest collection is required."));
         }
 
         ImmutableArray<ExtensionManifest> items;
@@ -38,7 +41,9 @@ public static class ExtensionManifestGraph
                     nameof(ValidateAndOrder));
             }
 
-            return ExtensionGraphResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return ExtensionGraphResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                ExtensionErrorDetail.FromException(exception));
         }
 
         var byId = new Dictionary<string, ExtensionManifest>(StringComparer.Ordinal);
@@ -46,25 +51,32 @@ public static class ExtensionManifestGraph
         {
             if (manifest is null || !ExtensionIdentifierSyntax.IsValid(manifest.Id))
             {
-                return ExtensionGraphResult.Failure(ExtensionFailureCode.InvalidIdentifier);
+                return ExtensionGraphResult.Failure(
+                    ExtensionFailureCode.InvalidIdentifier,
+                    new ExtensionErrorDetail("A discovered manifest is missing or has an invalid extension identifier."));
             }
 
             if (!byId.TryAdd(manifest.Id, manifest))
             {
-                return ExtensionGraphResult.Failure(ExtensionFailureCode.DuplicateExtensionId);
+                return ExtensionGraphResult.Failure(
+                    ExtensionFailureCode.DuplicateExtensionId,
+                    new ExtensionErrorDetail($"More than one manifest declares extension identifier '{manifest.Id}'."));
             }
 
             if (!manifest.RequiredHostApiVersion.IsSatisfiedBy(hostApiVersion))
             {
-                return ExtensionGraphResult.Failure(ExtensionFailureCode.HostApiIncompatible);
+                return ExtensionGraphResult.Failure(
+                    ExtensionFailureCode.HostApiIncompatible,
+                    new ExtensionErrorDetail(
+                        $"Extension '{manifest.Id}' requires Host API version range '{manifest.RequiredHostApiVersion}', which is not satisfied by Host API version '{hostApiVersion}'."));
             }
         }
         var contractProviders = new Dictionary<string, string>(StringComparer.Ordinal);
         var contractExports = new Dictionary<string, ExtensionContractExport>(StringComparer.Ordinal);
         var contractFailure = ValidateContracts(items, contractCatalog, contractProviders, contractExports);
-        if (contractFailure != ExtensionFailureCode.None)
+        if (contractFailure is not null)
         {
-            return ExtensionGraphResult.Failure(contractFailure);
+            return contractFailure;
         }
 
         var edges = new List<(string From, string To, bool Optional)>();
@@ -78,7 +90,10 @@ public static class ExtensionManifestGraph
             {
                 if (!uniqueDependencies.Add(dependency.Id))
                 {
-                    return ExtensionGraphResult.Failure(ExtensionFailureCode.DuplicateExtensionId);
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.DuplicateExtensionId,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' declares dependency '{dependency.Id}' more than once."));
                 }
 
                 if (!byId.TryGetValue(dependency.Id, out var dependencyManifest))
@@ -88,7 +103,10 @@ public static class ExtensionManifestGraph
                         continue;
                     }
 
-                    return ExtensionGraphResult.Failure(ExtensionFailureCode.MissingDependency);
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.MissingDependency,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' requires missing extension '{dependency.Id}'."));
                 }
 
                 if (!dependency.VersionRange.IsSatisfiedBy(dependencyManifest.Version))
@@ -98,7 +116,10 @@ public static class ExtensionManifestGraph
                         continue;
                     }
 
-                    return ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyVersionIncompatible);
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.DependencyVersionIncompatible,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' requires dependency '{dependency.Id}' in version range '{dependency.VersionRange}', but available version '{dependencyManifest.Version}' does not match."));
                 }
 
                 AddEdge(edgeTargets, dependency.Id, dependency.Optional);
@@ -132,7 +153,10 @@ public static class ExtensionManifestGraph
 
         return ordered is { } result
             ? ExtensionGraphResult.Success(result)
-            : ExtensionGraphResult.Failure(ExtensionFailureCode.DependencyCycle);
+            : ExtensionGraphResult.Failure(
+                ExtensionFailureCode.DependencyCycle,
+                new ExtensionErrorDetail(
+                    "The extension dependency graph contains a cycle that cannot be resolved by dropping optional edges."));
     }
 
     private static void AddEdge(Dictionary<string, bool> edgeTargets, string target, bool optional)
@@ -205,7 +229,7 @@ public static class ExtensionManifestGraph
 
         return ordered.Count == items.Length ? ordered.ToImmutable() : null;
     }
-    private static ExtensionFailureCode ValidateContracts(
+    private static ExtensionGraphResult? ValidateContracts(
         ImmutableArray<ExtensionManifest> manifests,
         ExtensionContractCatalog? contractCatalog,
         Dictionary<string, string> providerIds,
@@ -216,10 +240,23 @@ public static class ExtensionManifestGraph
             var exportIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var export in manifest.Exports)
             {
-                if (!exportIds.Add(export.ContractId) || !providerExports.TryAdd(export.ContractId, export))
+                if (!exportIds.Add(export.ContractId))
                 {
-                    return ExtensionFailureCode.DuplicateContractDeclaration;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.DuplicateContractDeclaration,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' declares contract export '{export.ContractId}' more than once."));
                 }
+
+                if (!providerExports.TryAdd(export.ContractId, export))
+                {
+                    var existingProviderId = providerIds[export.ContractId];
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.DuplicateContractDeclaration,
+                        new ExtensionErrorDetail(
+                            $"Contract '{export.ContractId}' is exported by both extension '{existingProviderId}' and extension '{manifest.Id}'."));
+                }
+
                 providerIds.Add(export.ContractId, manifest.Id);
 
                 if (contractCatalog is not null &&
@@ -228,7 +265,10 @@ public static class ExtensionManifestGraph
                         export.AssemblyIdentity,
                         export.TypeIdentity) != ExtensionFailureCode.None)
                 {
-                    return ExtensionFailureCode.ContractCatalogUnavailable;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.ContractCatalogUnavailable,
+                        new ExtensionErrorDetail(
+                            $"The contract catalog rejected export '{export.ContractId}' declared by extension '{manifest.Id}'."));
                 }
             }
 
@@ -237,7 +277,10 @@ public static class ExtensionManifestGraph
             {
                 if (!importIds.Add(import.ContractId))
                 {
-                    return ExtensionFailureCode.DuplicateContractDeclaration;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.DuplicateContractDeclaration,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' declares contract import '{import.ContractId}' more than once."));
                 }
 
                 if (contractCatalog is not null &&
@@ -246,7 +289,10 @@ public static class ExtensionManifestGraph
                         import.AssemblyIdentity,
                         import.TypeIdentity) != ExtensionFailureCode.None)
                 {
-                    return ExtensionFailureCode.ContractCatalogUnavailable;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.ContractCatalogUnavailable,
+                        new ExtensionErrorDetail(
+                            $"The contract catalog rejected import '{import.ContractId}' declared by extension '{manifest.Id}'."));
                 }
             }
         }
@@ -262,7 +308,10 @@ public static class ExtensionManifestGraph
                         continue;
                     }
 
-                    return ExtensionFailureCode.MissingContractProvider;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.MissingContractProvider,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' requires contract '{import.ContractId}', but no extension exports it."));
                 }
 
                 if (!import.VersionRange.IsSatisfiedBy(provider.Version))
@@ -272,17 +321,23 @@ public static class ExtensionManifestGraph
                         continue;
                     }
 
-                    return ExtensionFailureCode.ContractVersionIncompatible;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.ContractVersionIncompatible,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' requires contract '{import.ContractId}' in version range '{import.VersionRange}', but provider '{providerIds[import.ContractId]}' exports version '{provider.Version}'."));
                 }
 
                 if (!string.Equals(import.AssemblyIdentity, provider.AssemblyIdentity, StringComparison.Ordinal) ||
                     !string.Equals(import.TypeIdentity, provider.TypeIdentity, StringComparison.Ordinal))
                 {
-                    return ExtensionFailureCode.ContractIdentityMismatch;
+                    return ExtensionGraphResult.Failure(
+                        ExtensionFailureCode.ContractIdentityMismatch,
+                        new ExtensionErrorDetail(
+                            $"Extension '{manifest.Id}' imports contract '{import.ContractId}' with an assembly or type identity that differs from its provider."));
                 }
             }
         }
 
-        return ExtensionFailureCode.None;
+        return null;
     }
 }

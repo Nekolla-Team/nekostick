@@ -43,13 +43,31 @@ public sealed partial class ExtensionRuntimeTests
         Assert.Contains("settingsWrite=Unsupported", body, StringComparison.Ordinal);
         Assert.Contains("routeRead=Unsupported", body, StringComparison.Ordinal);
         Assert.Contains("routeRemove=Unsupported", body, StringComparison.Ordinal);
-        Assert.Contains("serviceRead=Unsupported", body, StringComparison.Ordinal);
-        Assert.Contains("serviceRemove=Unsupported", body, StringComparison.Ordinal);
-        Assert.Contains("serviceStart=Unsupported", body, StringComparison.Ordinal);
-        Assert.Contains("serviceStop=Unsupported", body, StringComparison.Ordinal);
-        Assert.Contains("serviceRestart=Unsupported", body, StringComparison.Ordinal);
+        Assert.Contains(
+            "serviceRead=Unsupported:The extension host does not support extension service reads.",
+            body,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "serviceRemove=Unsupported:The extension host does not support extension service writes.",
+            body,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "serviceStart=Unsupported:The extension host does not support service start operations.",
+            body,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "serviceStop=Unsupported:The extension host does not support service stop operations.",
+            body,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "serviceRestart=Unsupported:The extension host does not support service restart operations.",
+            body,
+            StringComparison.Ordinal);
         Assert.Contains("endpoints=0", body, StringComparison.Ordinal);
-        Assert.Contains("endpointResolve=null", body, StringComparison.Ordinal);
+        Assert.Contains(
+            "endpointResolve=Unsupported:The extension host does not support endpoint resolution.",
+            body,
+            StringComparison.Ordinal);
         Assert.Equal(ExtensionLoadState.Loaded, manager.GetStatus(manifest.Id)!.State);
     }
 

@@ -31,11 +31,18 @@ public sealed class ExtensionLoadResult
         bool succeeded,
         ExtensionFailureCode failureCode,
         ExtensionLoadHandle? handle,
+        ExtensionErrorDetail? failureDetail,
         Exception? exception)
     {
+        if ((failureCode == ExtensionFailureCode.None) != (failureDetail is null))
+        {
+            throw new ArgumentException("Failure detail must be present exactly when a failure code is set.", nameof(failureDetail));
+        }
+
         Succeeded = succeeded;
         FailureCode = failureCode;
         Handle = handle;
+        FailureDetail = failureDetail;
         Exception = exception;
     }
 
@@ -45,6 +52,9 @@ public sealed class ExtensionLoadResult
     /// <summary>Gets the safe load failure category.</summary>
     public ExtensionFailureCode FailureCode { get; }
 
+    /// <summary>Gets the precise load failure detail, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
+
     /// <summary>Gets the loaded extension handle when successful.</summary>
     public ExtensionLoadHandle? Handle { get; }
 
@@ -52,12 +62,16 @@ public sealed class ExtensionLoadResult
     internal Exception? Exception { get; }
 
     internal static ExtensionLoadResult Success(ExtensionLoadHandle handle) =>
-        new(true, ExtensionFailureCode.None, handle, null);
+        new(true, ExtensionFailureCode.None, handle, null, null);
 
     internal static ExtensionLoadResult Failure(
         ExtensionFailureCode code,
-        Exception? exception = null) =>
-        new(false, code, null, exception);
+        ExtensionErrorDetail failureDetail,
+        Exception? exception = null)
+    {
+        ArgumentNullException.ThrowIfNull(failureDetail);
+        return new(false, code, null, failureDetail, exception);
+    }
 }
 
 /// <summary>Represents the bounded result of a collectible context unload request.</summary>
@@ -303,24 +317,32 @@ public sealed class CollectibleExtensionLoader
     /// <summary>Loads an entry assembly from the manifest's approved extension root.</summary>
     /// <param name="manifest">The manifest returned by explicit discovery.</param>
     /// <param name="contentHash">The optional recorded content digest used to key the per-content shadow load path.</param>
-    /// <returns>A safe result with no raw exception or path data.</returns>
+    /// <returns>A safe result whose public detail does not expose raw exception messages or absolute paths.</returns>
     public ExtensionLoadResult Load(ExtensionManifest? manifest, string? contentHash = null)
     {
         if (manifest is null)
         {
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.InvalidArgument);
+            return ExtensionLoadResult.Failure(
+                ExtensionFailureCode.InvalidArgument,
+                new ExtensionErrorDetail("The manifest argument is null."));
         }
 
         if (!manifest.RequiredHostApiVersion.IsSatisfiedBy(_hostApiVersion))
         {
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.HostApiIncompatible);
+            return ExtensionLoadResult.Failure(
+                ExtensionFailureCode.HostApiIncompatible,
+                new ExtensionErrorDetail(
+                    $"Extension '{manifest.Id}' requires host API version range '{manifest.RequiredHostApiVersion}', but the current host API version is '{_hostApiVersion}'."));
         }
 
         if (!CanonicalPath.TryCanonicalDirectory(manifest.ExtensionDirectory, out var root) ||
             !CanonicalPath.IsWithin(root, manifest.EntryAssemblyPath) ||
             !CanonicalPath.TryCanonicalFileInRoot(root, manifest.EntryAssemblyPath, out var entryPath))
         {
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.UnsafePath);
+            return ExtensionLoadResult.Failure(
+                ExtensionFailureCode.UnsafePath,
+                new ExtensionErrorDetail(
+                    $"Extension '{manifest.Id}' entry assembly value {ExtensionDiagnosticText.Value(manifest.EntryAssembly)} is unsafe; it must resolve to a file inside the extension directory."));
         }
         foreach (var export in manifest.Exports)
         {
@@ -329,7 +351,10 @@ public sealed class CollectibleExtensionLoader
                     export.AssemblyIdentity,
                     export.TypeIdentity) != ExtensionFailureCode.None)
             {
-                return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractCatalogUnavailable);
+                return ExtensionLoadResult.Failure(
+                    ExtensionFailureCode.ContractCatalogUnavailable,
+                    new ExtensionErrorDetail(
+                        $"Extension '{manifest.Id}' export contract '{export.ContractId}' could not be validated in the contract catalog."));
             }
         }
 
@@ -340,7 +365,10 @@ public sealed class CollectibleExtensionLoader
                     import.AssemblyIdentity,
                     import.TypeIdentity) != ExtensionFailureCode.None)
             {
-                return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractCatalogUnavailable);
+                return ExtensionLoadResult.Failure(
+                    ExtensionFailureCode.ContractCatalogUnavailable,
+                    new ExtensionErrorDetail(
+                        $"Extension '{manifest.Id}' import contract '{import.ContractId}' could not be validated in the contract catalog."));
             }
         }
 
@@ -362,14 +390,20 @@ public sealed class CollectibleExtensionLoader
             if (entryType is null)
             {
                 loadContext.Unload();
-                return ExtensionLoadResult.Failure(ExtensionFailureCode.EntryTypeMissing);
+                return ExtensionLoadResult.Failure(
+                    ExtensionFailureCode.EntryTypeMissing,
+                    new ExtensionErrorDetail(
+                        $"Extension '{manifest.Id}' entry type {ExtensionDiagnosticText.Value(manifest.EntryType)} was not found in entry assembly {ExtensionDiagnosticText.Value(manifest.EntryAssembly)}."));
             }
 
             if (!typeof(IExtensionEntrypoint).IsAssignableFrom(entryType) ||
                 !entryType.IsClass || entryType.IsAbstract)
             {
                 loadContext.Unload();
-                return ExtensionLoadResult.Failure(ExtensionFailureCode.EntryTypeNotCompatible);
+                return ExtensionLoadResult.Failure(
+                    ExtensionFailureCode.EntryTypeNotCompatible,
+                    new ExtensionErrorDetail(
+                        $"Extension '{manifest.Id}' entry type {ExtensionDiagnosticText.Value(entryType.FullName)} must be a non-abstract class implementing '{typeof(IExtensionEntrypoint).FullName}'."));
             }
 
             var handle = new ExtensionLoadHandle(manifest, loadContext, entryAssembly, entryType, _logger);
@@ -379,12 +413,22 @@ public sealed class CollectibleExtensionLoader
         catch (ContractsIdentityException exception)
         {
             loadContext?.Unload();
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.ContractsIdentityMismatch, exception);
+            return ExtensionLoadResult.Failure(
+                ExtensionFailureCode.ContractsIdentityMismatch,
+                new ExtensionErrorDetail(
+                    $"Extension '{manifest.Id}' could not load the shared Contracts identity while loading entry assembly {ExtensionDiagnosticText.Value(manifest.EntryAssembly)} ({exception.GetType().Name}).",
+                    exception.GetType().FullName),
+                exception);
         }
         catch (Exception exception)
         {
             loadContext?.Unload();
-            return ExtensionLoadResult.Failure(ExtensionFailureCode.LoadFailed, exception);
+            return ExtensionLoadResult.Failure(
+                ExtensionFailureCode.LoadFailed,
+                new ExtensionErrorDetail(
+                    $"Extension '{manifest.Id}' could not load entry assembly {ExtensionDiagnosticText.Value(manifest.EntryAssembly)} ({exception.GetType().Name}).",
+                    exception.GetType().FullName),
+                exception);
         }
     }
 }

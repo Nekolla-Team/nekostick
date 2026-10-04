@@ -60,8 +60,13 @@ public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapsh
 
             if (revision is null || globalSettings is null)
             {
+                var message = revision is null && globalSettings is null
+                    ? $"The configuration revision key '{PersistenceDatabaseDefaults.GlobalRevisionKey}' and the global settings row were not found."
+                    : revision is null
+                        ? $"The configuration revision key '{PersistenceDatabaseDefaults.GlobalRevisionKey}' was not found."
+                        : "The global settings row was not found.";
                 return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound));
+                    new ConfigurationError(ConfigurationErrorCode.NotFound, message));
             }
 
             try
@@ -73,17 +78,36 @@ public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapsh
                     services,
                     extensionRecords,
                     extensionSettings);
-                return HostConfigurationSnapshotValidator.IsComplete(snapshot, _logger) &&
-                    HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger)
-                    ? ConfigurationReadResult<HostConfigurationSnapshot>.Success(snapshot)
-                    : ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                        new ConfigurationError(ConfigurationErrorCode.Validation));
+                if (!HostConfigurationSnapshotValidator.IsComplete(snapshot, out var validationMessage, _logger))
+                {
+                    return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
+                        new ConfigurationError(
+                            ConfigurationErrorCode.Validation,
+                            validationMessage ?? "The host configuration snapshot failed completeness validation."));
+                }
+
+                if (!HostConfigurationSemanticValidator.TryValidateSnapshot(snapshot, _logger))
+                {
+                    return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
+                        new ConfigurationError(
+                            ConfigurationErrorCode.Validation,
+                            "The host configuration snapshot failed semantic validation of its field constraints or persisted-version invariants."));
+                }
+
+                return ConfigurationReadResult<HostConfigurationSnapshot>.Success(snapshot);
             }
             catch (Exception exception)
             {
                 HostLogMessages.FailureDetails(_logger, exception, "ReadComplete.Mapping");
+                var message = exception switch
+                {
+                    InvalidDataException invalidDataException => invalidDataException.Message,
+                    JsonException => "A persisted host configuration JSON field is malformed.",
+                    ArgumentException => "A persisted host configuration row contains an invalid or duplicate identifier.",
+                    _ => $"The persisted host configuration could not be mapped because its data caused {exception.GetType().Name}."
+                };
                 return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.Validation));
+                    new ConfigurationError(ConfigurationErrorCode.Validation, message));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -94,7 +118,9 @@ public sealed class EfHostConfigurationSnapshotReader : IHostConfigurationSnapsh
         {
             HostLogMessages.FailureDetails(_logger, exception, nameof(ReadCompleteAsync));
             return ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+                new ConfigurationError(
+                    ConfigurationErrorCode.StorageUnavailable,
+                    "The host configuration snapshot could not be read because the database operation failed while accessing the configuration revision, global settings, routes, services, extension records, or extension settings."));
         }
     }
 
@@ -122,7 +148,8 @@ internal static class HostConfigurationSnapshotMapper
             {
                 if (!extensionIdsByRecordId.TryGetValue(value.ExtensionRecordId, out var extensionId))
                 {
-                    throw new InvalidDataException("An extension setting references an unknown extension record.");
+                    throw new InvalidDataException(
+                        $"Extension setting references missing ExtensionRecordId '{value.ExtensionRecordId}'.");
                 }
 
                 return new ExtensionSettingsConfiguration(

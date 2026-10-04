@@ -110,7 +110,7 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge14
             {
                 return _hostInfo?.Invoke() ?? ExtensionHostInfoSnapshot.Unavailable;
             }
-            catch (Exception)
+            catch (Exception exception)
             {
                 // The provider reads host runtime state that may be mid-disposal during shutdown.
                 if (_logger is { } logger)
@@ -120,7 +120,9 @@ internal sealed class ExtensionHostBridge : IExtensionHostBridge14
                         nameof(HostInfo));
                 }
 
-                return ExtensionHostInfoSnapshot.Unavailable;
+                return ExtensionHostInfoSnapshot.UnavailableWithDetail(
+                    new ExtensionErrorDetail(
+                        $"Host information is unavailable because host runtime state could not be read ({exception.GetType().Name})."));
             }
         }
     }

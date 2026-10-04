@@ -248,8 +248,8 @@ public interface IExtensionRouteEvents
 {
     /// <summary>Subscribes to global standard event-bus route observations.</summary>
     /// <param name="callback">The asynchronous standard event-bus callback.</param>
-    /// <returns><see langword="true" /> when the subscription was accepted before the generation cap.</returns>
-    bool TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback);
+    /// <returns>The cached success singleton when accepted, or a failure subtype carrying InvalidArgument, LimitReached, Unavailable, or Unsupported and required precise detail.</returns>
+    ExtensionRouteRegistrationResult TrySubscribe(Func<ExtensionEvent, CancellationToken, ValueTask> callback);
 
     /// <summary>Registers a global asynchronous action-capable hook for one stage.</summary>
     /// <param name="stage">The trigger or return stage at which the hook runs.</param>
@@ -258,8 +258,8 @@ public interface IExtensionRouteEvents
     /// return a validated result within <see cref="ExtensionRouteHookLimits.MaximumCallbackDuration" /> while
     /// observing cancellation.
     /// </param>
-    /// <returns><see langword="true" /> when the hook registration was accepted before the generation cap.</returns>
-    bool TryRegisterHook(
+    /// <returns>The cached success singleton when accepted, or a failure subtype carrying InvalidArgument, InvalidStage, LimitReached, Unavailable, or Unsupported and required precise detail.</returns>
+    ExtensionRouteRegistrationResult TryRegisterHook(
         ExtensionRouteEventStage stage,
         Func<ExtensionRouteHookContext, CancellationToken, ValueTask<ExtensionRouteHookResult>> callback);
 }

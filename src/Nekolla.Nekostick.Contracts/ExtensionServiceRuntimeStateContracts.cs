@@ -247,10 +247,12 @@ public sealed record ExtensionServiceRuntimeStateSubscriptionResult
     /// <param name="succeeded">Whether the subscription was created.</param>
     /// <param name="code">The fixed result code.</param>
     /// <param name="subscription">The subscription handle when successful.</param>
+    /// <param name="detail">The required precise failure cause, or <see langword="null" /> on success.</param>
     public ExtensionServiceRuntimeStateSubscriptionResult(
         bool succeeded,
         ExtensionServiceRuntimeStateSubscriptionCode code,
-        IExtensionServiceRuntimeStateSubscription? subscription)
+        IExtensionServiceRuntimeStateSubscription? subscription,
+        ExtensionErrorDetail? detail)
     {
         if (succeeded != (code == ExtensionServiceRuntimeStateSubscriptionCode.Subscribed) ||
             succeeded != (subscription is not null))
@@ -258,9 +260,20 @@ public sealed record ExtensionServiceRuntimeStateSubscriptionResult
             throw new ArgumentException("The runtime-state subscription result is inconsistent.");
         }
 
+        if (succeeded && detail is not null)
+        {
+            throw new ArgumentException("A successful result cannot include error detail.", nameof(detail));
+        }
+
+        if (!succeeded && detail is null)
+        {
+            throw new ArgumentNullException(nameof(detail), "An unsuccessful result must include error detail.");
+        }
+
         Succeeded = succeeded;
         Code = code;
         Subscription = subscription;
+        Detail = detail;
     }
 
     /// <summary>Gets whether the subscription was created.</summary>
@@ -271,6 +284,10 @@ public sealed record ExtensionServiceRuntimeStateSubscriptionResult
 
     /// <summary>Gets the subscription handle when the request succeeded.</summary>
     public IExtensionServiceRuntimeStateSubscription? Subscription { get; }
+
+    /// <summary>Gets the precise failure cause, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? Detail { get; }
+
 }
 
 /// <summary>Provides node-local subscriptions to service runtime-state changes.</summary>

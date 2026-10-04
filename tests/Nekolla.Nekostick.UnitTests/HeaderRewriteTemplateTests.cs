@@ -35,6 +35,23 @@ public sealed class HeaderRewriteTemplateTests
     }
 
     [Fact]
+    public void CompilationResultsCarryTypedPayloadsAndPreciseDetails()
+    {
+        var failureResult = HeaderRewriteTemplate.TryCompile("{unknown}");
+        var failure = Assert.IsType<HeaderRewriteTemplateCompileFailureResult>(failureResult);
+        Assert.False(failure.Succeeded);
+        Assert.Equal(HeaderRewriteTemplateCompileFailureCode.UnsupportedToken, failure.Code);
+        Assert.Equal(
+            "The header rewrite token at zero-based position 0 is not supported.",
+            failure.Detail.Message);
+
+        var successResult = HeaderRewriteTemplate.TryCompile("asset/{path}");
+        var success = Assert.IsType<HeaderRewriteTemplateCompileSuccessResult>(successResult);
+        Assert.True(success.Succeeded);
+        Assert.Equal("asset/orders", success.Template.Expand("127.0.0.1", "orders", "GET", "example.test"));
+    }
+
+    [Fact]
     public void SemanticValidationRejectsControlCharactersAndAcceptsExactTokens()
     {
         var controlRoute = CreateRoute(

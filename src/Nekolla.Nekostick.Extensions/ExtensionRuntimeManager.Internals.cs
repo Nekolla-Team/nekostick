@@ -17,19 +17,23 @@ public sealed partial class ExtensionRuntimeManager
     {
         if (cancellationToken.IsCancellationRequested)
         {
-            return CandidateResult.Failure(ExtensionFailureCode.Cancelled);
+            return CandidateResult.Failure(
+                ExtensionFailureCode.Cancelled,
+                new ExtensionErrorDetail($"Startup for extension '{manifest.Id}' was canceled before it began."));
         }
 
-        var contractFailure = ValidateManifestContracts(manifest);
+        var contractFailure = ValidateManifestContracts(manifest, out var contractFailureDetail);
         if (contractFailure != ExtensionFailureCode.None)
         {
-            return CandidateResult.Failure(contractFailure);
+            return CandidateResult.Failure(contractFailure, contractFailureDetail!);
         }
+
         availableDependencyVersions ??= GetLiveDependencyVersions(manifest);
         var loaded = _loader.Load(manifest, contentHash);
         if (!loaded.Succeeded || loaded.Handle is null)
         {
             var loadFailureCode = loaded.FailureCode.ToString();
+            var loadFailureDetail = loaded.FailureDetail!;
             if (_logger is { } loadLogger)
             {
                 if (loaded.Exception is not null)
@@ -44,7 +48,7 @@ public sealed partial class ExtensionRuntimeManager
                 ExtensionLogMessages.ExtensionCandidateFailed(loadLogger, manifest.Id, loadFailureCode);
             }
 
-            return CandidateResult.Failure(loaded.FailureCode);
+            return CandidateResult.Failure(loaded.FailureCode, loadFailureDetail);
         }
 
         var loadedHandle = loaded.Handle;
@@ -79,19 +83,22 @@ public sealed partial class ExtensionRuntimeManager
                 // Preserve the instance's classified failure (Cancelled, HandlerConflict,
                 // RegistrationRejected-derived codes) instead of collapsing everything to
                 // LifecycleFailed; the publisher's unsafe-binding policy keys off these codes.
-                var failureCode = instance.GetStatus().LastFailure;
+                var failureStatus = instance.GetStatus();
+                var failureCode = failureStatus.LastFailure;
                 if (failureCode == ExtensionFailureCode.None)
                 {
                     failureCode = ExtensionFailureCode.LifecycleFailed;
                 }
 
+                var failureDetail = failureStatus.LastFailureDetail ?? new ExtensionErrorDetail(
+                    $"Extension '{manifest.Id}' did not complete lifecycle startup ({failureCode}).");
                 await instance.AbortAsync(LifecycleTimeout).ConfigureAwait(false);
                 if (_logger is { } lifecycleLogger)
                 {
                     ExtensionLogMessages.ExtensionCandidateFailed(lifecycleLogger, manifest.Id, failureCode.ToString());
                 }
 
-                return CandidateResult.Failure(failureCode);
+                return CandidateResult.Failure(failureCode, failureDetail);
             }
 
             return CandidateResult.Success(instance);
@@ -121,17 +128,22 @@ public sealed partial class ExtensionRuntimeManager
                     failureCode);
             }
 
-            return CandidateResult.Failure(ExtensionFailureCode.EntryConstructorFailed);
+            return CandidateResult.Failure(
+                ExtensionFailureCode.EntryConstructorFailed,
+                ExtensionErrorDetail.FromException(exception));
         }
     }
     private async ValueTask<ExtensionLifecycleOperationResult> RequestReloadAsync(
-
         ExtensionInstance instance,
         CancellationToken cancellationToken)
     {
         if (ExtensionCallbackGuard.IsActive)
         {
-            return new(false, ExtensionLifecycleOperationCode.Reentrant, instance.GetLifecycleStatus());
+            return new(
+                false,
+                ExtensionLifecycleOperationCode.Reentrant,
+                instance.GetLifecycleStatus(),
+                new ExtensionErrorDetail($"Extension '{instance.Manifest.Id}' cannot request a reload from an active extension callback."));
         }
 
         try
@@ -139,7 +151,7 @@ public sealed partial class ExtensionRuntimeManager
             var result = await ReloadAsync(instance.Manifest, instance.Settings, cancellationToken).ConfigureAwait(false);
             return ToLifecycleResult(result);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
             if (_logger is { } cancelledLogger)
             {
@@ -149,7 +161,11 @@ public sealed partial class ExtensionRuntimeManager
                     nameof(RequestReloadAsync));
             }
 
-            return new(false, ExtensionLifecycleOperationCode.Cancelled, instance.GetLifecycleStatus());
+            return new(
+                false,
+                ExtensionLifecycleOperationCode.Cancelled,
+                instance.GetLifecycleStatus(),
+                ExtensionErrorDetail.FromException(exception));
         }
         catch (Exception exception)
         {
@@ -162,17 +178,24 @@ public sealed partial class ExtensionRuntimeManager
                     nameof(RequestReloadAsync));
             }
 
-            return new(false, ExtensionLifecycleOperationCode.Failed, instance.GetLifecycleStatus());
+            return new(
+                false,
+                ExtensionLifecycleOperationCode.Failed,
+                instance.GetLifecycleStatus(),
+                ExtensionErrorDetail.FromException(exception));
         }
     }
-
     private async ValueTask<ExtensionLifecycleOperationResult> RequestUnloadAsync(
         ExtensionInstance instance,
         CancellationToken cancellationToken)
     {
         if (ExtensionCallbackGuard.IsActive)
         {
-            return new(false, ExtensionLifecycleOperationCode.Reentrant, instance.GetLifecycleStatus());
+            return new(
+                false,
+                ExtensionLifecycleOperationCode.Reentrant,
+                instance.GetLifecycleStatus(),
+                new ExtensionErrorDetail($"Extension '{instance.Manifest.Id}' cannot request unload from an active extension callback."));
         }
 
         try
@@ -180,7 +203,7 @@ public sealed partial class ExtensionRuntimeManager
             var result = await UnloadAsync(instance.Manifest.Id, cancellationToken).ConfigureAwait(false);
             return ToLifecycleResult(result);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
             if (_logger is { } cancelledLogger)
             {
@@ -190,7 +213,11 @@ public sealed partial class ExtensionRuntimeManager
                     nameof(RequestUnloadAsync));
             }
 
-            return new(false, ExtensionLifecycleOperationCode.Cancelled, instance.GetLifecycleStatus());
+            return new(
+                false,
+                ExtensionLifecycleOperationCode.Cancelled,
+                instance.GetLifecycleStatus(),
+                ExtensionErrorDetail.FromException(exception));
         }
         catch (Exception exception)
         {
@@ -203,9 +230,14 @@ public sealed partial class ExtensionRuntimeManager
                     nameof(RequestUnloadAsync));
             }
 
-            return new(false, ExtensionLifecycleOperationCode.Failed, instance.GetLifecycleStatus());
+            return new(
+                false,
+                ExtensionLifecycleOperationCode.Failed,
+                instance.GetLifecycleStatus(),
+                ExtensionErrorDetail.FromException(exception));
         }
     }
+
 
     private static ExtensionLifecycleOperationResult ToLifecycleResult(ExtensionRuntimeOperationResult result) =>
         new(
@@ -220,9 +252,10 @@ public sealed partial class ExtensionRuntimeManager
                     ExtensionFailureCode.HandlerConflict or ExtensionFailureCode.FallbackConflict => ExtensionLifecycleOperationCode.Conflict,
                     _ => ExtensionLifecycleOperationCode.Failed
                 },
-            result.Status is null ? null : ToLifecycleStatus(result.Status));
+            result.Status is null ? null : ToLifecycleStatus(result.Status),
+            result.FailureDetail);
 
-    private static ExtensionLifecycleStatus ToLifecycleStatus(ExtensionRuntimeStatus status) =>
+    internal static ExtensionLifecycleStatus ToLifecycleStatus(ExtensionRuntimeStatus status) =>
         new(
             status.ExtensionId,
             status.Version,
@@ -235,19 +268,35 @@ public sealed partial class ExtensionRuntimeManager
             status.DroppedEvents,
             status.LastFailure switch
             {
+                ExtensionFailureCode.None => ExtensionLifecycleFailureCode.None,
                 ExtensionFailureCode.InvalidArgument => ExtensionLifecycleFailureCode.InvalidArgument,
                 ExtensionFailureCode.Cancelled => ExtensionLifecycleFailureCode.Cancelled,
-                ExtensionFailureCode.AlreadyStopped => ExtensionLifecycleFailureCode.AlreadyStopped,
+                ExtensionFailureCode.AlreadyStopped or ExtensionFailureCode.AlreadyUnloaded => ExtensionLifecycleFailureCode.AlreadyStopped,
                 ExtensionFailureCode.ExtensionNotLoaded => ExtensionLifecycleFailureCode.ExtensionNotLoaded,
-                ExtensionFailureCode.LoadFailed => ExtensionLifecycleFailureCode.LoadFailed,
+                ExtensionFailureCode.LoadFailed or ExtensionFailureCode.EntryTypeMissing or
+                    ExtensionFailureCode.EntryTypeNotCompatible or ExtensionFailureCode.EntryConstructorFailed => ExtensionLifecycleFailureCode.LoadFailed,
                 ExtensionFailureCode.LifecycleFailed => ExtensionLifecycleFailureCode.LifecycleFailed,
-                ExtensionFailureCode.StopFailed => ExtensionLifecycleFailureCode.StopFailed,
+                ExtensionFailureCode.StopFailed or ExtensionFailureCode.DrainTimeout => ExtensionLifecycleFailureCode.StopFailed,
                 ExtensionFailureCode.HandlerFailed => ExtensionLifecycleFailureCode.HandlerFailed,
-                ExtensionFailureCode.CallbackFailed => ExtensionLifecycleFailureCode.CallbackFailed,
+                ExtensionFailureCode.CallbackFailed or ExtensionFailureCode.FailureThresholdReached => ExtensionLifecycleFailureCode.CallbackFailed,
                 ExtensionFailureCode.HandlerConflict or ExtensionFailureCode.FallbackConflict => ExtensionLifecycleFailureCode.RegistrationConflict,
+                ExtensionFailureCode.ContractCatalogUnavailable or ExtensionFailureCode.DuplicateContractDeclaration or
+                    ExtensionFailureCode.MissingContractProvider or ExtensionFailureCode.ContractVersionIncompatible or
+                    ExtensionFailureCode.ContractIdentityMismatch or ExtensionFailureCode.ContractsIdentityMismatch => ExtensionLifecycleFailureCode.ContractConflict,
                 ExtensionFailureCode.ReplacementPreserved => ExtensionLifecycleFailureCode.ReplacementPreserved,
+                ExtensionFailureCode.UnloadLeak or ExtensionFailureCode.UnloadNotConfirmed => ExtensionLifecycleFailureCode.AlcUnloadUnconfirmed,
+                ExtensionFailureCode.ManifestMissing or ExtensionFailureCode.DuplicateManifest or
+                    ExtensionFailureCode.YamlInvalid or ExtensionFailureCode.JsonInvalid or
+                    ExtensionFailureCode.UnknownManifestField or ExtensionFailureCode.DuplicateManifestField or
+                    ExtensionFailureCode.ManifestSchemaInvalid or ExtensionFailureCode.InvalidIdentifier or
+                    ExtensionFailureCode.InvalidVersion or ExtensionFailureCode.InvalidVersionRange or
+                    ExtensionFailureCode.UnsafePath or ExtensionFailureCode.EntryAssemblyMissing or
+                    ExtensionFailureCode.HostApiIncompatible or ExtensionFailureCode.DuplicateExtensionId or
+                    ExtensionFailureCode.MissingDependency or ExtensionFailureCode.DependencyVersionIncompatible or
+                    ExtensionFailureCode.DependencyCycle => ExtensionLifecycleFailureCode.ManifestInvalid,
                 _ => ExtensionLifecycleFailureCode.RuntimeUnavailable
-            });
+            },
+            status.LastFailureDetail);
 
 
     private ExtensionFailureCode GetRegistrationConflict(ExtensionInstance candidate, ExtensionInstance? previous)
@@ -268,13 +317,18 @@ public sealed partial class ExtensionRuntimeManager
         }
         return ExtensionFailureCode.None;
     }
-    private ExtensionFailureCode ValidateManifestContracts(ExtensionManifest manifest)
+    private ExtensionFailureCode ValidateManifestContracts(
+        ExtensionManifest manifest,
+        out ExtensionErrorDetail? failureDetail)
     {
+        failureDetail = null;
         var imports = new HashSet<string>(StringComparer.Ordinal);
         foreach (var import in manifest.Imports)
         {
             if (!imports.Add(import.ContractId))
             {
+                failureDetail = new ExtensionErrorDetail(
+                    $"Extension '{manifest.Id}' declares contract import '{import.ContractId}' more than once.");
                 return ExtensionFailureCode.DuplicateContractDeclaration;
             }
 
@@ -287,6 +341,8 @@ public sealed partial class ExtensionRuntimeManager
                     continue;
                 }
 
+                failureDetail = new ExtensionErrorDetail(
+                    $"Required contract import '{import.ContractId}' has no available provider.");
                 return ExtensionFailureCode.MissingContractProvider;
             }
 
@@ -297,12 +353,16 @@ public sealed partial class ExtensionRuntimeManager
                     continue;
                 }
 
+                failureDetail = new ExtensionErrorDetail(
+                    $"Provider '{provider.ContractId}' version '{provider.Version}' does not satisfy import range '{import.VersionRange}' for extension '{manifest.Id}'.");
                 return ExtensionFailureCode.ContractVersionIncompatible;
             }
 
             if (!string.Equals(import.AssemblyIdentity, provider.AssemblyIdentity, StringComparison.Ordinal) ||
                 !string.Equals(import.TypeIdentity, provider.TypeIdentity, StringComparison.Ordinal))
             {
+                failureDetail = new ExtensionErrorDetail(
+                    $"Contract import '{import.ContractId}' declares assembly '{import.AssemblyIdentity}' and type '{import.TypeIdentity}', but its provider declares assembly '{provider.AssemblyIdentity}' and type '{provider.TypeIdentity}'.");
                 return ExtensionFailureCode.ContractIdentityMismatch;
             }
         }
@@ -348,27 +408,61 @@ public sealed partial class ExtensionRuntimeManager
         }
     }
 
-    private object? ResolveContractProvider(
+    private readonly record struct ContractTargetResolution(
+        ExtensionInstance? Provider,
+        object? Target,
+        ExtensionErrorDetail? Reason)
+    {
+        internal bool Succeeded => Provider is not null && Target is not null;
+    }
+
+    private ExtensionContractProviderResolution ResolveContractProvider(
         ExtensionInstance consumer,
         string contractId,
         Type contractType,
         SemVersionRange requiredRange)
     {
-        if (ResolveContractTarget(consumer.Manifest.Id, contractId, contractType, requiredRange) is not { } resolved)
+        var resolved = ResolveContractTarget(consumer.Manifest.Id, contractId, contractType, requiredRange);
+        if (!resolved.Succeeded)
         {
-            return null;
+            return ExtensionContractProviderResolution.Failure(resolved.Reason!);
         }
 
-        // Wrap outside _gate: first-use DispatchProxy codegen must not stall manager operations.
-        return resolved.Provider.GetOrCreateContractProxy(
-            contractId,
-            consumer.Manifest.Id,
-            contractType,
-            resolved.Target,
-            GetTurnstile(resolved.Provider.Manifest.Id),
-            () => ResolveContractTarget(consumer.Manifest.Id, contractId, contractType, requiredRange) is { } next
-                ? (next.Provider, next.Target, GetTurnstile(next.Provider.Manifest.Id))
-                : null);
+        var provider = resolved.Provider!;
+        var target = resolved.Target!;
+        object proxy;
+        try
+        {
+            // Wrap outside _gate: first-use DispatchProxy codegen must not stall manager operations.
+            proxy = provider.GetOrCreateContractProxy(
+                contractId,
+                consumer.Manifest.Id,
+                contractType,
+                target,
+                GetTurnstile(provider.Manifest.Id),
+                () =>
+                {
+                    var next = ResolveContractTarget(consumer.Manifest.Id, contractId, contractType, requiredRange);
+                    return next.Succeeded
+                        ? (next.Provider!, next.Target!, GetTurnstile(next.Provider!.Manifest.Id))
+                        : null;
+                });
+        }
+        catch (Exception exception)
+        {
+            return ExtensionContractProviderResolution.Failure(
+                new ExtensionErrorDetail(
+                    $"The proxy for contract '{contractId}' from provider extension '{provider.Manifest.Id}' is unavailable for expected type {ExtensionDiagnosticText.Value(contractType.FullName)} in required range {ExtensionDiagnosticText.Value(requiredRange.ToString())} ({exception.GetType().Name})."));
+        }
+
+        if (!contractType.IsInstanceOfType(proxy))
+        {
+            return ExtensionContractProviderResolution.Failure(
+                new ExtensionErrorDetail(
+                    $"The proxy for contract '{contractId}' from provider extension '{provider.Manifest.Id}' has runtime type {ExtensionDiagnosticText.Value(proxy.GetType().FullName)}, not expected contract type {ExtensionDiagnosticText.Value(contractType.FullName)}, in required range {ExtensionDiagnosticText.Value(requiredRange.ToString())}."));
+        }
+
+        return ExtensionContractProviderResolution.Success(proxy);
     }
 
     /// <summary>Finds the current provider instance and contract object for one import and records the consumer on it.</summary>
@@ -376,8 +470,8 @@ public sealed partial class ExtensionRuntimeManager
     /// <param name="contractId">The contract identifier to resolve.</param>
     /// <param name="contractType">The shared contract interface type.</param>
     /// <param name="requiredRange">The declared provider version range.</param>
-    /// <returns>The provider instance and its contract object, or null when none is available.</returns>
-    private (ExtensionInstance Provider, object Target)? ResolveContractTarget(
+    /// <returns>The provider and contract object, or a concrete provider-resolution failure.</returns>
+    private ContractTargetResolution ResolveContractTarget(
         string consumerId,
         string contractId,
         Type contractType,
@@ -385,6 +479,12 @@ public sealed partial class ExtensionRuntimeManager
     {
         ExtensionInstance? provider = null;
         object? target = null;
+        var sawExport = false;
+        var sawInRangeExport = false;
+        (ExtensionInstance Provider, ExtensionContractExport Export)? versionMismatch = null;
+        (ExtensionInstance Provider, ExtensionContractExport Export)? notYetExported = null;
+        (ExtensionInstance Provider, ExtensionContractExport Export, Type ActualType)? typeMismatch = null;
+        (ExtensionInstance Provider, ExtensionContractExport Export)? unavailable = null;
         lock (_gate)
         {
             // Candidates first: a consumer candidate starting during generation preparation must
@@ -402,27 +502,87 @@ public sealed partial class ExtensionRuntimeManager
             {
                 var export = instance.Manifest.Exports.FirstOrDefault(export =>
                     string.Equals(export.ContractId, contractId, StringComparison.Ordinal));
-                if (export is not null &&
-                    requiredRange.IsSatisfiedBy(export.Version) &&
-                    instance.TryResolveContract(contractId, contractType, out var value) &&
-                    value is not null)
+                if (export is null)
+                {
+                    continue;
+                }
+
+                sawExport = true;
+                if (!requiredRange.IsSatisfiedBy(export.Version))
+                {
+                    versionMismatch ??= (instance, export);
+                    continue;
+                }
+
+                sawInRangeExport = true;
+                var resolution = instance.TryResolveContract(contractId, contractType, out var value);
+                if (resolution == ExtensionContractExportResolution.Resolved && value is not null)
                 {
                     provider = instance;
                     target = value;
                     break;
                 }
+
+                if (resolution == ExtensionContractExportResolution.TypeMismatch && value is not null)
+                {
+                    typeMismatch ??= (instance, export, value.GetType());
+                }
+                else if (resolution == ExtensionContractExportResolution.RegistryUnavailable)
+                {
+                    unavailable ??= (instance, export);
+                }
+                else
+                {
+                    notYetExported ??= (instance, export);
+                }
             }
         }
 
-        if (provider is null || target is null)
+        if (provider is not null && target is not null)
         {
-            return null;
+            provider.TrackContractConsumer(consumerId);
+            return new ContractTargetResolution(provider, target, null);
         }
 
-        provider.TrackContractConsumer(consumerId);
-        return (provider, target);
-    }
+        ExtensionErrorDetail reason;
+        if (!sawExport)
+        {
+            reason = new ExtensionErrorDetail(
+                $"No provider extension exports contract '{contractId}' requested by consumer extension '{consumerId}'.");
+        }
+        else if (!sawInRangeExport && versionMismatch is { } mismatch)
+        {
+            reason = new ExtensionErrorDetail(
+                $"Provider extension '{mismatch.Provider.Manifest.Id}' exports contract '{contractId}' at version {ExtensionDiagnosticText.Value(mismatch.Export.Version.ToString())}, outside required range {ExtensionDiagnosticText.Value(requiredRange.ToString())} for consumer extension '{consumerId}'.");
+        }
+        else if (typeMismatch is { } wrongType)
+        {
+            reason = new ExtensionErrorDetail(
+                $"Provider extension '{wrongType.Provider.Manifest.Id}' exports contract '{contractId}' at version {ExtensionDiagnosticText.Value(wrongType.Export.Version.ToString())} with runtime type {ExtensionDiagnosticText.Value(wrongType.ActualType.FullName)}, not expected type {ExtensionDiagnosticText.Value(contractType.FullName)} in required range {ExtensionDiagnosticText.Value(requiredRange.ToString())}.");
+        }
+        else if (notYetExported is { } pending)
+        {
+            reason = new ExtensionErrorDetail(
+                $"Provider extension '{pending.Provider.Manifest.Id}' declares contract '{contractId}' at version {ExtensionDiagnosticText.Value(pending.Export.Version.ToString())} within required range {ExtensionDiagnosticText.Value(requiredRange.ToString())} but has not yet exported its implementation for consumer extension '{consumerId}'.");
+        }
+        else if (unavailable is { } unavailableProvider)
+        {
+            reason = new ExtensionErrorDetail(
+                $"Provider extension '{unavailableProvider.Provider.Manifest.Id}' declares contract '{contractId}' at version {ExtensionDiagnosticText.Value(unavailableProvider.Export.Version.ToString())} within required range {ExtensionDiagnosticText.Value(requiredRange.ToString())}, but its contract registry is unavailable.");
+        }
+        else if (versionMismatch is { } outOfRange)
+        {
+            reason = new ExtensionErrorDetail(
+                $"Provider extension '{outOfRange.Provider.Manifest.Id}' exports contract '{contractId}' at version {ExtensionDiagnosticText.Value(outOfRange.Export.Version.ToString())}, outside required range {ExtensionDiagnosticText.Value(requiredRange.ToString())} for consumer extension '{consumerId}'.");
+        }
+        else
+        {
+            reason = new ExtensionErrorDetail(
+                $"No available provider for contract '{contractId}' satisfies required range {ExtensionDiagnosticText.Value(requiredRange.ToString())} for consumer extension '{consumerId}'.");
+        }
 
+        return new ContractTargetResolution(null, null, reason);
+    }
     /// <summary>Computes the transitive closure of extensions that imported contracts from the given extension, based on the per-run records of the currently live instances.</summary>
     /// <param name="extensionId">The provider extension identifier whose dependents are requested.</param>
     /// <returns>The dependent extension identifiers, excluding the provider itself.</returns>
@@ -637,7 +797,7 @@ public sealed partial class ExtensionRuntimeManager
                 failureCode);
         }
 
-        if (instance is null || instance.RecordFailure(category))
+        if (instance is null || instance.RecordFailure(category, exception))
         {
             if (instance is not null)
             {
@@ -700,13 +860,17 @@ public sealed partial class ExtensionRuntimeManager
         }
     }
 
-    private sealed record CandidateResult(bool Succeeded, ExtensionFailureCode FailureCode, ExtensionInstance? Instance)
+    private sealed record CandidateResult(
+        bool Succeeded,
+        ExtensionFailureCode FailureCode,
+        ExtensionErrorDetail? FailureDetail,
+        ExtensionInstance? Instance)
     {
         internal static CandidateResult Success(ExtensionInstance instance) =>
-            new(true, ExtensionFailureCode.None, instance);
+            new(true, ExtensionFailureCode.None, null, instance);
 
-        internal static CandidateResult Failure(ExtensionFailureCode code) =>
-            new(false, code, null);
+        internal static CandidateResult Failure(ExtensionFailureCode code, ExtensionErrorDetail failureDetail) =>
+            new(false, code, failureDetail, null);
     }
 
     private sealed record HandlerBinding(

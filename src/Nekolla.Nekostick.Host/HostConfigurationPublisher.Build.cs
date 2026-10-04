@@ -654,7 +654,9 @@ public sealed partial class HostConfigurationPublisher
         if (_dbContextFactory is null)
         {
             return ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+                new ConfigurationError(
+                    ConfigurationErrorCode.StorageUnavailable,
+                    "Discovered extension records could not be persisted because the host database context factory is unavailable."));
         }
 
         var now = DateTimeOffset.UtcNow;
@@ -693,7 +695,9 @@ public sealed partial class HostConfigurationPublisher
         {
             HostLogMessages.FailureDetails(_logger, exception, "BuildDesired.BootstrapRecordPersistence");
             return ConfigurationWriteResult.Failure(
-                new ConfigurationError(ConfigurationErrorCode.StorageUnavailable));
+                new ConfigurationError(
+                    ConfigurationErrorCode.StorageUnavailable,
+                    "Discovered extension records could not be persisted because the backing database operation failed."));
         }
     }
 

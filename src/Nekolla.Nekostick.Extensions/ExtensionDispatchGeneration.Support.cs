@@ -35,7 +35,8 @@ public sealed class ExtensionDispatchLease : IDisposable, IAsyncDisposable
     {
         var generation = _generation;
         return generation is null
-            ? ValueTask.FromResult(ExtensionInvocationResult.Unavailable)
+            ? ValueTask.FromResult(ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                "The extension dispatch lease no longer holds an active generation.")))
             : generation.HandleWithLeaseAsync(handlerId, request, cancellationToken);
     }
 

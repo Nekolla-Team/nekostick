@@ -75,7 +75,9 @@ public sealed class ExtensionManagementFacadeTests
         var facade = CreateFacade(
             manager,
             snapshot,
-            new SnapshotHostConfigApi(ConfigurationErrorCode.StorageUnavailable));
+            new SnapshotHostConfigApi(new ConfigurationError(
+                ConfigurationErrorCode.StorageUnavailable,
+                "The host configuration snapshot store is unavailable.")));
 
         var result = await facade.ReloadAsync(
             "managed.extension",
@@ -83,6 +85,9 @@ public sealed class ExtensionManagementFacadeTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(ConfigurationErrorCode.StorageUnavailable, result.Errors.Single().Code);
+        Assert.Equal(
+            "The host configuration snapshot store is unavailable.",
+            result.Errors.Single().Message);
     }
 
 
@@ -179,7 +184,9 @@ public sealed class ExtensionManagementFacadeTests
         var snapshot = CreateSnapshot();
         var facade = CreateFacade(manager, snapshot, new SnapshotHostConfigApi(snapshot));
 
-        Assert.False(facade.ReloadSoon(extensionId!));
+        var failure = Assert.IsType<ExtensionReloadScheduleFailureResult>(facade.ReloadSoon(extensionId!));
+        Assert.Equal(ExtensionReloadScheduleFailureCode.InvalidArgument, failure.Code);
+        Assert.False(string.IsNullOrWhiteSpace(failure.Detail.Message));
     }
 
     [Fact]
@@ -189,7 +196,10 @@ public sealed class ExtensionManagementFacadeTests
         var snapshot = CreateSnapshot();
         var facade = CreateFacade(manager, snapshot, new SnapshotHostConfigApi(snapshot));
 
-        Assert.False(facade.ReloadSoon("valid.extension"));
+        var failure = Assert.IsType<ExtensionReloadScheduleFailureResult>(facade.ReloadSoon("valid.extension"));
+        Assert.Equal(ExtensionReloadScheduleFailureCode.Unsupported, failure.Code);
+        Assert.Contains("publisher", failure.Detail.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("snapshot reader", failure.Detail.Message, StringComparison.OrdinalIgnoreCase);
     }
     [Fact]
     public async Task ReloadSoonRejectsWhenSnapshotReaderIsUnavailable()
@@ -203,7 +213,9 @@ public sealed class ExtensionManagementFacadeTests
             new SnapshotHostConfigApi(snapshot),
             publisher: publisher);
 
-        Assert.False(facade.ReloadSoon("valid.extension"));
+        var failure = Assert.IsType<ExtensionReloadScheduleFailureResult>(facade.ReloadSoon("valid.extension"));
+        Assert.Equal(ExtensionReloadScheduleFailureCode.Unsupported, failure.Code);
+        Assert.Contains("snapshot reader", failure.Detail.Message, StringComparison.OrdinalIgnoreCase);
     }
 
 
@@ -231,7 +243,10 @@ public sealed class ExtensionManagementFacadeTests
             manager,
             services);
 
-        Assert.False(facade.ReloadSoon("valid.extension"));
+        var failure = Assert.IsType<ExtensionReloadScheduleFailureResult>(facade.ReloadSoon("valid.extension"));
+        Assert.Equal(ExtensionReloadScheduleFailureCode.WritesDisallowed, failure.Code);
+        Assert.Contains("valid.extension", failure.Detail.Message, StringComparison.Ordinal);
+        Assert.Contains("configuration writes", failure.Detail.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -248,7 +263,7 @@ public sealed class ExtensionManagementFacadeTests
             publisher: publisher,
             snapshotReader: reader);
 
-        Assert.True(facade.ReloadSoon("valid.extension"));
+        Assert.Same(ExtensionReloadScheduleResult.Success, facade.ReloadSoon("valid.extension"));
         await reader.ReadStarted.Task.WaitAsync(
             TimeSpan.FromSeconds(5),
             TestContext.Current.CancellationToken);
@@ -277,7 +292,7 @@ public sealed class ExtensionManagementFacadeTests
 
         using (ExtensionCallbackGuard.Enter(callbackKind))
         {
-            Assert.True(facade.ReloadSoon("valid.extension"));
+            Assert.Same(ExtensionReloadScheduleResult.Success, facade.ReloadSoon("valid.extension"));
         }
 
         await reader.ReadStarted.Task.WaitAsync(
@@ -362,7 +377,7 @@ public sealed class ExtensionManagementFacadeTests
             manager,
             services);
 
-        Assert.True(facade.ReloadSoon(extensionId));
+        Assert.Same(ExtensionReloadScheduleResult.Success, facade.ReloadSoon(extensionId));
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
         while (ReferenceEquals(holder.RoutingSnapshot?.DispatchGeneration, oldGeneration) &&
             DateTimeOffset.UtcNow < deadline)
@@ -680,9 +695,8 @@ public sealed class ExtensionManagementFacadeTests
         internal SnapshotHostConfigApi(HostConfigurationSnapshot snapshot) =>
             snapshotResult = ConfigurationReadResult<HostConfigurationSnapshot>.Success(snapshot);
 
-        internal SnapshotHostConfigApi(ConfigurationErrorCode errorCode) =>
-            snapshotResult = ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                new ConfigurationError(errorCode));
+        internal SnapshotHostConfigApi(ConfigurationError error) =>
+            snapshotResult = ConfigurationReadResult<HostConfigurationSnapshot>.Failure(error);
 
         public HostApiVersion ApiVersion => HostApiVersion.Current;
 
@@ -700,7 +714,9 @@ public sealed class ExtensionManagementFacadeTests
             string extensionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(ConfigurationReadResult<ExtensionSettingsConfiguration>.Failure(
-                new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                new ConfigurationError(
+                    ConfigurationErrorCode.NotFound,
+                    $"Extension settings for '{extensionId}' were not found.")));
 
         public ValueTask<ConfigurationWriteResult> WriteExtensionSettingsAsync(
             string extensionId,
@@ -710,7 +726,9 @@ public sealed class ExtensionManagementFacadeTests
             ValueTask.FromResult(UnsupportedWrite());
 
         private static ConfigurationWriteResult UnsupportedWrite() =>
-            ConfigurationWriteResult.Failure(new ConfigurationError(ConfigurationErrorCode.Unsupported));
+            ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.Unsupported,
+                "The test host configuration API does not support writes."));
     }
 
     private sealed class SingleScopeFactory : IServiceScopeFactory

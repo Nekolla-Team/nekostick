@@ -365,7 +365,11 @@ public sealed class HostConfigurationPublisherFallbackPolicyTests
             failureCode,
             ImmutableArray<string>.Empty,
             ImmutableArray<string>.Empty,
-            false);
+            false,
+            failureCode == ExtensionFailureCode.None
+                ? null
+                : new ExtensionErrorDetail(
+                    $"Binding for extension '{extensionId}' failed with {failureCode}."));
 
     private static ExtensionDispatchGeneration CreateGeneration(
         params ExtensionGenerationBindingStatus[] bindings) =>

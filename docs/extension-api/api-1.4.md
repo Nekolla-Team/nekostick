@@ -1,8 +1,8 @@
 # API 1.4：完善扩展能力、全局管控与微服务输出流
 
-1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。全部是追加式演进，不改变既有桥契约；要求 Host API 1.3 的既有扩展 manifest 仍然有效。
+1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。Contracts 包 preview.7 还加入统一的 `ExtensionErrorDetail`，并将若干扩展 API 的 `bool`、`out` 或可空结果改为可判别的结果类型；这些签名迁移见下文。`HostApiVersion.Current` / `ExtensionAbi.Version` 仍为 `1.4.0`，使用新签名的扩展应引用对应的 preview.7 Contracts 包。
 
-当前 Contracts 包版本为 **1.4.0-preview.3**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
+当前 Contracts 包版本为 **1.4.0-preview.7**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
 
 ```csharp
 var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersion);
@@ -11,6 +11,47 @@ var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersi
 在 1.3.x 及更低的 Host 上：设置文档缺失仍返回 `NotFound`；`Readiness` 不会出现 `Publishing`（发布窗口内表现为 `Unready`）；`ReportedStatusKind` / `ReportedStatusCode` 恒为 `null`；`RouteConfiguration.OwnerExtensionId` 恒为 `null`。
 
 > preview.3 起追加：manifest `dependencies` / `imports` 的 `optional` 字段与 `IExtensionHostBridge14.Dependencies` 依赖上下文 API，见下文「可选依赖与依赖上下文」。在 1.3.x 及更低的 Host 上：含 `optional` 键的 manifest 字段会被按未知字段拒绝；bridge 不会实现 `IExtensionHostBridge14`。
+
+
+## 结果类型与精确错误详情（Contracts preview.7）
+
+`ExtensionErrorDetail` 是不可变的错误详情 DTO：`Message` 必须为非空白的人类可读失败原因；`ExceptionType`（完整类型名）和 `InnerDetail`（直接内部异常消息或其他补充上下文）可选。`FromException` 复制异常消息（为空时使用类型名）、完整异常类型名和最多一层内部异常消息，不保留异常对象或 stack trace。调用方应按稳定错误码分支；`Message` 用于诊断，不是机器判别键。
+
+`ConfigurationError` 现在必须由调用方同时提供稳定 `Code` 和非空白、精确的 `Message`。不再按错误码生成默认文案，也没有未知错误码的文案回退；调用方应按 `Code` 分支，`Message` 提供该次失败的安全原因。
+
+以下 API 结果从 `bool` / `out` / 可空值改为可判别类型；失败都能通过稳定代码和必需的 `Detail.Message` 解释：
+
+| API | 结果类型与判别方式 |
+| --- | --- |
+| `IExtensionContractRegistry.TryExport<TContract>` | `ExtensionContractExportResult`；失败为 `ExtensionContractExportFailureResult`。 |
+| `IExtensionContractRegistry.TryImport<TContract>`、`IExtensionDependencyContext.TryImport<TContract>` | `ExtensionContractImportResult<TContract>`；成功为 `ExtensionContractImportSuccessResult<TContract>`（`Contract`），失败为 `ExtensionContractImportFailureResult<TContract>`。 |
+| `IExtensionEventPublisher.TryPublish` / `TrySubscribe` | 分别返回 `ExtensionEventPublishResult` / `ExtensionEventSubscribeResult`；失败为对应的 `*FailureResult`。 |
+| `IExtensionRegistration.TryRegister*` / `TryUnregister*` | 返回 `ExtensionRegistrationResult`；失败为 `ExtensionRegistrationFailureResult`。 |
+| 路由事件订阅与 hook 注册 | 返回 `ExtensionRouteRegistrationResult`；失败为 `ExtensionRouteRegistrationFailureResult`。 |
+| `IExtensionTaskScheduler.StartAsync` | 返回 `ExtensionTaskStartResult`；失败为 `ExtensionTaskStartFailureResult`。 |
+| `IExtensionManagementApi.ReloadSoon` | 返回 `ExtensionReloadScheduleResult`；失败为 `ExtensionReloadScheduleFailureResult`。 |
+| `IExtensionEndpointApi.ResolveAsync` | 返回 `ExtensionEndpointResolutionResult`；成功为 `ExtensionEndpointResolutionSuccessResult`（`Lease`），失败为 `ExtensionEndpointResolutionFailureResult`。 |
+| `HeaderRewriteTemplate.TryCompile` | 返回 `HeaderRewriteTemplateCompileResult`；成功为 `HeaderRewriteTemplateCompileSuccessResult`（`Template`），失败为 `HeaderRewriteTemplateCompileFailureResult`。 |
+
+结果类暴露的失败代码为：
+
+| 代码 enum | 值 |
+| --- | --- |
+| `ExtensionContractExportFailureCode` | `InvalidArgument`、`Unavailable`、`NotDeclared`、`TypeMismatch`、`Conflict`。 |
+| `ExtensionContractImportFailureCode` | `InvalidArgument`、`Unavailable`、`NotDeclared`、`TypeMismatch`、`VersionMismatch`、`ProviderUnavailable`、`DependencyUnsatisfied`。 |
+| `ExtensionEventPublishFailureCode` / `ExtensionEventSubscribeFailureCode` | 发布：`InvalidArgument`、`QueueFull`、`Unavailable`；订阅：`InvalidArgument`、`Unavailable`。 |
+| `ExtensionRegistrationFailureCode` | `InvalidArgument`、`Conflict`、`NotFound`、`Unsupported`。 |
+| `ExtensionRouteRegistrationFailureCode` | `InvalidArgument`、`InvalidStage`、`LimitReached`、`Unavailable`、`Unsupported`。 |
+| `ExtensionTaskStartFailureCode` | `InvalidTask`、`LimitReached`、`Stopped`。 |
+| `ExtensionReloadScheduleFailureCode` | `InvalidArgument`、`Unsupported`、`WritesDisallowed`。 |
+| `ExtensionEndpointResolutionFailureCode` | `NotFound`、`Unavailable`、`Unsupported`、`Expired`。 |
+| `HeaderRewriteTemplateCompileFailureCode` | `MissingTemplate`、`InvalidCharacter`、`UnexpectedClosingBrace`、`UnclosedToken`、`UnsupportedToken`。 |
+
+对于无 payload 的成功结果，`ExtensionRegistrationResult.Success`、`ExtensionEventPublishResult.Success`、`ExtensionEventSubscribeResult.Success`、`ExtensionContractExportResult.Success`、`ExtensionRouteRegistrationResult.Success`、`ExtensionTaskStartResult.Success` 和 `ExtensionReloadScheduleResult.Success` 是缓存 singleton；不要假设每次成功调用都会分配新对象。携带 payload 的导入、端点解析和模板编译成功结果则通过成功 subtype 提供值。失败 subtype 的 `Detail` 非空；不得依赖其文案作为稳定协议。
+
+`ExtensionServiceOperationResult` 和 `ExtensionLifecycleOperationResult` 是记录类型：仅 `Succeeded == true` 且 `Code == Accepted` 表示成功，成功时 `Detail` 必须为 `null`；失败时 `Detail` 必须非空。`ExtensionServiceOutputStreamResult` 成功时必须有 `Opened` code 与 stream、且 `Detail == null`；服务日志和运行态订阅成功时必须有订阅句柄、且 `Detail == null`。以上操作的失败结果均无 stream / subscription，并带必需 `Detail`。`ExtensionLifecycleStatus.LastFailureDetail` 在 `LastFailure == None` 时为 `null`；其他失败码也可能因运行时没有可用原因而没有详情。目录刷新中每个 `ExtensionScanSkip.Detail` 则始终非空。
+
+端点解析的 Host 行为统一：未发布、属主不匹配、失效或过期租约均返回缓存的 `NotFound`，详情为“未找到该 service 的活动 endpoint lease”；扩展不得对缺失与过期分支作不同处理。虽然 `ExtensionEndpointResolutionFailureCode.Expired` 保留在 enum 中，Host 的 extension-facing resolver 永不产生它；没有可用 accessor 时返回 `Unavailable`。
 
 ## 设置文档缺失的专用错误码（NoSettings）
 
@@ -76,7 +117,7 @@ if (!current.IsSuccess && current.Errors.Any(e => e.Code == ConfigurationErrorCo
 可选声明在「不满足」时跳过而不是让整批加载失败：
 
 - 可选依赖的扩展不存在，或已安装版本不满足 `versionRange` → 跳过，扩展正常加载。
-- 可选导入找不到提供方，或提供方契约版本不满足 `versionRange` → 跳过；运行时 `TryImport` 返回 `false`。版本范围在绑定时强制：即使校验放行了可选导入，`TryImport` 也绝不会交出声明范围之外的契约实例。
+- 可选导入在校验阶段跳过时不会阻止扩展加载。运行时 `TryImport` 返回 `ExtensionContractImportResult<TContract>`；成功 subtype 携带契约，失败 subtype 提供稳定 `Code` 与必需 `Detail`，不再返回 `false` / `out`。版本范围在绑定时强制：即使校验放行了可选导入，`TryImport` 也绝不会交出声明范围之外的契约实例。
 - 可选关系在目标存在时仍提供启动顺序保证（被依赖方/契约提供方先启动）；参与成环的可选边会被丢弃以打破循环，此时不再保证该方向的启动顺序（必需边成环仍然整批失败）。
 - `assemblyIdentity` / `typeIdentity` 不匹配属于「冲突」而非「缺失」，即使可选也仍然整批失败。
 
@@ -93,12 +134,19 @@ if (host is IExtensionHostBridge14 bridge14)
     switch (geo.State)
     {
         case ExtensionDependencyState.Satisfied:
-            // geo.InstalledVersion 为已安装版本；可直接快捷导入契约：
-            if (geo.TryImport<IGeoLookup>("example.geo.lookup", out var lookup) && lookup is not null)
+        {
+            // geo.InstalledVersion 为已安装版本；读取有类型的导入结果：
+            var import = geo.TryImport<IGeoLookup>("example.geo.lookup");
+            if (import is ExtensionContractImportSuccessResult<IGeoLookup> success)
             {
-                _geo = lookup;
+                _geo = success.Contract;
+            }
+            else if (import is ExtensionContractImportFailureResult<IGeoLookup> failure)
+            {
+                // 按 failure.Code 分支，并将 failure.Detail.Message 用于诊断
             }
             break;
+        }
         case ExtensionDependencyState.NotInstalled:
             // 扩展不存在
             break;
@@ -110,9 +158,10 @@ if (host is IExtensionHostBridge14 bridge14)
             break;
     }
 }
+
 - `GetDependencyContext` 永不返回 `null`；空白 id 抛 `ArgumentException`，其余未在 `dependencies` 里声明的 id 得到 `NotDeclared` 上下文。
 
-- `IExtensionDependencyContext.TryImport` 是「状态检查 + 导入」的快捷方式：仅当状态为 `Satisfied` 时才尝试导入，其余状态一律 `false`；与 `IExtensionContractRegistry.TryImport` 一样只在启动窗口内有效。
+- `IExtensionDependencyContext.TryImport` 是「状态检查 + 导入」的快捷方式：仅当状态为 `Satisfied` 时才尝试导入；其余状态返回带 `DependencyUnsatisfied` 与精确 `Detail` 的 failure subtype。与 `IExtensionContractRegistry.TryImport` 一样只在启动窗口内有效。
 - 上下文是扩展自己启动时刻的快照：依赖后续更新/重载要等到本扩展下次启动才反映，与共享契约交换语义一致。
 - 提供方重载会级联重启使用方：运行时按本次运行期间实际发生的契约导入关系（仅内存记录，不持久化）在提供方重启成功后，按依赖顺序级联重启所有导入过其契约的扩展；管理面（Facade）触发的重载在同一代际内完成级联，新旧代交接的可用性保证不变。
 - **缓存契约引用是安全的**：`TryImport` 交出的是运行时隔离代理而非提供方实例本体。提供方重载/代际交接期间，代理调用挂起等待并在恢复后自动重绑到新实例；提供方被卸载或永久不可用时，代理抛 `InvalidOperationException`（信息含提供方 id）。详见下文「调用隔离与重载挂起」。
@@ -214,7 +263,7 @@ Host 在调用开始时根据当前配置检查 service 是否存在。service �
 
 #### 结果与失败代码
 
-业务失败通过结果对象和 `ExtensionServiceOutputCode` 表达；取消仍按 .NET `CancellationToken` 约定传播。失败结果的 `Stream` 为 `null`。
+业务失败通过结果对象和 `ExtensionServiceOutputCode` 表达；取消仍按 .NET `CancellationToken` 约定传播。失败结果的 `Stream` 为 `null`，并带非空 `Detail`；成功结果的 `Detail` 为 `null`。
 
 | `ExtensionServiceOutputCode` | 含义 |
 | --- | --- |
@@ -243,7 +292,7 @@ public interface IExtensionServiceLogSink
 }
 ```
 
-订阅成功时，`ExtensionServiceLogSubscriptionResult` 的 `Succeeded` 为 `true`、`Code` 为 `Subscribed`，并包含调用方负责释放的 `IExtensionServiceLogSubscription`；失败结果不包含订阅句柄。同一订阅的 `OnEntry` / `OnCompleted` 回调在后台线程串行执行；sink 抛出的异常由 Host 隔离。慢 sink 可能耗尽其有界投递队列并造成 `Gap`，不会要求 sink 阻塞输出 pump。
+订阅成功时，`ExtensionServiceLogSubscriptionResult` 的 `Succeeded` 为 `true`、`Code` 为 `Subscribed`、`Subscription` 非空且 `Detail` 为 `null`；失败结果不包含订阅句柄且必须包含 `Detail`。同一订阅的 `OnEntry` / `OnCompleted` 回调在后台线程串行执行；sink 抛出的异常由 Host 隔离。慢 sink 可能耗尽其有界投递队列并造成 `Gap`，不会要求 sink 阻塞输出 pump。
 
 #### 日志条目与序号
 
@@ -354,6 +403,6 @@ public interface IExtensionServiceRuntimeStateSink
 
 ### 结果与订阅释放
 
-`ExtensionServiceRuntimeStateSubscriptionResult` 成功时 `Succeeded` 为 `true`、`Code` 为 `Subscribed` 且 `Subscription` 非空；失败时 `Subscription` 为 `null`。`ExtensionServiceRuntimeStateSubscriptionCode` 的值为 `Subscribed`、`Unsupported`、`InvalidArgument`、`Failed`。
+`ExtensionServiceRuntimeStateSubscriptionResult` 成功时 `Succeeded` 为 `true`、`Code` 为 `Subscribed`、`Subscription` 非空且 `Detail` 为 `null`；失败时 `Subscription` 为 `null` 且 `Detail` 非空。`ExtensionServiceRuntimeStateSubscriptionCode` 的值为 `Subscribed`、`Unsupported`、`InvalidArgument`、`Failed`。
 
 订阅句柄实现 `IExtensionServiceRuntimeStateSubscription : IDisposable, IAsyncDisposable`：`Dispose()` 以 best-effort 方式解除订阅，一个回调仍可能正在执行；`DisposeAsync()` 还会等待 callback quiescence。不得在同一订阅的回调中同步等待自己的 `DisposeAsync()`。

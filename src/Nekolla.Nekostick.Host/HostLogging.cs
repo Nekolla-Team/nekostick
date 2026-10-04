@@ -443,11 +443,24 @@ internal static partial class HostLogMessages
     [LoggerMessage(
         EventId = 1044,
         Level = LogLevel.Warning,
-        Message = "Host core-event delivery failed. EventKind: {EventKind}.")]
+        Message = "Host core-event delivery failed. EventKind: {EventKind}. PayloadLength: {PayloadLength}. TargetExtensionId: {TargetExtensionId}.")]
     internal static partial void CoreEventDeliveryFailed(
         ILogger logger,
         Exception exception,
-        ExtensionCoreEventKind eventKind);
+        ExtensionCoreEventKind eventKind,
+        int? payloadLength,
+        string targetExtensionId);
+
+    [LoggerMessage(
+        EventId = 1045,
+        Level = LogLevel.Warning,
+        Message = "Host core-event payload was dropped because it exceeded the configured size limit. EventKind: {EventKind}. PayloadLength: {PayloadLength}. MaximumPayloadLength: {MaximumPayloadLength}. TargetExtensionId: {TargetExtensionId}.")]
+    internal static partial void CoreEventPayloadDropped(
+        ILogger logger,
+        ExtensionCoreEventKind eventKind,
+        int payloadLength,
+        int maximumPayloadLength,
+        string targetExtensionId);
 
     [LoggerMessage(
         EventId = 1046,
@@ -715,6 +728,17 @@ internal static partial class HostLogMessages
         LogLevel level,
         long version,
         bool succeeded);
+
+    [LoggerMessage(
+        EventId = 1074,
+        Level = LogLevel.Debug,
+        Message = "Extension endpoint resolution returned NotFound. ExtensionId: {ExtensionId}. ServiceId: {ServiceId}. Cause: {Cause}. LeaseOwnerExtensionId: {LeaseOwnerExtensionId}.")]
+    internal static partial void ExtensionEndpointResolutionNotFound(
+        ILogger logger,
+        string extensionId,
+        Guid serviceId,
+        string cause,
+        string? leaseOwnerExtensionId);
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

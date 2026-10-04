@@ -70,6 +70,11 @@ dotnet test tests/Nekolla.Nekostick.IntegrationTests   # requires NEKOSTICK_TEST
 - **Contracts assembly discipline**: the public ABI communicates failures through failure-code
   enums (e.g. `ExtensionFailureCode`), not exception types. Keep it dependency-free and stable;
   version via `HostApiVersion` / `ExtensionAbi`.
+- **Extension API error observability**: every extension-facing error return MUST carry a precise
+  reason (fine-grained failure code plus structured detail via `ExtensionErrorDetail`) and SHOULD
+  carry a human-readable message; returning only a coarse classification with no error detail is
+  prohibited. Keep success paths allocation-free (cached singleton results). HTTP client responses
+  stay generic — precise detail belongs on extension-facing surfaces and host logs only.
 - **InternalsVisibleTo**: Host, Extensions, Routing, Supervision and Proxy expose internals to
   `Nekolla.Nekostick.UnitTests`. Prefer testing observable behavior; reach for internals only when
   the surface genuinely requires it.

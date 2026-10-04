@@ -173,6 +173,27 @@ public sealed class ExtensionManifestTests
 
         Assert.False(result.Succeeded);
         Assert.Equal(expected, result.FailureCode);
+        Assert.NotNull(result.FailureDetail);
+    }
+
+    [Fact]
+    public void JsonAndYamlVersionFailuresNameTheOffendingField()
+    {
+        using var jsonFixture = TestExtensionDirectory.CreateJson(ManifestJsonFor("invalid-version"));
+        using var yamlFixture = TestExtensionDirectory.CreateYaml(ManifestYamlFor("invalid-version"));
+        var results = new[]
+        {
+            ExtensionManifestDiscovery.Discover(jsonFixture.RootPath),
+            ExtensionManifestDiscovery.Discover(yamlFixture.RootPath)
+        };
+
+        foreach (var result in results)
+        {
+            Assert.False(result.Succeeded);
+            Assert.Equal(ExtensionFailureCode.InvalidVersion, result.FailureCode);
+            Assert.NotNull(result.FailureDetail);
+            Assert.Contains("field 'version'", result.FailureDetail!.Message, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Theory]
@@ -196,6 +217,7 @@ public sealed class ExtensionManifestTests
 
         Assert.False(result.Succeeded);
         Assert.Equal(expected, result.FailureCode);
+        Assert.NotNull(result.FailureDetail);
     }
 
     [Theory]

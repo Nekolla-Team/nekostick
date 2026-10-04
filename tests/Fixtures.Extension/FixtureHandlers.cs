@@ -28,12 +28,12 @@ public sealed class FixtureHandler : IExtensionHandler
 
         if (_state.Options.UnregisterHandlerOnInvocation)
         {
-            _state.HandlerUnregisterResult = _state.Registration.TryUnregisterHandler(HandlerId);
+            _state.HandlerUnregisterResult = _state.Registration.TryUnregisterHandler(HandlerId).Succeeded;
             if (_state.Options.ReregisterHandlerAfterUnregister &&
                 _state.Options.UnregisterBarrierPort <= 0)
             {
                 _state.ReregisterHandlerResult = _state.Registration.TryRegisterHandler(
-                    new FixtureHandler(_state, HandlerId));
+                    new FixtureHandler(_state, HandlerId)).Succeeded;
             }
         }
 
@@ -44,7 +44,7 @@ public sealed class FixtureHandler : IExtensionHandler
             if (_state.Options.ReregisterHandlerAfterUnregister)
             {
                 _state.ReregisterHandlerResult = _state.Registration.TryRegisterHandler(
-                    new FixtureHandler(_state, HandlerId));
+                    new FixtureHandler(_state, HandlerId)).Succeeded;
             }
         }
 
@@ -107,7 +107,7 @@ public sealed class FixtureFallback : IExtensionFallback
 
         if (_state.Options.UnregisterFallbackOnInvocation)
         {
-            _state.FallbackUnregisterResult = _state.Registration.TryUnregisterFallback();
+            _state.FallbackUnregisterResult = _state.Registration.TryUnregisterFallback().Succeeded;
         }
 
         var count = _state.Options.IncludeFallbackCount

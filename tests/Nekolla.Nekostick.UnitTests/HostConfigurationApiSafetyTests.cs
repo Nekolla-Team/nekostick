@@ -16,7 +16,9 @@ public sealed class HostConfigurationSafetyTests
     [Fact]
     public void ConfigurationResultsExposeOnlySafeErrorBranches()
     {
-        var error = new ConfigurationError(ConfigurationErrorCode.StorageUnavailable);
+        var error = new ConfigurationError(
+            ConfigurationErrorCode.StorageUnavailable,
+            "The configuration snapshot store is temporarily unavailable.");
         var read = ConfigurationReadResult<HostConfigurationSnapshot>.Failure(error);
         var write = ConfigurationWriteResult.Failure(error);
         var serialized = JsonSerializer.Serialize(new { ReadErrors = read.Errors, WriteErrors = write.Errors });
@@ -29,7 +31,7 @@ public sealed class HostConfigurationSafetyTests
         Assert.Null(write.NewVersion);
         Assert.Single(write.Errors);
         Assert.Same(error, write.Errors[0]);
-        Assert.Equal("Configuration storage is unavailable.", error.Message);
+        Assert.Equal("The configuration snapshot store is temporarily unavailable.", error.Message);
         Assert.DoesNotContain(ConnectionSecret, serialized, StringComparison.Ordinal);
         Assert.DoesNotContain(RawDatabaseFailure, serialized, StringComparison.Ordinal);
     }

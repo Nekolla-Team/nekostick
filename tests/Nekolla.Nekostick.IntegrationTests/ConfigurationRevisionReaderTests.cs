@@ -67,8 +67,9 @@ public sealed class ConfigurationRevisionReaderTests
         Assert.False(result.IsSuccess);
         Assert.Single(result.Errors);
         Assert.Equal(ConfigurationErrorCode.StorageUnavailable, result.Errors[0].Code);
-        Assert.Equal(
-            "Configuration storage is unavailable.",
-            result.Errors[0].Message);
+        Assert.Contains(
+            "ReadCurrentConfigurationRevision",
+            result.Errors[0].Message,
+            StringComparison.Ordinal);
     }
 }

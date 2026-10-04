@@ -15,36 +15,25 @@ public sealed partial class ContractsTests
     private static readonly Guid InvalidVariantVersion7Id =
         Guid.Parse("018f3a52-4cde-7abc-cdef-0123456789ab");
 
-    [Theory]
-    [InlineData(ConfigurationErrorCode.Validation, "Configuration validation failed.")]
-    [InlineData(ConfigurationErrorCode.ConcurrencyConflict, "Configuration version conflict.")]
-    [InlineData(ConfigurationErrorCode.NotFound, "Configuration item was not found.")]
-    [InlineData(ConfigurationErrorCode.Unsupported, "Configuration operation is unsupported.")]
-    [InlineData(ConfigurationErrorCode.StorageUnavailable, "Configuration storage is unavailable.")]
-    public void ConfigurationErrorsExposeStableSafeMessages(
-        ConfigurationErrorCode code,
-        string expectedMessage)
-    {
-        var error = new ConfigurationError(code);
-
-        Assert.Equal(code, error.Code);
-        Assert.Equal(expectedMessage, error.Message);
-    }
-
     [Fact]
-    public void UnknownConfigurationErrorCodesUseTheSafeFallbackMessage()
+    public void ConfigurationErrorsRetainCallerSuppliedPreciseMessages()
     {
-        var error = new ConfigurationError((ConfigurationErrorCode)999);
+        const string message = "Route 'health' refers to a missing service.";
+        var error = new ConfigurationError(ConfigurationErrorCode.Validation, message);
 
-        Assert.Equal((ConfigurationErrorCode)999, error.Code);
-        Assert.Equal("Configuration operation failed.", error.Message);
+        Assert.Equal(ConfigurationErrorCode.Validation, error.Code);
+        Assert.Equal(message, error.Message);
+        Assert.Throws<ArgumentException>(
+            () => new ConfigurationError(ConfigurationErrorCode.Validation, " \t"));
     }
 
     [Fact]
     public void ConfigurationReadResultsRepresentSuccessAndFailureImmutably()
     {
         var value = ConfigurationReadResult<string>.Success("safe-value");
-        var error = new ConfigurationError(ConfigurationErrorCode.NotFound);
+        var error = new ConfigurationError(
+            ConfigurationErrorCode.NotFound,
+            "The fixture extension settings document was not found.");
         var failure = ConfigurationReadResult<string>.Failure(error);
 
         Assert.True(value.IsSuccess);
@@ -62,7 +51,9 @@ public sealed partial class ContractsTests
     public void ConfigurationWriteResultsExposeOnlyTheRelevantBranch()
     {
         var success = ConfigurationWriteResult.Success(8);
-        var error = new ConfigurationError(ConfigurationErrorCode.ConcurrencyConflict);
+        var error = new ConfigurationError(
+            ConfigurationErrorCode.ConcurrencyConflict,
+            "The expected configuration version is stale.");
         var failure = ConfigurationWriteResult.Failure(error);
 
         Assert.True(success.IsSuccess);
@@ -73,6 +64,78 @@ public sealed partial class ContractsTests
         Assert.Single(failure.Errors);
         Assert.Same(error, failure.Errors[0]);
         Assert.Throws<ArgumentException>(() => ConfigurationWriteResult.Failure());
+    }
+
+
+    [Fact]
+    public void ServiceAndLifecycleResultsEnforceFailureDetailInvariants()
+    {
+        var detail = new ExtensionErrorDetail("The service is not owned by this extension.");
+        var serviceSuccess = new ExtensionServiceOperationResult(
+            true,
+            ExtensionServiceOperationCode.Accepted,
+            StableId);
+        var serviceFailure = new ExtensionServiceOperationResult(
+            false,
+            ExtensionServiceOperationCode.NotFound,
+            StableId,
+            detail);
+        var lifecycleSuccess = new ExtensionLifecycleOperationResult(
+            true,
+            ExtensionLifecycleOperationCode.Accepted,
+            status: null);
+        var lifecycleFailure = new ExtensionLifecycleOperationResult(
+            false,
+            ExtensionLifecycleOperationCode.NotFound,
+            status: null,
+            detail);
+
+        Assert.Null(serviceSuccess.Detail);
+        Assert.Same(detail, serviceFailure.Detail);
+        Assert.Equal("The service is not owned by this extension.", serviceFailure.Detail!.Message);
+        Assert.Null(lifecycleSuccess.Detail);
+        Assert.Same(detail, lifecycleFailure.Detail);
+        Assert.Equal("The service is not owned by this extension.", lifecycleFailure.Detail!.Message);
+
+        Assert.Throws<ArgumentNullException>(() => new ExtensionServiceOperationResult(
+            false,
+            ExtensionServiceOperationCode.NotFound,
+            StableId));
+        Assert.Throws<ArgumentException>(() => new ExtensionServiceOperationResult(
+            true,
+            ExtensionServiceOperationCode.Accepted,
+            StableId,
+            detail));
+        Assert.Throws<ArgumentException>(() => new ExtensionServiceOperationResult(
+            true,
+            ExtensionServiceOperationCode.NotFound,
+            StableId,
+            detail));
+        Assert.Throws<ArgumentException>(() => new ExtensionServiceOperationResult(
+            false,
+            ExtensionServiceOperationCode.Accepted,
+            StableId,
+            detail));
+
+        Assert.Throws<ArgumentNullException>(() => new ExtensionLifecycleOperationResult(
+            false,
+            ExtensionLifecycleOperationCode.NotFound,
+            status: null));
+        Assert.Throws<ArgumentException>(() => new ExtensionLifecycleOperationResult(
+            true,
+            ExtensionLifecycleOperationCode.Accepted,
+            status: null,
+            detail));
+        Assert.Throws<ArgumentException>(() => new ExtensionLifecycleOperationResult(
+            true,
+            ExtensionLifecycleOperationCode.NotFound,
+            status: null,
+            detail));
+        Assert.Throws<ArgumentException>(() => new ExtensionLifecycleOperationResult(
+            false,
+            ExtensionLifecycleOperationCode.Accepted,
+            status: null,
+            detail));
     }
 
     [Fact]

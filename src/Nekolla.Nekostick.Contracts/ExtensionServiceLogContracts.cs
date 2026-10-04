@@ -324,11 +324,13 @@ public sealed record ExtensionServiceLogSubscriptionResult
     /// <param name="code">The fixed result code.</param>
     /// <param name="serviceId">The affected service identifier.</param>
     /// <param name="subscription">The caller-owned subscription when successful.</param>
+    /// <param name="detail">The required precise failure cause, or <see langword="null" /> on success.</param>
     public ExtensionServiceLogSubscriptionResult(
         bool succeeded,
         ExtensionServiceLogCode code,
         Guid serviceId,
-        IExtensionServiceLogSubscription? subscription)
+        IExtensionServiceLogSubscription? subscription,
+        ExtensionErrorDetail? detail)
     {
         ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
         if (succeeded != (code == ExtensionServiceLogCode.Subscribed) ||
@@ -337,9 +339,20 @@ public sealed record ExtensionServiceLogSubscriptionResult
             throw new ArgumentException("The service log subscription result is inconsistent.");
         }
 
+        if (succeeded && detail is not null)
+        {
+            throw new ArgumentException("A successful result cannot include error detail.", nameof(detail));
+        }
+
+        if (!succeeded && detail is null)
+        {
+            throw new ArgumentNullException(nameof(detail), "An unsuccessful result must include error detail.");
+        }
+
         Succeeded = succeeded;
         Code = code;
         Subscription = subscription;
+        Detail = detail;
     }
 
     /// <summary>Gets whether the subscription was created.</summary>
@@ -353,5 +366,9 @@ public sealed record ExtensionServiceLogSubscriptionResult
 
     /// <summary>Gets the caller-owned subscription when the operation succeeded.</summary>
     public IExtensionServiceLogSubscription? Subscription { get; }
+
+    /// <summary>Gets the precise failure cause, or <see langword="null" /> on success.</summary>
+    public ExtensionErrorDetail? Detail { get; }
 }
+
 

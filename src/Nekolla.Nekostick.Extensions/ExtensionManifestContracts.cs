@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Extensions;
 
@@ -343,12 +344,14 @@ public sealed class ManifestDiscoveryResult
         bool succeeded,
         ExtensionFailureCode failureCode,
         ManifestSourceFormat? sourceFormat,
-        ExtensionManifest? manifest)
+        ExtensionManifest? manifest,
+        ExtensionErrorDetail? failureDetail)
     {
         Succeeded = succeeded;
         FailureCode = failureCode;
         SourceFormat = sourceFormat;
         Manifest = manifest;
+        FailureDetail = failureDetail;
     }
 
     /// <summary>Gets whether discovery succeeded.</summary>
@@ -363,11 +366,20 @@ public sealed class ManifestDiscoveryResult
     /// <summary>Gets the immutable manifest on success.</summary>
     public ExtensionManifest? Manifest { get; }
 
-    internal static ManifestDiscoveryResult Success(ManifestSourceFormat format, ExtensionManifest manifest) =>
-        new(true, ExtensionFailureCode.None, format, manifest);
+    /// <summary>Gets the human-readable failure detail, or null on success.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
 
-    internal static ManifestDiscoveryResult Failure(ExtensionFailureCode code, ManifestSourceFormat? format = null) =>
-        new(false, code, format, null);
+    internal static ManifestDiscoveryResult Success(ManifestSourceFormat format, ExtensionManifest manifest) =>
+        new(true, ExtensionFailureCode.None, format, manifest, null);
+
+    internal static ManifestDiscoveryResult Failure(
+        ExtensionFailureCode code,
+        ExtensionErrorDetail detail,
+        ManifestSourceFormat? format = null)
+    {
+        ArgumentNullException.ThrowIfNull(detail);
+        return new(false, code, format, null, detail);
+    }
 }
 
 /// <summary>Represents the deterministic result of dependency graph validation.</summary>
@@ -376,11 +388,13 @@ public sealed class ExtensionGraphResult
     private ExtensionGraphResult(
         bool succeeded,
         ExtensionFailureCode failureCode,
-        ImmutableArray<ExtensionManifest> orderedManifests)
+        ImmutableArray<ExtensionManifest> orderedManifests,
+        ExtensionErrorDetail? failureDetail)
     {
         Succeeded = succeeded;
         FailureCode = failureCode;
         OrderedManifests = orderedManifests;
+        FailureDetail = failureDetail;
     }
 
     /// <summary>Gets whether graph validation succeeded.</summary>
@@ -392,9 +406,16 @@ public sealed class ExtensionGraphResult
     /// <summary>Gets the deterministic topological load order.</summary>
     public ImmutableArray<ExtensionManifest> OrderedManifests { get; }
 
-    internal static ExtensionGraphResult Success(ImmutableArray<ExtensionManifest> manifests) =>
-        new(true, ExtensionFailureCode.None, manifests);
+    /// <summary>Gets the human-readable failure detail, or null on success.</summary>
+    public ExtensionErrorDetail? FailureDetail { get; }
 
-    internal static ExtensionGraphResult Failure(ExtensionFailureCode code) =>
-        new(false, code, ImmutableArray<ExtensionManifest>.Empty);
+    internal static ExtensionGraphResult Success(ImmutableArray<ExtensionManifest> manifests) =>
+        new(true, ExtensionFailureCode.None, manifests, null);
+
+    internal static ExtensionGraphResult Failure(ExtensionFailureCode code, ExtensionErrorDetail detail)
+    {
+        ArgumentNullException.ThrowIfNull(detail);
+        return new(false, code, ImmutableArray<ExtensionManifest>.Empty, detail);
+    }
 }
+

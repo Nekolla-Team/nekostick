@@ -39,7 +39,10 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputClea
     {
         if (!UuidV7.IsVersion7(serviceId))
         {
-            return OpenFailure(Guid.CreateVersion7(), ExtensionServiceOutputCode.NotFound);
+            return OpenFailure(
+                Guid.CreateVersion7(),
+                ExtensionServiceOutputCode.NotFound,
+                $"The serviceId argument '{serviceId}' is not a valid UUIDv7 identifier.");
         }
 
         if (cancellationToken.IsCancellationRequested)
@@ -49,7 +52,10 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputClea
 
         if (!TryMapStream(stream, out var processStream))
         {
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
+            return OpenFailure(
+                serviceId,
+                ExtensionServiceOutputCode.Unsupported,
+                $"The stream argument '{stream}' is unsupported; the value must be Stdout or Stderr.");
         }
 
         if (cancellationToken.IsCancellationRequested)
@@ -57,40 +63,61 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputClea
             return ValueTask.FromCanceled<ExtensionServiceOutputStreamResult>(cancellationToken);
         }
 
-        if (!IsConfigured(serviceId))
+        if (!IsConfigured(serviceId, out var configurationUnavailable))
         {
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.NotFound);
+            return configurationUnavailable
+                ? OpenFailure(
+                    serviceId,
+                    ExtensionServiceOutputCode.Failed,
+                    $"The current host service configuration snapshot is unavailable; output for service '{serviceId}' cannot be opened.")
+                : OpenFailure(
+                    serviceId,
+                    ExtensionServiceOutputCode.NotFound,
+                    $"Service '{serviceId}' was not found in the current host configuration.");
         }
 
         if (IsDisposed())
         {
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
+            return OpenFailure(
+                serviceId,
+                ExtensionServiceOutputCode.Failed,
+                $"The host service-output facade has been disposed and cannot open a stream for service '{serviceId}'.");
         }
 
         if (_executor is null)
         {
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.Unsupported);
+            return OpenFailure(
+                serviceId,
+                ExtensionServiceOutputCode.Unsupported,
+                $"Service output streaming is unavailable because the host process executor is not available for service '{serviceId}'.");
         }
 
         try
         {
             if (!_executor.TryOpenOutputStream(serviceId, processStream, out var output) || output is null)
             {
-                return OpenFailure(serviceId, ExtensionServiceOutputCode.NotRunning);
+                return OpenFailure(
+                    serviceId,
+                    ExtensionServiceOutputCode.NotRunning,
+                    $"No live or retained {stream} output stream is available for service '{serviceId}'.");
             }
 
             var trackedOutput = new TrackingStream(this, output);
             if (!TryTrack(trackedOutput))
             {
                 trackedOutput.Dispose();
-                return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
+                return OpenFailure(
+                    serviceId,
+                    ExtensionServiceOutputCode.Failed,
+                    $"The host service-output facade was disposed before the output stream for service '{serviceId}' could be registered.");
             }
 
             return ValueTask.FromResult(new ExtensionServiceOutputStreamResult(
                 true,
                 ExtensionServiceOutputCode.Opened,
                 serviceId,
-                trackedOutput));
+                trackedOutput,
+                null));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -99,7 +126,10 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputClea
         catch (Exception exception)
         {
             LogCapabilityFailure(exception, nameof(OpenStreamAsync), serviceId);
-            return OpenFailure(serviceId, ExtensionServiceOutputCode.Failed);
+            return OpenFailure(
+                serviceId,
+                ExtensionServiceOutputCode.Failed,
+                $"Opening an output stream for service '{serviceId}' failed because a host operation raised {exception.GetType().Name}.");
         }
     }
 
@@ -248,9 +278,10 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputClea
         }
     }
 
-    private bool IsConfigured(Guid serviceId)
+    private bool IsConfigured(Guid serviceId, out bool configurationUnavailable)
     {
         var snapshot = _runtimeState.CurrentSnapshot;
+        configurationUnavailable = snapshot is null;
         if (snapshot is null)
         {
             return false;
@@ -287,9 +318,15 @@ internal sealed class ExtensionServiceOutputFacade : IExtensionServiceOutputClea
 
     private static ValueTask<ExtensionServiceOutputStreamResult> OpenFailure(
         Guid serviceId,
-        ExtensionServiceOutputCode code) =>
-        ValueTask.FromResult(new ExtensionServiceOutputStreamResult(false, code, serviceId, null));
-
+        ExtensionServiceOutputCode code,
+        string message) =>
+        ValueTask.FromResult(
+            new ExtensionServiceOutputStreamResult(
+                false,
+                code,
+                serviceId,
+                null,
+                new ExtensionErrorDetail(message)));
 
 
     private sealed class TrackingStream : Stream
@@ -451,13 +488,17 @@ internal sealed class ExtensionServiceRuntimeStateFacade :
     {
         if (sink is null)
         {
-            return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.InvalidArgument);
+            return SubscriptionFailure(
+                ExtensionServiceRuntimeStateSubscriptionCode.InvalidArgument,
+                "The sink argument is required; its value was null.");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         if (IsDisposed())
         {
-            return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.Failed);
+            return SubscriptionFailure(
+                ExtensionServiceRuntimeStateSubscriptionCode.Failed,
+                "The host runtime-state subscription facade has been disposed and cannot create a subscription.");
         }
 
         try
@@ -470,7 +511,9 @@ internal sealed class ExtensionServiceRuntimeStateFacade :
             if (!TryTrack(subscription))
             {
                 await subscription.DisposeAsync().ConfigureAwait(false);
-                return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.Failed);
+                return SubscriptionFailure(
+                    ExtensionServiceRuntimeStateSubscriptionCode.Failed,
+                    "The runtime-state subscription could not be registered because the host facade was disposed before it was tracked.");
             }
 
             if (cancellationToken.IsCancellationRequested)
@@ -482,7 +525,8 @@ internal sealed class ExtensionServiceRuntimeStateFacade :
             return new ExtensionServiceRuntimeStateSubscriptionResult(
                 true,
                 ExtensionServiceRuntimeStateSubscriptionCode.Subscribed,
-                subscription);
+                subscription,
+                null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -491,7 +535,9 @@ internal sealed class ExtensionServiceRuntimeStateFacade :
         catch (Exception exception)
         {
             LogCapabilityFailure(exception, nameof(SubscribeStatesAsync), null);
-            return SubscriptionFailure(ExtensionServiceRuntimeStateSubscriptionCode.Failed);
+            return SubscriptionFailure(
+                ExtensionServiceRuntimeStateSubscriptionCode.Failed,
+                $"The host could not create a service runtime-state subscription because its provider raised {exception.GetType().Name}.");
         }
     }
 
@@ -635,8 +681,9 @@ internal sealed class ExtensionServiceRuntimeStateFacade :
     }
 
     private static ExtensionServiceRuntimeStateSubscriptionResult SubscriptionFailure(
-        ExtensionServiceRuntimeStateSubscriptionCode code) =>
-        new(false, code, null);
+        ExtensionServiceRuntimeStateSubscriptionCode code,
+        string message) =>
+        new(false, code, null, new ExtensionErrorDetail(message));
 
     private sealed class RuntimeStateSinkAdapter
     {

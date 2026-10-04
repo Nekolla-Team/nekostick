@@ -586,19 +586,23 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.Single(ownerSnapshot);
         Assert.Equal(OwnerServiceId, ownerSnapshot[0].ServiceId);
         Assert.Equal(ownerPort, ownerSnapshot[0].Port);
-        Assert.Equal(ownerSnapshot[0], await owner.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
-        Assert.Null(await owner.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
-        Assert.Null(await owner.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
-        Assert.Null(await owner.Endpoints.ResolveAsync(expiredServiceId, cancellationToken));
+        var ownerResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
+            await owner.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
+        Assert.Equal(ownerSnapshot[0], ownerResolution.Lease);
+        AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
+        AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
+        AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(expiredServiceId, cancellationToken));
 
         var foreignSnapshot = foreign.Endpoints.Current;
         Assert.Single(foreignSnapshot);
         Assert.Equal(ForeignServiceId, foreignSnapshot[0].ServiceId);
         Assert.Equal(foreignPort, foreignSnapshot[0].Port);
-        Assert.Equal(foreignSnapshot[0], await foreign.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
-        Assert.Null(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
-        Assert.Null(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
-        Assert.Null(await foreign.Endpoints.ResolveAsync(expiredServiceId, cancellationToken));
+        var foreignResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
+            await foreign.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
+        Assert.Equal(foreignSnapshot[0], foreignResolution.Lease);
+        AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
+        AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
+        AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(expiredServiceId, cancellationToken));
 
         const int updatedOwnerPort = 21011;
         const int updatedForeignPort = 21012;
@@ -624,12 +628,16 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.Equal(ownerPort, published[OwnerServiceId].Port);
         Assert.Equal(ownerPort, ownerSnapshot[0].Port);
         Assert.Equal(foreignPort, foreignSnapshot[0].Port);
-        Assert.Equal(updatedOwnerPort, (await owner.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken))!.Port);
-        Assert.Equal(updatedForeignPort, (await foreign.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken))!.Port);
-        Assert.Null(await owner.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
-        Assert.Null(await owner.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
-        Assert.Null(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
-        Assert.Null(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
+        var updatedOwnerResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
+            await owner.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
+        Assert.Equal(updatedOwnerPort, updatedOwnerResolution.Lease.Port);
+        var updatedForeignResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
+            await foreign.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
+        Assert.Equal(updatedForeignPort, updatedForeignResolution.Lease.Port);
+        AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
+        AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
+        AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
+        AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
         Assert.True(expectedVersion > initial.Value!.Version);
     }
 
@@ -1301,5 +1309,13 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                         PortLeaseOperationStatus.Rejected));
             }
         }
+    }
+
+    private static void AssertEndpointNotFound(ExtensionEndpointResolutionResult result)
+    {
+        Assert.Same(ExtensionEndpointResolutionResult.NotFound, result);
+        var failure = Assert.IsType<ExtensionEndpointResolutionFailureResult>(result);
+        Assert.Equal(ExtensionEndpointResolutionFailureCode.NotFound, failure.Code);
+        Assert.Equal("No active endpoint lease was found for the service.", failure.Detail.Message);
     }
 }

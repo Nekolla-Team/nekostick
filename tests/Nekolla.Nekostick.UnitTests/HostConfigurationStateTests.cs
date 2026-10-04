@@ -441,7 +441,9 @@ public sealed class HostConfigurationStateTests
             Observed.TrySetResult(true);
             return Task.FromResult(
                 ConfigurationReadResult<ConfigurationRevisionStatus>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        "The test configuration revision store is unavailable.")));
         }
     }
 
@@ -451,7 +453,9 @@ public sealed class HostConfigurationStateTests
             CancellationToken cancellationToken = default) =>
             Task.FromResult(
                 ConfigurationReadResult<HostConfigurationSnapshot>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.StorageUnavailable)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.StorageUnavailable,
+                        "The test host snapshot store is unavailable.")));
     }
 
     private sealed class LatestSnapshotReader : IHostConfigurationSnapshotReader

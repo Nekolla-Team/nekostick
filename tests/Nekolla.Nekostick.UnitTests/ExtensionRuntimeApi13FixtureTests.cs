@@ -36,10 +36,9 @@ public sealed partial class ExtensionRuntimeTests
         var currentBody = Body(currentResult);
         Assert.Contains("api=1.4.0", currentBody, StringComparison.Ordinal);
         Assert.Contains(
-            "api13=Supported;sibling=True;supervisor=NotFound;routeSubscribe=True;routeHook=True;logWriter=Called;dataDirectory=empty",
+            "api13=Supported;sibling=True;supervisor=NotFound;routeSubscribe=Succeeded;routeHook=Succeeded;logWriter=Called;dataDirectory=empty",
             currentBody,
             StringComparison.Ordinal);
-        AssertLegacyBridgeOutput(currentBody, currentManifest.Id);
         Assert.Equal(1, capabilityFactory.LogWriter.WriteCount);
 
         await using var negotiated12 = new ExtensionRuntimeManager(
@@ -62,10 +61,9 @@ public sealed partial class ExtensionRuntimeTests
         var negotiatedBody = Body(negotiatedResult);
         Assert.Contains("api=1.2.0", negotiatedBody, StringComparison.Ordinal);
         Assert.Contains(
-            "api13=Unsupported;sibling=True;supervisor=Unsupported;routeSubscribe=False;routeHook=False;logWriter=Unsupported",
+            "api13=Unsupported;sibling=True;supervisor=Unsupported;routeSubscribe=Unsupported:Route subscriptions and hook registrations are unsupported.;routeHook=Unsupported:Route subscriptions and hook registrations are unsupported.;logWriter=Unsupported",
             negotiatedBody,
             StringComparison.Ordinal);
-        AssertLegacyBridgeOutput(negotiatedBody, negotiated12Manifest.Id);
         Assert.Contains("api12-probe:started", negotiatedBody, StringComparison.Ordinal);
         Assert.Equal(1, capabilityFactory.LogWriter.WriteCount);
     }
@@ -78,9 +76,14 @@ public sealed partial class ExtensionRuntimeTests
         Assert.Contains("fullRead=Unsupported;fullReplace=Unsupported", body, StringComparison.Ordinal);
         Assert.Contains("routeRead=Unsupported;routeRemove=Unsupported", body, StringComparison.Ordinal);
         Assert.Contains(
-            "serviceRead=Unsupported;serviceRemove=Unsupported;serviceStart=Unsupported;serviceStop=Unsupported;serviceRestart=Unsupported",
+            "serviceRead=Unsupported;serviceRemove=Unsupported;serviceStart=Unsupported:The extension host does not support service start operations.;serviceStop=Unsupported:The extension host does not support service stop operations.;serviceRestart=Unsupported:The extension host does not support service restart operations.",
             body,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "endpointResolve=Unsupported:The extension host does not support endpoint resolution.",
+            body,
+            StringComparison.Ordinal);
+
     }
 
     private sealed class Api13ProbeCapabilityFactory : IExtensionCapabilityFactory, IExtensionCapabilityFactoryRouteEvents
@@ -128,21 +131,27 @@ public sealed partial class ExtensionRuntimeTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationReadResult<ExtensionServiceRuntimeSnapshot?>.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"Service '{serviceId}' was not found by the test supervisor.")));
 
         public ValueTask<ConfigurationWriteResult> ResumeAsync(
             Guid serviceId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"Service '{serviceId}' was not found by the test supervisor.")));
 
         public ValueTask<ConfigurationWriteResult> RestartAsync(
             Guid serviceId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(
                 ConfigurationWriteResult.Failure(
-                    new ConfigurationError(ConfigurationErrorCode.NotFound)));
+                    new ConfigurationError(
+                        ConfigurationErrorCode.NotFound,
+                        $"Service '{serviceId}' was not found by the test supervisor.")));
 
     }
 
