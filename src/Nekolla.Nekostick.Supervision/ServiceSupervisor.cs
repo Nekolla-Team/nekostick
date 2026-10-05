@@ -34,6 +34,7 @@ public sealed record SupervisorOperationResult
     /// <param name="health">The health retry decision, when one was produced.</param>
     /// <param name="failureMessage">A safe launch token, when a host environment variable was missing.</param>
     /// <param name="leaseOwnershipLost">Whether persistence confirmed that the lease is no longer owned.</param>
+    /// <param name="processStopped">Whether the process stop was confirmed, independent of lease cleanup.</param>
     public SupervisorOperationResult(
         SupervisorOperationStatus status,
         ServiceStateReasonCode reason,
@@ -42,7 +43,8 @@ public sealed record SupervisorOperationResult
         RestartPlan? restart = null,
         HealthRetryDecision? health = null,
         string? failureMessage = null,
-        bool leaseOwnershipLost = false)
+        bool leaseOwnershipLost = false,
+        bool processStopped = false)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         Status = status;
@@ -55,6 +57,7 @@ public sealed record SupervisorOperationResult
             ? failureMessage
             : null;
         LeaseOwnershipLost = leaseOwnershipLost;
+        ProcessStopped = processStopped;
     }
 
     /// <summary>Gets the fixed operation status.</summary>
@@ -80,6 +83,8 @@ public sealed record SupervisorOperationResult
 
     /// <summary>Gets whether persistence confirmed loss of the local lease ownership.</summary>
     public bool LeaseOwnershipLost { get; }
+    /// <summary>Gets whether the process stop was confirmed, regardless of lease cleanup outcome.</summary>
+    public bool ProcessStopped { get; }
 
 
 }
@@ -113,6 +118,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     private int startAttemptNumber;
     private ServiceRuntimeSnapshot snapshot;
     private PortLease? lease;
+    private PortLease? pendingLeaseRelease;
     private bool initialLeasePending;
     private int waitingAttempts;
     private ProcessInstanceHolder? processInstance;
@@ -203,7 +209,12 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     public ServiceRuntimeSnapshot Snapshot => Volatile.Read(ref snapshot);
 
     /// <summary>Gets the latest lease only when it has been safely acquired.</summary>
-    public PortLease? Lease => Volatile.Read(ref lease);
+    public PortLease? Lease => Volatile.Read(ref pendingLeaseRelease) is null
+        ? Volatile.Read(ref lease)
+        : null;
+
+    /// <summary>Gets the versioned lease awaiting a confirmed release, when one exists.</summary>
+    public PortLease? PendingLeaseRelease => Volatile.Read(ref pendingLeaseRelease);
     /// <summary>Gets the latest one-based start attempt number.</summary>
     public int StartAttemptNumber => Volatile.Read(ref startAttemptNumber);
 
@@ -248,11 +259,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             SupervisionLogMessages.OperationCancelled(_logger, "Start", launchSpecification.ServiceId);
-            if (initialLeasePending)
-            {
-                initialLeasePending = false;
-                await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
-            }
+            await ReleaseInitialLeaseAfterCancelledGateWaitAsync().ConfigureAwait(false);
 
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
         }
@@ -288,7 +295,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             if (initialLeasePending)
             {
                 initialLeasePending = false;
-                await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+                _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
             }
 
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Exchange(ServiceStateTransition.RecordStartCancelled(current, now)));
@@ -299,13 +306,34 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             return await RecordMissingExecutableAsync(now).ConfigureAwait(false);
         }
 
+        var pendingRelease = await RetryPendingLeaseReleaseBeforeStartAsync(now, cancellationToken).ConfigureAwait(false);
+        if (pendingRelease is { } releaseFailure)
+        {
+            var cancelled = releaseFailure.Status == SupervisorOperationStatus.Cancelled ||
+                cancellationToken.IsCancellationRequested;
+            var failedSnapshot = cancelled
+                ? Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now))
+                : Exchange(ServiceStateTransition.RecordStartResult(Snapshot, false, now));
+            return Result(
+                cancelled ? SupervisorOperationStatus.Cancelled : releaseFailure.Status,
+                cancelled ? ServiceStateReasonCode.Cancelled : releaseFailure.Reason,
+                failedSnapshot);
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Result(
+                SupervisorOperationStatus.Cancelled,
+                ServiceStateReasonCode.Cancelled,
+                Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now)));
+        }
 
         var heldLease = Volatile.Read(ref lease);
         var initialLeaseForStart = initialLeasePending;
         initialLeasePending = false;
         if (initialLeaseForStart && (heldLease is null || heldLease.IsExpired(now)))
         {
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+            _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
             return Result(
                 SupervisorOperationStatus.Rejected,
                 heldLease is null ? ServiceStateReasonCode.PortLeaseUnavailable : ServiceStateReasonCode.PortLeaseExpired,
@@ -325,7 +353,27 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         {
             if (heldLease is not null)
             {
-                await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+                var release = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return Result(
+                        SupervisorOperationStatus.Cancelled,
+                        ServiceStateReasonCode.Cancelled,
+                        Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now)));
+                }
+
+                if (release.Status != SupervisorOperationStatus.Applied)
+                {
+                    if (!heldLease.IsExpired(now))
+                    {
+                        return Result(
+                            release.Status,
+                            release.Reason,
+                            Exchange(ServiceStateTransition.RecordStartResult(Snapshot, false, now)));
+                    }
+
+                    Interlocked.CompareExchange(ref pendingLeaseRelease, null, heldLease);
+                }
             }
 
             try
@@ -343,6 +391,8 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.DatabaseUnavailable, Snapshot);
             }
         }
+
+
 
         var returnedLease = leaseResult.Lease;
         var usableLease = leaseResult.Status == PortLeaseOperationStatus.Applied &&
@@ -391,13 +441,13 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             SupervisionLogMessages.OperationCancelled(_logger, "StartProcess", launchSpecification.ServiceId);
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+            _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now)));
         }
         catch (Exception exception)
         {
             SupervisionLogMessages.OperationFailed(_logger, exception, "StartProcess", launchSpecification.ServiceId);
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+            _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
             return Result(SupervisorOperationStatus.Failed, ServiceStateReasonCode.StartRejected, Exchange(ServiceStateTransition.RecordStartResult(Snapshot, false, now)));
         }
 
@@ -411,7 +461,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         var next = Exchange(ServiceStateTransition.RecordStartResult(Snapshot, accepted, now));
         if (!accepted)
         {
-            await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+            _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         return Result(
@@ -425,7 +475,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     private async ValueTask<SupervisorOperationResult> RecordMissingExecutableAsync(DateTimeOffset now)
     {
         initialLeasePending = false;
-        await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+        _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
 
         waitingAttempts = waitingAttempts == int.MaxValue
             ? int.MaxValue
@@ -460,12 +510,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             SupervisionLogMessages.StopCancelled(_logger, launchSpecification.ServiceId);
-            if (initialLeasePending)
-            {
-                initialLeasePending = false;
-                await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
-                SupervisionLogMessages.InitialLeaseReleased(_logger, launchSpecification.ServiceId, leaseRequest.Port);
-            }
+            await ReleaseInitialLeaseAfterCancelledGateWaitAsync().ConfigureAwait(false);
 
             return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
         }
@@ -518,10 +563,21 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             return Result(SupervisorOperationStatus.Failed, result.Reason, requested);
         }
 
-        await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
-        SupervisionLogMessages.StopCompleted(_logger, launchSpecification.ServiceId);
+        var release = await ReleaseLeaseCoreAsync(
+            CancellationToken.None,
+            processStopped: true).ConfigureAwait(false);
         var next = Exchange(ServiceStateTransition.RecordStopped(Snapshot, now));
-        return Result(SupervisorOperationStatus.Applied, ServiceStateReasonCode.StopCompleted, next);
+        if (release.Status != SupervisorOperationStatus.Applied)
+        {
+            return Result(release.Status, release.Reason, next, processStopped: true);
+        }
+
+        SupervisionLogMessages.StopCompleted(_logger, launchSpecification.ServiceId);
+        return Result(
+            SupervisorOperationStatus.Applied,
+            ServiceStateReasonCode.StopCompleted,
+            next,
+            processStopped: true);
     }
 
     /// <summary>Runs one bounded health observation and applies the immutable transition.</summary>

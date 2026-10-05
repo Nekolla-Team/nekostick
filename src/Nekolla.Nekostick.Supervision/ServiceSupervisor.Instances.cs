@@ -226,12 +226,22 @@ public sealed partial class ServiceSupervisor
         DateTimeOffset now,
         CancellationToken cancellationToken = default) =>
         RecordProcessExitCore(successfulExit, now, cancellationToken);
-    /// <summary>Clears a process identity and releases its lease after a retiring generation exits during blue-green replacement.</summary>
-    /// <returns>A task that completes after best-effort lease release.</returns>
-    public async ValueTask AcknowledgeProcessExitAsync()
+    /// <summary>Clears a process identity and records whether its lease release completed.</summary>
+    /// <returns>The outcome of the serialized lease release.</returns>
+    public async ValueTask<SupervisorOperationResult> AcknowledgeProcessExitAsync()
     {
-        ClearProcessInstance();
-        await ReleaseLeaseBestEffort(CancellationToken.None).ConfigureAwait(false);
+        await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            ClearProcessInstance();
+            return await ReleaseLeaseCoreAsync(
+                CancellationToken.None,
+                processStopped: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
     }
 
     private SupervisorOperationResult RecordProcessExitCore(
@@ -262,18 +272,100 @@ public sealed partial class ServiceSupervisor
         }
     }
 
-    private async ValueTask ReleaseLeaseBestEffort(CancellationToken cancellationToken)
+    private async ValueTask ReleaseInitialLeaseAfterCancelledGateWaitAsync()
     {
-        var current = Interlocked.Exchange(ref lease, null);
-        if (current is null)
+        await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
         {
-            return;
+            if (!initialLeasePending)
+            {
+                return;
+            }
+
+            var initialLease = Volatile.Read(ref lease);
+            initialLeasePending = false;
+            var release = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            if (release.Status == SupervisorOperationStatus.Applied && initialLease is not null)
+            {
+                SupervisionLogMessages.InitialLeaseReleased(_logger, initialLease.ServiceId, initialLease.Port);
+            }
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
+    }
+
+    private async ValueTask<SupervisorOperationResult?> RetryPendingLeaseReleaseBeforeStartAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var pending = Volatile.Read(ref pendingLeaseRelease);
+        if (pending is null)
+        {
+            return null;
         }
 
+        if (pending.IsExpired(now))
+        {
+            Interlocked.CompareExchange(ref pendingLeaseRelease, null, pending);
+            return null;
+        }
+
+        var release = await ReleaseLeaseCoreAsync(cancellationToken).ConfigureAwait(false);
+        if (release.Status == SupervisorOperationStatus.Applied)
+        {
+            return null;
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return release;
+        }
+
+
+        return release;
+    }
+
+
+    private async ValueTask<SupervisorOperationResult> ReleaseLeaseCoreAsync(
+        CancellationToken cancellationToken,
+        bool processStopped = false)
+    {
+        var current = Volatile.Read(ref pendingLeaseRelease);
+        if (current is null)
+        {
+            current = Volatile.Read(ref lease);
+            if (current is null)
+            {
+                return Result(
+                    SupervisorOperationStatus.Applied,
+                    ServiceStateReasonCode.None,
+                    Snapshot,
+                    processStopped: processStopped);
+            }
+
+            Volatile.Write(ref pendingLeaseRelease, current);
+            Volatile.Write(ref lease, null);
+        }
+
+        initialLeasePending = false;
+        PortLeaseOperationResult releaseResult;
         try
         {
             var release = new PortLeaseRelease(current.NodeId, current.ServiceId, current.Port, current.Version);
-            _ = await leaseStore.ApplyAsync(PortLeaseIntent.ReleaseLease(release), cancellationToken).ConfigureAwait(false);
+            releaseResult = await leaseStore.ApplyAsync(
+                PortLeaseIntent.ReleaseLease(release),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            SupervisionLogMessages.OperationCancelled(_logger, "ReleaseLease", current.ServiceId);
+            return Result(
+                SupervisorOperationStatus.Cancelled,
+                ServiceStateReasonCode.Cancelled,
+                Snapshot,
+                processStopped: processStopped);
         }
         catch (Exception exception)
         {
@@ -283,8 +375,41 @@ public sealed partial class ServiceSupervisor
                 current.NodeId.ToString(),
                 current.ServiceId,
                 current.Port);
+            return Result(
+                SupervisorOperationStatus.Failed,
+                ServiceStateReasonCode.DatabaseUnavailable,
+                Snapshot,
+                processStopped: processStopped);
         }
+
+        if (releaseResult.Status is PortLeaseOperationStatus.Applied or PortLeaseOperationStatus.NotFound)
+        {
+            Interlocked.CompareExchange(ref pendingLeaseRelease, null, current);
+            return Result(
+                SupervisorOperationStatus.Applied,
+                ServiceStateReasonCode.None,
+                Snapshot,
+                leaseOwnershipLost: true,
+                processStopped: processStopped);
+        }
+
+        SupervisionLogMessages.LeaseReleaseStatusFailed(
+            _logger,
+            current.NodeId.ToString(),
+            current.ServiceId,
+            current.Port,
+            releaseResult.Status);
+        var (status, reason) = releaseResult.Status switch
+        {
+            PortLeaseOperationStatus.Conflict => (SupervisorOperationStatus.Conflict, ServiceStateReasonCode.PortLeaseConflict),
+            PortLeaseOperationStatus.DatabaseUnavailable => (SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.DatabaseUnavailable),
+            PortLeaseOperationStatus.Cancelled => (SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled),
+            PortLeaseOperationStatus.Rejected => (SupervisorOperationStatus.Rejected, ServiceStateReasonCode.PortLeaseUnavailable),
+            _ => (SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.PortLeaseUnavailable)
+        };
+        return Result(status, reason, Snapshot, processStopped: processStopped);
     }
+
 
     private ServiceRuntimeSnapshot Exchange(ServiceRuntimeSnapshot next)
     {
@@ -301,14 +426,25 @@ public sealed partial class ServiceSupervisor
         RestartPlan? restart = null,
         HealthRetryDecision? health = null,
         string? failureMessage = null,
-        bool leaseOwnershipLost = false) =>
-        new(status, reason, current, currentLease, restart, health, failureMessage, leaseOwnershipLost);
+        bool leaseOwnershipLost = false,
+        bool processStopped = false) =>
+        new(status, reason, current, currentLease, restart, health, failureMessage, leaseOwnershipLost, processStopped);
 
-    /// <summary>Releases the supervisor lifecycle gate.</summary>
+    /// <summary>Retries pending cleanup before disposing the lifecycle gate.</summary>
     public async ValueTask DisposeAsync()
     {
         await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-        lifecycleGate.Release();
-        lifecycleGate.Dispose();
+        try
+        {
+            if (Volatile.Read(ref pendingLeaseRelease) is not null)
+            {
+                _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            lifecycleGate.Release();
+            lifecycleGate.Dispose();
+        }
     }
 }

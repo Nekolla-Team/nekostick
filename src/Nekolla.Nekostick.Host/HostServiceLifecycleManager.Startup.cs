@@ -344,9 +344,14 @@ public sealed partial class HostServiceLifecycleManager
                     PublishServiceState(service.Id, snapshot.Version, "unavailable");
                 }
 
-                return IsStopping
-                    ? new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled)
-                    : new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                if (IsStopping)
+                {
+                    return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
+                }
+
+                return _runtimeState.NewServicesAllowed
+                    ? new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable)
+                    : new(service.Id, snapshot.Version, HostServiceReadinessStatus.DatabaseUnavailable);
             }
 
             ServiceGeneration? old = null;
@@ -462,7 +467,62 @@ public sealed partial class HostServiceLifecycleManager
         int attemptNumber,
         CancellationToken cancellationToken)
     {
+        var leaseGate = LeaseLifecycleGate(service.Id);
+        await leaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var pendingFailure = await RetryPendingLeaseReleasesAsync(
+                service.Id,
+                now,
+                cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (pendingFailure is { } status)
+            {
+                if (status == PortLeaseOperationStatus.DatabaseUnavailable)
+                {
+                    _runtimeState.MarkDatabaseUnavailable();
+                }
+
+                if (!IsStopping)
+                {
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        status == PortLeaseOperationStatus.DatabaseUnavailable
+                            ? ExtensionServiceFailureCode.RuntimeUnavailable
+                            : ExtensionServiceFailureCode.PortLeaseUnavailable);
+                }
+
+                return null;
+            }
+
+            return await StartGenerationWithLeaseGateAsync(
+                slot,
+                snapshot,
+                service,
+                attemptNumber,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            leaseGate.Release();
+        }
+    }
+    private async Task<ServiceGeneration?> StartGenerationWithLeaseGateAsync(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        int attemptNumber,
+        CancellationToken cancellationToken)
+    {
         ServiceGeneration? candidate = null;
+        ServiceSupervisor? supervisor = null;
         var keepStartingCandidate = false;
         try
         {
@@ -550,7 +610,7 @@ public sealed partial class HostServiceLifecycleManager
                 acquired.Port > rangeEnd ||
                 acquired.IsExpired(now))
             {
-                await ReleaseAutomaticLeaseBestEffortAsync(request, acquired).ConfigureAwait(false);
+                _ = await ReleaseAutomaticLeaseAsync(request, acquired, CancellationToken.None).ConfigureAwait(false);
                 if (!IsStopping)
                 {
                     PublishRuntimeFailure(
@@ -567,7 +627,6 @@ public sealed partial class HostServiceLifecycleManager
                 return null;
             }
 
-            ServiceSupervisor? supervisor = null;
             Task<SupervisorOperationResult>? startTask = null;
             var resolvedEnvironment = ImmutableDictionary<string, string>.Empty;
             var gateSnapshot = _snapshotHolder.Current is { } latestSnapshot &&
@@ -627,7 +686,7 @@ public sealed partial class HostServiceLifecycleManager
 
             if (supervisor is null)
             {
-                await ReleaseAutomaticLeaseBestEffortAsync(request, acquired).ConfigureAwait(false);
+                _ = await ReleaseAutomaticLeaseAsync(request, acquired, CancellationToken.None).ConfigureAwait(false);
                 return null;
             }
 
@@ -884,6 +943,7 @@ public sealed partial class HostServiceLifecycleManager
         }
         finally
         {
+            RetainPendingLeaseRelease(supervisor?.PendingLeaseRelease);
             if (!keepStartingCandidate && candidate is not null)
             {
                 lock (slot.Gate)

@@ -107,12 +107,15 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
     private readonly ConcurrentDictionary<Guid, ServiceRuntimeEnvironmentEntry> _runtimeEnvironments = new();
     private readonly ConcurrentDictionary<Guid, Guid> _startupDependencyWaits = new();
+    private readonly ConcurrentDictionary<PortLeaseReleaseKey, PortLease> _pendingLeaseReleases = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _leaseLifecycleGates = new();
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
     private readonly object _lifecycleGate = new();
     private readonly string _dataDirectory;
     private readonly CancellationTokenSource _shutdownCts = new();
     private IDisposable? _processExitSubscription;
     private int _stopping;
+    private readonly record struct PortLeaseReleaseKey(string NodeId, Guid ServiceId, int Port, long Version);
     internal HostServiceLogBufferRegistry ServiceLogBufferRegistry => _serviceLogBufferRegistry;
     private sealed class ServiceRuntimeEnvironmentEntry
     {
@@ -442,11 +445,19 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             try
             {
                 using var stopCts = new CancellationTokenSource(SupervisorStopBound);
-                await StopOrReleaseGenerationAfterExitAsync(slot, generation, stopCts.Token).ConfigureAwait(false);
-                PublishServiceState(
-                    generation.Configuration.Id,
-                    generation.SnapshotVersion,
-                    "stopped");
+                var stopped = await StopOrReleaseGenerationAfterExitAsync(
+                    slot,
+                    generation,
+                    stopCts.Token).ConfigureAwait(false);
+                var processStopped = generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null ||
+                    stopped.ProcessStopped;
+                if (processStopped)
+                {
+                    PublishServiceState(
+                        generation.Configuration.Id,
+                        generation.SnapshotVersion,
+                        "stopped");
+                }
             }
             catch (Exception exception)
             {
@@ -455,6 +466,22 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                     _logger,
                     exception,
                     nameof(StopOrReleaseGenerationAfterExitAsync));
+            }
+        }
+        foreach (var serviceId in _pendingLeaseReleases.Keys.Select(static key => key.ServiceId).Distinct().ToArray())
+        {
+            var leaseGate = LeaseLifecycleGate(serviceId);
+            await leaseGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                _ = await RetryPendingLeaseReleasesAsync(
+                    serviceId,
+                    DateTimeOffset.UtcNow,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                leaseGate.Release();
             }
         }
 
@@ -680,7 +707,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         SupervisorOperationResult started;
         try
         {
-            started = await generation.Supervisor.StartAsync(
+            started = await StartSupervisorWithPendingLeaseCleanupAsync(
+                generation,
                 DateTimeOffset.UtcNow,
                 cancellationToken).ConfigureAwait(false);
         }

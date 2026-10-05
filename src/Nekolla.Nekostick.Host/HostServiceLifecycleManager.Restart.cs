@@ -172,7 +172,7 @@ public sealed partial class HostServiceLifecycleManager
                 $"Service '{serviceId}' is disabled by the effective host configuration; restart requires effective enablement, which is currently false."));
         }
 
-        if (!_runtimeState.NewServicesAllowed)
+        if (!_runtimeState.NewServicesAllowed && !HasPendingLeaseRelease(serviceId))
         {
             return ConfigurationWriteResult.Failure(new ConfigurationError(
                 ConfigurationErrorCode.StorageUnavailable,
@@ -200,12 +200,27 @@ public sealed partial class HostServiceLifecycleManager
             }
         }
 
-        await WithdrawAsync(serviceId, CancellationToken.None).ConfigureAwait(false);
+        var withdrawal = await WithdrawAsync(serviceId, CancellationToken.None).ConfigureAwait(false);
+        if (!withdrawal.ProcessStopped)
+        {
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                ConfigurationErrorCode.Validation,
+                $"Service '{serviceId}' could not be restarted because its previous process did not stop."));
+        }
         if (IsStopping)
         {
             return ConfigurationWriteResult.Failure(new ConfigurationError(
                 ConfigurationErrorCode.StorageUnavailable,
                 $"Service '{serviceId}' cannot be restarted because the host service lifecycle stopped during endpoint withdrawal."));
+        }
+        if (withdrawal.LeaseReleaseFailure is { } releaseStatus)
+        {
+            var code = releaseStatus == PortLeaseOperationStatus.DatabaseUnavailable
+                ? ConfigurationErrorCode.StorageUnavailable
+                : ConfigurationErrorCode.Validation;
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                code,
+                $"Service '{serviceId}' could not be restarted because port lease release remains unresolved (status '{releaseStatus}')."));
         }
 
         var readiness = await EnsureReadyAsync(snapshot, serviceId, cancellationToken).ConfigureAwait(false);
@@ -214,11 +229,16 @@ public sealed partial class HostServiceLifecycleManager
             throw new OperationCanceledException(cancellationToken);
         }
 
-        if (readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable)
+        if (readiness.Status != HostServiceReadinessStatus.Ready)
         {
+            var code = readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable
+                ? ConfigurationErrorCode.StorageUnavailable
+                : ConfigurationErrorCode.Validation;
             return ConfigurationWriteResult.Failure(new ConfigurationError(
-                ConfigurationErrorCode.StorageUnavailable,
-                $"Service '{serviceId}' could not be restarted because the database gate is unavailable."));
+                code,
+                readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable
+                    ? $"Service '{serviceId}' could not be restarted because the database gate is unavailable."
+                    : $"Service '{serviceId}' could not be restarted because it did not become ready (status '{readiness.Status}')."));
         }
 
         return ConfigurationWriteResult.Success();
@@ -437,9 +457,10 @@ public sealed partial class HostServiceLifecycleManager
                     generation.ProcessExitRecorded = false;
                     generation.ProcessExitCode = null;
                     PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
-                    startTask = generation.Supervisor.StartAsync(
+                    startTask = StartSupervisorWithPendingLeaseCleanupAsync(
+                        generation,
                         DateTimeOffset.UtcNow,
-                        _shutdownCts.Token).AsTask();
+                        _shutdownCts.Token);
                 }
             }
         }
@@ -481,9 +502,10 @@ public sealed partial class HostServiceLifecycleManager
                     generation.ProcessExitRecorded = false;
                     generation.ProcessExitCode = null;
                     PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
-                    startTask = generation.Supervisor.StartAsync(
+                    startTask = StartSupervisorWithPendingLeaseCleanupAsync(
+                        generation,
                         DateTimeOffset.UtcNow,
-                        _shutdownCts.Token).AsTask();
+                        _shutdownCts.Token);
                 }
             }
         }
@@ -920,7 +942,7 @@ public sealed partial class HostServiceLifecycleManager
             "stopped");
     }
 
-    private async Task StopOrReleaseGenerationAfterExitAsync(
+    private async Task<SupervisorOperationResult> StopOrReleaseGenerationAfterExitAsync(
         ServiceSlot slot,
         ServiceGeneration generation,
         CancellationToken cancellationToken)
@@ -928,12 +950,13 @@ public sealed partial class HostServiceLifecycleManager
         RemoveRuntimeEnvironment(generation);
         if (generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null)
         {
-            await generation.Supervisor.AcknowledgeProcessExitAsync().ConfigureAwait(false);
+            var acknowledged = await AcknowledgeProcessExitAndRetainLeaseAsync(generation).ConfigureAwait(false);
+
             generation.Lease = null;
-            return;
+            return acknowledged;
         }
 
-        await StopGenerationAsync(slot, generation, cancellationToken).ConfigureAwait(false);
+        return await StopGenerationAsync(slot, generation, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task DrainAndStopGenerationAsync(ServiceSlot slot, ServiceGeneration generation)
@@ -952,7 +975,8 @@ public sealed partial class HostServiceLifecycleManager
         if (generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null)
         {
             RemoveRuntimeEnvironment(generation);
-            await generation.Supervisor.AcknowledgeProcessExitAsync().ConfigureAwait(false);
+            var acknowledged = await AcknowledgeProcessExitAndRetainLeaseAsync(generation).ConfigureAwait(false);
+
             generation.Lease = null;
             return;
         }

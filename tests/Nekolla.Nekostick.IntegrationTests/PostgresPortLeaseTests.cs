@@ -199,6 +199,80 @@ public sealed class PostgresPortLeaseTests
             TestContext.Current.CancellationToken));
     }
 
+    /// <summary>Verifies disabled services can release leases without weakening acquire, renew, or version checks.</summary>
+    [Fact]
+    public async Task DisabledServiceCanReleaseLeaseWithVersionChecks()
+    {
+        await using var test = await LeaseTestScope.CreateAsync(FixedNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        const int port = 25_600;
+        var acquired = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                port,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, acquired.Status);
+        Assert.NotNull(acquired.Lease);
+        var lease = acquired.Lease!;
+
+        var service = await test.Context.Services.SingleAsync(
+            value => value.Id == test.ServiceId,
+            cancellationToken);
+        service.Enabled = false;
+        await test.Context.SaveChangesAsync(cancellationToken);
+
+        var acquire = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                port + 1,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Rejected, acquire.Status);
+
+        var renew = await test.Store.RenewAsync(
+            new PersistencePortLeaseRenewRequest(
+                test.NodeId,
+                test.ServiceId,
+                port,
+                lease.Version,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Rejected, renew.Status);
+
+        var wrongVersion = await test.Store.ReleaseAsync(
+            new PersistencePortLeaseReleaseRequest(
+                test.NodeId,
+                test.ServiceId,
+                port,
+                lease.Version + 1),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Conflict, wrongVersion.Status);
+
+        await using var verificationContext = test.Database.CreateContext();
+        var unchanged = await verificationContext.PortLeases.AsNoTracking().SingleAsync(
+            value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId,
+            cancellationToken);
+        Assert.Equal(lease.Version, unchanged.Version);
+        Assert.Equal(lease.ExpiresAt, unchanged.LeaseExpiresAt);
+
+        var released = await test.Store.ReleaseAsync(
+            new PersistencePortLeaseReleaseRequest(
+                test.NodeId,
+                test.ServiceId,
+                port,
+                lease.Version),
+            cancellationToken);
+
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, released.Status);
+        Assert.Equal(lease.Port, released.Lease!.Port);
+        Assert.Equal(0, await verificationContext.PortLeases.CountAsync(
+            value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId,
+            cancellationToken));
+    }
+
     /// <summary>Verifies a disposed database context produces a safe unavailable mutation outcome.</summary>
     [Fact]
     public async Task DatabaseOutageReturnsSafeUnavailableOutcome()

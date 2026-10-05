@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence;
+using Nekolla.Nekostick.Supervision;
 
 namespace Nekolla.Nekostick.Host;
 
@@ -739,6 +740,16 @@ internal static partial class HostLogMessages
         Guid serviceId,
         string cause,
         string? leaseOwnerExtensionId);
+    [LoggerMessage(
+        EventId = 1111,
+        Level = LogLevel.Warning,
+        Message = "Host port lease release remains pending. ServiceId: {ServiceId}. Port: {Port}. Status: {Status}.")]
+    internal static partial void PendingLeaseReleaseFailed(
+        ILogger logger,
+        Guid serviceId,
+        int port,
+        PortLeaseOperationStatus status);
+
 }
 
 internal sealed class SafeConsoleLoggerProvider : ILoggerProvider

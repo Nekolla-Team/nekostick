@@ -53,7 +53,11 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 IsolationLevel.Serializable,
                 cancellationToken).ConfigureAwait(false);
             var now = _time.GetUtcNow().ToUniversalTime();
-            if (!await HasUsableOwnerAsync(request.NodeId, request.ServiceId, cancellationToken).ConfigureAwait(false))
+            if (!await HasUsableOwnerAsync(
+                    request.NodeId,
+                    request.ServiceId,
+                    requireEnabledService: true,
+                    cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 return new(PersistencePortLeaseOperationStatus.Rejected);
             }
@@ -164,7 +168,11 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 IsolationLevel.Serializable,
                 cancellationToken).ConfigureAwait(false);
             var now = _time.GetUtcNow().ToUniversalTime();
-            if (!await HasUsableOwnerAsync(request.NodeId, request.ServiceId, cancellationToken).ConfigureAwait(false))
+            if (!await HasUsableOwnerAsync(
+                    request.NodeId,
+                    request.ServiceId,
+                    requireEnabledService: true,
+                    cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 return new(PersistencePortLeaseOperationStatus.Rejected);
             }
@@ -254,7 +262,11 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 IsolationLevel.Serializable,
                 cancellationToken).ConfigureAwait(false);
             var now = _time.GetUtcNow().ToUniversalTime();
-            if (!await HasUsableOwnerAsync(request.NodeId, request.ServiceId, cancellationToken).ConfigureAwait(false))
+            if (!await HasUsableOwnerAsync(
+                    request.NodeId,
+                    request.ServiceId,
+                    requireEnabledService: false,
+                    cancellationToken: cancellationToken).ConfigureAwait(false))
             {
                 return new(PersistencePortLeaseOperationStatus.Rejected);
             }
@@ -381,6 +393,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
     private async Task<bool> HasUsableOwnerAsync(
         string nodeId,
         Guid serviceId,
+        bool requireEnabledService,
         CancellationToken cancellationToken)
     {
         var nodeExists = await _db.Nodes.AsNoTracking().AnyAsync(
@@ -392,7 +405,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         }
 
         return await _db.Services.AsNoTracking().AnyAsync(
-            value => value.Id == serviceId && value.Enabled,
+            value => value.Id == serviceId && (!requireEnabledService || value.Enabled),
             cancellationToken).ConfigureAwait(false);
     }
 

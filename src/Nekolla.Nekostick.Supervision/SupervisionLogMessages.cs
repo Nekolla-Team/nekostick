@@ -225,4 +225,15 @@ internal static partial class SupervisionLogMessages
         Level = LogLevel.Information,
         Message = "Initial service lease released. ServiceId: {ServiceId}. Port: {Port}.")]
     internal static partial void InitialLeaseReleased(ILogger logger, Guid serviceId, int port);
+    [LoggerMessage(
+        EventId = 5028,
+        Level = LogLevel.Warning,
+        Message = "Supervisor lease release returned a nonterminal status. NodeId: {NodeId}. ServiceId: {ServiceId}. Port: {Port}. Status: {Status}.")]
+    internal static partial void LeaseReleaseStatusFailed(
+        ILogger logger,
+        string nodeId,
+        Guid serviceId,
+        int port,
+        PortLeaseOperationStatus status);
+
 }

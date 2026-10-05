@@ -243,16 +243,31 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                 .Select(value => value.Id)
                 .Except(changes.Services.Select(value => value.Id))
                 .ToArray();
-            if (removedServiceIds.Length != 0 && await _dbContext.PortLeases
-                    .AsNoTracking()
-                    .AnyAsync(value => removedServiceIds.Contains(value.ServiceId), cancellationToken))
+            var now = _timeProvider.GetUtcNow().ToUniversalTime();
+            if (removedServiceIds.Length != 0)
             {
-                return EfHostConfigRevisionHelper.ValidationWriteFailure(
-                    "WriteSnapshot cannot remove a Service while a persisted PortLease references a service being removed.");
+                if (await _dbContext.PortLeases
+                        .AsNoTracking()
+                        .AnyAsync(
+                            value => removedServiceIds.Contains(value.ServiceId) && value.LeaseExpiresAt > now,
+                            cancellationToken))
+                {
+                    return EfHostConfigRevisionHelper.ValidationWriteFailure(
+                        "WriteSnapshot cannot remove a Service while a persisted PortLease references a service being removed.");
+                }
+
+                var expiredLeases = await _dbContext.PortLeases
+                    .Where(value => removedServiceIds.Contains(value.ServiceId) && value.LeaseExpiresAt <= now)
+                    .ToListAsync(cancellationToken);
+                if (expiredLeases.Count != 0)
+                {
+                    _dbContext.PortLeases.RemoveRange(expiredLeases);
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
             }
 
-            var now = _timeProvider.GetUtcNow();
             bool changed;
+
             if (_ownerWriteContext.Value is { } ownerContext)
             {
                 changed = _entityOperations.ApplyReplacement(

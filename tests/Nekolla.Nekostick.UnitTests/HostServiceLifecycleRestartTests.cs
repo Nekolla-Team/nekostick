@@ -126,6 +126,59 @@ public sealed class HostServiceLifecycleRestartTests
     }
 
     [Fact]
+    public async Task FailedProcessExitReleaseBlocksNextStartUntilResolved()
+    {
+        var executor = new RecordingExecutor();
+        var service = CreateService(version: 1, ContractRestartPolicy.Never);
+        var snapshot = CreateSnapshot(version: 1, service);
+        var leaseStore = new SequencedLeaseStore(
+            PortLeaseOperationStatus.Conflict,
+            PortLeaseOperationStatus.Conflict,
+            PortLeaseOperationStatus.NotFound);
+        var harness = CreateHarness(
+            snapshot,
+            executor,
+            new SequenceProbe(HealthObservationStatus.Healthy),
+            new TimeoutDrainTracker(),
+            leaseStore);
+
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await harness.Manager.EnsureReadyAsync(
+                snapshot,
+                ServiceId,
+                TestContext.Current.CancellationToken)).Status);
+        Assert.NotNull(executor.FirstInstanceId);
+
+        await harness.Manager.NotifyProcessExitAsync(
+            ServiceId,
+            executor.FirstInstanceId!.Value,
+            successfulExit: false);
+
+        Assert.Equal(1, harness.LeaseStore.ReleaseCount);
+        var blockedStart = await harness.Manager.EnsureReadyAsync(
+            snapshot,
+            ServiceId,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, blockedStart.Status);
+        Assert.Equal(1, harness.LeaseStore.AcquireCount);
+        Assert.Equal(1, executor.StartCount);
+        Assert.Equal(2, harness.LeaseStore.ReleaseCount);
+
+        var retriedStart = await harness.Manager.EnsureReadyAsync(
+            snapshot,
+            ServiceId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Ready, retriedStart.Status);
+        Assert.Equal(2, harness.LeaseStore.AcquireCount);
+        Assert.Equal(2, executor.StartCount);
+        Assert.Equal(3, harness.LeaseStore.ReleaseCount);
+
+        await harness.Manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task TerminalHealthPublishesHealthyCandidateBeforeStoppingOldGeneration()
     {
         var tracker = new BlockingDrainTracker();
@@ -275,11 +328,120 @@ public sealed class HostServiceLifecycleRestartTests
         await harness.Manager.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task RestartDoesNotStartUntilPendingLeaseReleaseResolves()
+    {
+        var executor = new RecordingExecutor();
+        var service = CreateService(version: 1, ContractRestartPolicy.Never);
+        var snapshot = CreateSnapshot(version: 1, service);
+        var leaseStore = new SequencedLeaseStore(
+            PortLeaseOperationStatus.Conflict,
+            PortLeaseOperationStatus.NotFound);
+        var harness = CreateHarness(
+            snapshot,
+            executor,
+            new SequenceProbe(HealthObservationStatus.Healthy),
+            new TimeoutDrainTracker(),
+            leaseStore);
+
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await harness.Manager.EnsureReadyAsync(
+                snapshot,
+                ServiceId,
+                TestContext.Current.CancellationToken)).Status);
+
+        var blockedRestart = await harness.Manager.RestartAsync(
+            ServiceId,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(blockedRestart.IsSuccess);
+        Assert.Contains("Conflict", blockedRestart.Errors[0].Message);
+        Assert.Equal(1, harness.LeaseStore.AcquireCount);
+        Assert.Equal(1, executor.StartCount);
+        Assert.Equal(1, harness.LeaseStore.ReleaseCount);
+        Assert.Empty(harness.Publisher.Current);
+
+        var retriedRestart = await harness.Manager.RestartAsync(
+            ServiceId,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(retriedRestart.IsSuccess);
+        Assert.Equal(2, harness.LeaseStore.AcquireCount);
+        Assert.Equal(2, executor.StartCount);
+        Assert.Equal(2, harness.LeaseStore.ReleaseCount);
+
+        await harness.Manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task RepeatedStopRetriesPendingLeaseOnceAndRemovesHostMirrorAfterSuccess()
+    {
+        var executor = new RecordingExecutor();
+        var service = CreateService(version: 1, ContractRestartPolicy.Never);
+        var snapshot = CreateSnapshot(version: 1, service);
+        var leaseStore = new SequencedLeaseStore(
+            PortLeaseOperationStatus.Conflict,
+            PortLeaseOperationStatus.Applied);
+        var harness = CreateHarness(
+            snapshot,
+            executor,
+            new SequenceProbe(HealthObservationStatus.Healthy),
+            new TimeoutDrainTracker(),
+            leaseStore);
+
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await harness.Manager.EnsureReadyAsync(
+                snapshot,
+                ServiceId,
+                TestContext.Current.CancellationToken)).Status);
+
+        var slotsField = typeof(HostServiceLifecycleManager).GetField(
+            "_slots",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(slotsField);
+        var slots = slotsField!.GetValue(harness.Manager);
+        Assert.NotNull(slots);
+        var tryGetValue = slots!.GetType().GetMethod("TryGetValue");
+        Assert.NotNull(tryGetValue);
+        object?[] slotArguments = [ServiceId, null];
+        Assert.True((bool)tryGetValue!.Invoke(slots, slotArguments)!);
+        var slot = slotArguments[1]!;
+        var activeField = slot.GetType().GetField("Active", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeField);
+        var generation = activeField!.GetValue(slot)!;
+        var stopMethod = typeof(HostServiceLifecycleManager).GetMethod(
+            "StopGenerationAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(stopMethod);
+        Task<SupervisorOperationResult> StopGenerationAsync() =>
+            Assert.IsAssignableFrom<Task<SupervisorOperationResult>>(
+                stopMethod!.Invoke(harness.Manager, [slot, generation, CancellationToken.None]));
+
+        var firstStop = await StopGenerationAsync();
+        Assert.Equal(SupervisorOperationStatus.Conflict, firstStop.Status);
+        Assert.True(firstStop.ProcessStopped);
+        Assert.Equal(1, harness.LeaseStore.ReleaseCount);
+
+        var secondStop = await StopGenerationAsync();
+        Assert.Equal(SupervisorOperationStatus.Applied, secondStop.Status);
+        Assert.True(secondStop.ProcessStopped);
+        Assert.Equal(2, harness.LeaseStore.ReleaseCount);
+
+        var restarted = await harness.Manager.RestartAsync(ServiceId, TestContext.Current.CancellationToken);
+        Assert.True(restarted.IsSuccess);
+        Assert.Equal(2, harness.LeaseStore.ReleaseCount);
+
+        await harness.Manager.StopAsync(CancellationToken.None);
+    }
+
     private static Harness CreateHarness(
         HostConfigurationSnapshot snapshot,
         RecordingExecutor executor,
         SequenceProbe probe,
-        IMicroserviceDrainTracker tracker)
+        IMicroserviceDrainTracker tracker,
+        SequencedLeaseStore? leaseStore = null)
     {
         var holder = new HostConfigurationSnapshotHolder();
         Assert.True(holder.TryReplace(snapshot));
@@ -288,7 +450,7 @@ public sealed class HostServiceLifecycleRestartTests
             new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));
         runtime.MarkSnapshotAccepted();
         var publisher = new HostServiceEndpointSnapshotPublisher();
-        var leaseStore = new SequencedLeaseStore();
+        leaseStore ??= new SequencedLeaseStore();
         var manager = new HostServiceLifecycleManager(
             executor,
             probe,
@@ -466,13 +628,21 @@ public sealed class HostServiceLifecycleRestartTests
 
     private sealed class SequencedLeaseStore : IPortLeaseStore
     {
+        private readonly ConcurrentDictionary<Guid, PortLease> _leases = new();
+        private readonly ConcurrentQueue<PortLeaseOperationStatus> _releaseStatuses;
         private int _nextPort = 35000;
         private long _nextVersion;
         private int _acquireCount;
         private int _releaseCount;
 
+        public SequencedLeaseStore(params PortLeaseOperationStatus[] releaseStatuses)
+        {
+            _releaseStatuses = new ConcurrentQueue<PortLeaseOperationStatus>(releaseStatuses);
+        }
+
         public int AcquireCount => Volatile.Read(ref _acquireCount);
         public int ReleaseCount => Volatile.Read(ref _releaseCount);
+
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
             CancellationToken cancellationToken = default)
@@ -489,13 +659,35 @@ public sealed class HostServiceLifecycleRestartTests
                     now,
                     now.AddMinutes(5),
                     Interlocked.Increment(ref _nextVersion));
+                _leases[request.ServiceId] = lease;
                 return ValueTask.FromResult(new PortLeaseOperationResult(
                     PortLeaseOperationStatus.Applied,
                     lease));
             }
+
             if (intent.Kind == PortLeaseIntentKind.Release)
             {
                 Interlocked.Increment(ref _releaseCount);
+                var release = intent.Release!;
+                var status = _releaseStatuses.TryDequeue(out var nextStatus)
+                    ? nextStatus
+                    : PortLeaseOperationStatus.NotFound;
+                if (status == PortLeaseOperationStatus.Applied &&
+                    _leases.TryRemove(release.ServiceId, out var releasedLease))
+                {
+                    return ValueTask.FromResult(new PortLeaseOperationResult(status, releasedLease));
+                }
+
+                if (status == PortLeaseOperationStatus.Applied)
+                {
+                    status = PortLeaseOperationStatus.NotFound;
+                }
+                if (status == PortLeaseOperationStatus.NotFound)
+                {
+                    _leases.TryRemove(release.ServiceId, out _);
+                }
+
+                return ValueTask.FromResult(new PortLeaseOperationResult(status));
             }
 
             return ValueTask.FromResult(new PortLeaseOperationResult(
