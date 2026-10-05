@@ -171,8 +171,25 @@ public sealed class EfHostConfigApi : IHostConfigApi, IAsyncDisposable
                     "WriteSnapshot requires a non-negative expected revision and a non-null configuration change set.");
             }
 
-            if (!HostConfigurationSemanticValidator.TryValidateChangeSet(changes, out var validationMessage, _logger))
+            if (!HostConfigurationSemanticValidator.TryValidateChangeSetForWrite(
+                    changes,
+                    out var validationMessage,
+                    out var environmentValidationMessages,
+                    _logger))
             {
+                if (environmentValidationMessages is not null)
+                {
+                    var validationErrors = new ConfigurationError[environmentValidationMessages.Count];
+                    for (var i = 0; i < validationErrors.Length; i++)
+                    {
+                        validationErrors[i] = new ConfigurationError(
+                            ConfigurationErrorCode.Validation,
+                            environmentValidationMessages[i]);
+                    }
+
+                    return ConfigurationWriteResult.Failure(validationErrors);
+                }
+
                 return EfHostConfigRevisionHelper.ValidationWriteFailure(
                     validationMessage ?? "WriteSnapshot rejected invalid global settings, routes, services, extension records, or extension settings in the change set.");
             }

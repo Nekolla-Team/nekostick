@@ -129,6 +129,154 @@ public sealed class HostConfigurationStateTests
     }
 
     [Fact]
+    public void ChangeSetWriteValidatorAggregatesEnvironmentViolationsWithoutValues()
+    {
+        const string secretSentinel = "environment-secret-sentinel";
+        var secondServiceId = Guid.Parse("018f3a54-4cde-7abc-8def-0123456789ab");
+        var thirdServiceId = Guid.Parse("018f3a55-4cde-7abc-8def-0123456789ab");
+        var firstService = CreateServiceWithEnvironment(
+            ServiceId,
+            ImmutableDictionary<string, string>.Empty
+                .Add("SAFE_TEMPLATE", secretSentinel + "-${BROKEN")
+                .Add("SAFE_CONTROL", secretSentinel + "\ncontrol"));
+        var secondService = CreateServiceWithEnvironment(
+            secondServiceId,
+            ImmutableDictionary<string, string>.Empty
+                .Add(
+                    "SAFE_LONG",
+                    secretSentinel + new string(
+                        'V',
+                        HostConfigurationValueValidator.MaxEnvironmentValueLength + 1))
+                .Add("UNSAFE\nKEY", "safe-value")
+                .Add("BAD=KEY", secretSentinel));
+        var thirdService = CreateServiceWithEnvironment(
+            thirdServiceId,
+            ImmutableDictionary<string, string>.Empty.Add(
+                "BAD=VALUEKEY",
+                secretSentinel + "-${BROKEN"));
+
+        Assert.False(HostConfigurationSemanticValidator.TryValidateChangeSetForWrite(
+            CreateChangeSet(firstService, secondService, thirdService),
+            out var validationMessage,
+            out var validationMessages,
+            NullLogger.Instance));
+
+        Assert.Null(validationMessage);
+        Assert.NotNull(validationMessages);
+        var errors = validationMessages!;
+        Assert.Equal(7, errors.Count);
+        Assert.Equal(
+            2,
+            errors.Count(message => message.Contains(
+                $"Service '{ServiceId:D}'",
+                StringComparison.Ordinal)));
+        Assert.Equal(
+            3,
+            errors.Count(message => message.Contains(
+                $"Service '{secondServiceId:D}'",
+                StringComparison.Ordinal)));
+        var thirdServiceMessages = errors
+            .Where(message => message.Contains(
+                $"Service '{thirdServiceId:D}'",
+                StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(2, thirdServiceMessages.Length);
+        Assert.Contains("Environment key 'BAD=VALUEKEY'", thirdServiceMessages[0]);
+        Assert.Contains("contains '='", thirdServiceMessages[0]);
+        Assert.Contains("Environment value for key 'BAD=VALUEKEY'", thirdServiceMessages[1]);
+        Assert.Contains("malformed template placeholder", thirdServiceMessages[1]);
+        Assert.Contains(
+            errors,
+            message => message.Contains("Environment key 'BAD=KEY'", StringComparison.Ordinal) &&
+                message.Contains("contains '='", StringComparison.Ordinal));
+        Assert.Contains(
+            errors,
+            message => message.Contains("Environment value for key 'SAFE_TEMPLATE'", StringComparison.Ordinal) &&
+                message.Contains("malformed template placeholder", StringComparison.Ordinal));
+        Assert.Contains(
+            errors,
+            message => message.Contains("Environment value for key 'SAFE_CONTROL'", StringComparison.Ordinal) &&
+                message.Contains("control character", StringComparison.Ordinal));
+        Assert.Contains(
+            errors,
+            message => message.Contains("Environment value for key 'SAFE_LONG'", StringComparison.Ordinal) &&
+                message.Contains("65536-character limit", StringComparison.Ordinal));
+
+        var allMessages = string.Join(Environment.NewLine, errors);
+        Assert.DoesNotContain(secretSentinel, allMessages);
+        Assert.DoesNotContain("UNSAFE\nKEY", allMessages);
+        Assert.All(errors, message => Assert.DoesNotContain("\n", message));
+    }
+
+    [Fact]
+    public void ChangeSetWriteValidatorReportsSpecificEnvironmentFieldCauses()
+    {
+        var whitespaceKey = ValidateSingleEnvironmentError(string.Empty, "safe-value");
+        AssertEnvironmentViolation(whitespaceKey, "key", "null or whitespace", string.Empty);
+
+        var longKey = new string('K', HostConfigurationValueValidator.MaxEnvironmentKeyLength + 1);
+        var longKeyMessage = ValidateSingleEnvironmentError(longKey, "safe-value");
+        AssertEnvironmentViolation(longKeyMessage, "key", "256-character limit");
+        Assert.DoesNotContain(longKey, longKeyMessage);
+
+        var controlKeyMessage = ValidateSingleEnvironmentError("BAD\nKEY", "safe-value");
+        AssertEnvironmentViolation(controlKeyMessage, "key", "control character");
+        Assert.DoesNotContain("BAD\nKEY", controlKeyMessage);
+
+        var equalsKeyMessage = ValidateSingleEnvironmentError("BAD=KEY", "safe-value");
+        AssertEnvironmentViolation(equalsKeyMessage, "key", "contains '='", "BAD=KEY");
+
+        var nullValueMessage = ValidateSingleEnvironmentError("SAFE_NULL", null);
+        AssertEnvironmentViolation(nullValueMessage, "value", "it is null", "SAFE_NULL");
+
+        var lengthValueMessage = ValidateSingleEnvironmentError(
+            "SAFE_LENGTH",
+            new string('V', HostConfigurationValueValidator.MaxEnvironmentValueLength + 1));
+        AssertEnvironmentViolation(lengthValueMessage, "value", "65536-character limit", "SAFE_LENGTH");
+
+        var controlValueMessage = ValidateSingleEnvironmentError("SAFE_CONTROL", "secret-value\nwith-control");
+        AssertEnvironmentViolation(controlValueMessage, "value", "control character", "SAFE_CONTROL");
+
+        var templateValueMessage = ValidateSingleEnvironmentError("SAFE_TEMPLATE", "${BAD NAME}");
+        AssertEnvironmentViolation(templateValueMessage, "value", "malformed template placeholder", "SAFE_TEMPLATE");
+
+        const string hugeValueSecret = "over-json-limit-environment-secret";
+        var hugeValueMessage = ValidateSingleEnvironmentError(
+            "SAFE_HUGE",
+            hugeValueSecret + new string('V', PersistenceDatabaseDefaults.MaxJsonBytes + 1));
+        AssertEnvironmentViolation(hugeValueMessage, "value", "65536-character limit", "SAFE_HUGE");
+        Assert.DoesNotContain(hugeValueSecret, hugeValueMessage);
+
+        var lineSeparatedKeyMessage = ValidateSingleEnvironmentError("SAFE\u2028KEY", "invalid\nvalue");
+        Assert.Contains(@"SAFE\u2028KEY", lineSeparatedKeyMessage);
+        Assert.DoesNotContain("\u2028", lineSeparatedKeyMessage);
+        Assert.Equal(
+            HostConfigurationValueValidator.EnvironmentValidationFailureReason.NullOrWhitespace,
+            HostConfigurationValueValidator.GetEnvironmentKeyFailureReason(null));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(@"\$")]
+    [InlineData(@"\${HOST:X}")]
+    [InlineData(@"prefix \${BROKEN")]
+    public void ChangeSetWriteValidatorAcceptsEmptyAndEscapedEnvironmentValues(string value)
+    {
+        var changes = CreateChangeSet(
+            CreateServiceWithEnvironment(
+                ServiceId,
+                ImmutableDictionary<string, string>.Empty.Add("TEMPLATE", value)));
+
+        Assert.True(HostConfigurationSemanticValidator.TryValidateChangeSetForWrite(
+            changes,
+            out var validationMessage,
+            out var validationMessages,
+            NullLogger.Instance));
+        Assert.Null(validationMessage);
+        Assert.Null(validationMessages);
+    }
+
+    [Fact]
     public void SemanticValidatorRequiresRouteResourceOverridesToTightenGlobalLimits()
     {
         var globalSettings = new GlobalSettingsConfiguration(
@@ -404,6 +552,67 @@ public sealed class HostConfigurationStateTests
                     createdAt: DateTimeOffset.UnixEpoch,
                     updatedAt: DateTimeOffset.UnixEpoch,
                     version: 1)));
+
+    private static ConfigurationChangeSet CreateChangeSet(params ServiceConfiguration[] services) =>
+        new(
+            new GlobalSettingsConfiguration(version: 1),
+            ImmutableArray<RouteConfiguration>.Empty,
+            services.ToImmutableArray(),
+            ImmutableArray<ExtensionRecordConfiguration>.Empty,
+            ImmutableArray<ExtensionSettingsConfiguration>.Empty);
+
+    private static ServiceConfiguration CreateServiceWithEnvironment(
+        Guid id,
+        ImmutableDictionary<string, string> environment) =>
+        new(
+            id,
+            enabled: true,
+            fileName: "/bin/sh",
+            argumentList: ImmutableArray<string>.Empty,
+            workingDirectory: "/tmp",
+            environment: environment,
+            startMode: ServiceStartMode.Lazy,
+            restartPolicy: ServiceRestartPolicy.Never,
+            healthCheck: new ServiceHealthCheckConfiguration(
+                ServiceHealthCheckType.Process,
+                httpPath: null,
+                timeout: TimeSpan.FromSeconds(1)),
+            createdAt: DateTimeOffset.UnixEpoch,
+            updatedAt: DateTimeOffset.UnixEpoch,
+            version: 1);
+
+    private static string ValidateSingleEnvironmentError(string key, string? value)
+    {
+        var changes = CreateChangeSet(
+            CreateServiceWithEnvironment(
+                ServiceId,
+                ImmutableDictionary<string, string>.Empty.Add(key, value!)));
+
+        Assert.False(HostConfigurationSemanticValidator.TryValidateChangeSetForWrite(
+            changes,
+            out var validationMessage,
+            out var validationMessages,
+            NullLogger.Instance));
+        Assert.Null(validationMessage);
+        var message = Assert.Single(validationMessages!);
+
+        return message;
+    }
+
+    private static void AssertEnvironmentViolation(
+        string message,
+        string field,
+        string cause,
+        string? renderedKey = null)
+    {
+        Assert.Contains($"Service '{ServiceId:D}'", message);
+        Assert.Contains($"Environment {field}", message);
+        Assert.Contains(cause, message);
+        if (renderedKey is not null)
+        {
+            Assert.Contains($"'{renderedKey}'", message);
+        }
+    }
 
     private static RouteConfiguration CreateRoute(
         RouteMatcherConfiguration matcher,

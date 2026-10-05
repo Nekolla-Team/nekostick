@@ -81,6 +81,56 @@ public static class HostConfigurationSemanticValidator
             logger), logger, "ValidateChangeSet", out validationMessage);
     }
 
+    internal static bool TryValidateChangeSetForWrite(
+        ConfigurationChangeSet? changes,
+        out string? validationMessage,
+        out List<string>? environmentValidationMessages,
+        ILogger? logger = null)
+    {
+        validationMessage = null;
+        environmentValidationMessages = null;
+        if (changes is null)
+        {
+            PersistenceLogMessages.ValidationRejected(logger ?? NullLogger.Instance, "ValidateChangeSet", "configuration");
+            return false;
+        }
+
+        List<string>? collectedEnvironmentValidationMessages = null;
+        if (!TryValidate(
+                () => HostConfigurationValidation.ValidateConfigurationValuesForChangeSet(
+                    changes.GlobalSettings,
+                    changes.Routes,
+                    changes.Services,
+                    changes.ExtensionRecords,
+                    changes.ExtensionSettings,
+                    logger,
+                    ref collectedEnvironmentValidationMessages),
+                logger,
+                "ValidateChangeSet",
+                out validationMessage))
+        {
+            return false;
+        }
+
+        if (collectedEnvironmentValidationMessages is null)
+        {
+            return true;
+        }
+
+        var effectiveLogger = logger ?? NullLogger.Instance;
+        foreach (var message in collectedEnvironmentValidationMessages)
+        {
+            PersistenceLogMessages.SemanticValidationFailed(
+                effectiveLogger,
+                new ConfigurationValidationException(message),
+                "ValidateChangeSet",
+                "configuration");
+        }
+
+        environmentValidationMessages = collectedEnvironmentValidationMessages;
+        return false;
+    }
+
     /// <summary>
     /// Validates one contract-only extension settings DTO for host publication or persistence.
     /// </summary>

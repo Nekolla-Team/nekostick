@@ -21,6 +21,17 @@ internal static class HostConfigurationValueValidator
     internal const int MaxHealthPathLength = 2048;
     internal const int RegexTimeoutMilliseconds = 250;
 
+    internal enum EnvironmentValidationFailureReason
+    {
+        None,
+        NullOrWhitespace,
+        NullValue,
+        TooLong,
+        ControlCharacter,
+        EqualsSign,
+        MalformedTemplatePlaceholder
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
     internal static bool IsSafeExtensionId(string? value) => IsSafeText(value, MaxExtensionIdLength);
@@ -195,11 +206,54 @@ internal static class HostConfigurationValueValidator
         !string.IsNullOrWhiteSpace(value) && value.Length <= maxLength && !ContainsControlCharacter(value);
 
     internal static bool IsSafeEnvironmentKey(string? value) =>
-        IsSafeText(value, MaxEnvironmentKeyLength) && value!.IndexOf('=') < 0;
+        GetEnvironmentKeyFailureReason(value) == EnvironmentValidationFailureReason.None;
+
+    internal static EnvironmentValidationFailureReason GetEnvironmentKeyFailureReason(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return EnvironmentValidationFailureReason.NullOrWhitespace;
+        }
+
+        if (value.Length > MaxEnvironmentKeyLength)
+        {
+            return EnvironmentValidationFailureReason.TooLong;
+        }
+
+        if (ContainsControlCharacter(value))
+        {
+            return EnvironmentValidationFailureReason.ControlCharacter;
+        }
+
+        return value.Contains('=')
+            ? EnvironmentValidationFailureReason.EqualsSign
+            : EnvironmentValidationFailureReason.None;
+    }
 
     internal static bool IsSafeEnvironmentValue(string? value) =>
-        value is not null && value.Length <= MaxEnvironmentValueLength &&
-        !ContainsControlCharacter(value) && !ContainsInvalidTemplatePlaceholder(value);
+        GetEnvironmentValueFailureReason(value) == EnvironmentValidationFailureReason.None;
+
+    internal static EnvironmentValidationFailureReason GetEnvironmentValueFailureReason(string? value)
+    {
+        if (value is null)
+        {
+            return EnvironmentValidationFailureReason.NullValue;
+        }
+
+        if (value.Length > MaxEnvironmentValueLength)
+        {
+            return EnvironmentValidationFailureReason.TooLong;
+        }
+
+        if (ContainsControlCharacter(value))
+        {
+            return EnvironmentValidationFailureReason.ControlCharacter;
+        }
+
+        return ContainsInvalidTemplatePlaceholder(value)
+            ? EnvironmentValidationFailureReason.MalformedTemplatePlaceholder
+            : EnvironmentValidationFailureReason.None;
+    }
 
     internal static bool IsSafeEnvironmentValueForRead(string? value) =>
         value is not null && value.Length <= MaxEnvironmentValueLength &&

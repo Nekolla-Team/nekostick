@@ -13,6 +13,46 @@ internal static class HostConfigurationValidation
         IEnumerable<ExtensionSettingsConfiguration> extensionSettings,
         ILogger? logger = null)
     {
+        List<string>? environmentValidationMessages = null;
+        ValidateConfigurationValuesCore(
+            globalSettings,
+            routes,
+            services,
+            extensionRecords,
+            extensionSettings,
+            logger,
+            ref environmentValidationMessages,
+            collectEnvironmentViolations: false);
+    }
+
+    internal static void ValidateConfigurationValuesForChangeSet(
+        GlobalSettingsConfiguration globalSettings,
+        IEnumerable<RouteConfiguration> routes,
+        IEnumerable<ServiceConfiguration> services,
+        IEnumerable<ExtensionRecordConfiguration> extensionRecords,
+        IEnumerable<ExtensionSettingsConfiguration> extensionSettings,
+        ILogger? logger,
+        ref List<string>? environmentValidationMessages) =>
+        ValidateConfigurationValuesCore(
+            globalSettings,
+            routes,
+            services,
+            extensionRecords,
+            extensionSettings,
+            logger,
+            ref environmentValidationMessages,
+            collectEnvironmentViolations: true);
+
+    private static void ValidateConfigurationValuesCore(
+        GlobalSettingsConfiguration globalSettings,
+        IEnumerable<RouteConfiguration> routes,
+        IEnumerable<ServiceConfiguration> services,
+        IEnumerable<ExtensionRecordConfiguration> extensionRecords,
+        IEnumerable<ExtensionSettingsConfiguration> extensionSettings,
+        ILogger? logger,
+        ref List<string>? environmentValidationMessages,
+        bool collectEnvironmentViolations)
+    {
         if (globalSettings is null)
         {
             HostConfigurationValueValidator.Throw();
@@ -35,7 +75,14 @@ internal static class HostConfigurationValidation
 
         foreach (var service in serviceArray)
         {
-            HostConfigurationServiceValidator.Validate(service);
+            if (collectEnvironmentViolations)
+            {
+                HostConfigurationServiceValidator.ValidateForChangeSet(service, ref environmentValidationMessages);
+            }
+            else
+            {
+                HostConfigurationServiceValidator.Validate(service);
+            }
         }
 
         foreach (var extension in extensionArray)

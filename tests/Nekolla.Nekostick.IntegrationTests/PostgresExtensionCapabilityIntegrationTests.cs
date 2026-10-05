@@ -190,6 +190,76 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
     }
 
     [Fact]
+    public async Task WriteSnapshotReturnsSafeEnvironmentErrorsWithoutMutatingConfiguration()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var context = harness.Database.CreateContext();
+        await using var api = new EfHostConfigApi(context);
+        var beforeResult = await api.ReadSnapshotAsync(cancellationToken);
+        Assert.True(beforeResult.IsSuccess, beforeResult.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(beforeResult.Value);
+        var before = beforeResult.Value!;
+
+        const string secretSentinel = "public-write-environment-secret-sentinel";
+        var firstInvalidServiceId = Guid.Parse("018f0f00-0000-7000-8000-000000000112");
+        var secondInvalidServiceId = Guid.Parse("018f0f00-0000-7000-8000-000000000113");
+        var firstInvalidService = CreateFullService(
+            firstInvalidServiceId,
+            ImmutableDictionary<string, string>.Empty
+                .Add("SAFE_TEMPLATE", secretSentinel + "-${BROKEN")
+                .Add("BAD\nKEY", secretSentinel));
+        var secondInvalidService = CreateFullService(
+            secondInvalidServiceId,
+            ImmutableDictionary<string, string>.Empty
+                .Add(
+                    "SAFE_LONG",
+                    secretSentinel + new string('V', (64 * 1024) + 1))
+                .Add("BAD=VALUEKEY", secretSentinel + "-${BROKEN"));
+        var changes = new ConfigurationChangeSet(
+            before.GlobalSettings,
+            before.Routes,
+            before.Services.Add(firstInvalidService).Add(secondInvalidService),
+            before.ExtensionRecords,
+            before.ExtensionSettings);
+
+        var rejected = await api.WriteSnapshotAsync(before.Version, changes, cancellationToken);
+
+        Assert.False(rejected.IsSuccess);
+        Assert.Null(rejected.NewVersion);
+        Assert.Equal(5, rejected.Errors.Length);
+        Assert.All(rejected.Errors, error => Assert.Equal(ConfigurationErrorCode.Validation, error.Code));
+        var messages = rejected.Errors.Select(error => error.Message).ToArray();
+        var allMessages = string.Join(Environment.NewLine, messages);
+        Assert.Contains(
+            messages,
+            message => message.Contains("Environment value for key 'SAFE_TEMPLATE'", StringComparison.Ordinal));
+        Assert.Contains(
+            messages,
+            message => message.Contains("Environment value for key 'SAFE_LONG'", StringComparison.Ordinal));
+        Assert.DoesNotContain(secretSentinel, allMessages);
+        Assert.Contains(
+            messages,
+            message => message.Contains("Environment key 'BAD=VALUEKEY'", StringComparison.Ordinal) &&
+                message.Contains("contains '='", StringComparison.Ordinal));
+        Assert.Contains(
+            messages,
+            message => message.Contains("Environment value for key 'BAD=VALUEKEY'", StringComparison.Ordinal) &&
+                message.Contains("malformed template placeholder", StringComparison.Ordinal));
+        Assert.DoesNotContain("BAD\nKEY", allMessages);
+        Assert.All(messages, message => Assert.DoesNotContain("\n", message));
+
+        await using var afterContext = harness.Database.CreateContext();
+        await using var afterApi = new EfHostConfigApi(afterContext);
+        var afterResult = await afterApi.ReadSnapshotAsync(cancellationToken);
+        Assert.True(afterResult.IsSuccess, afterResult.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(afterResult.Value);
+        var after = afterResult.Value!;
+        AssertSnapshotCollectionsUnchanged(before, after);
+        Assert.Equal(JsonSerializer.Serialize(before.GlobalSettings), JsonSerializer.Serialize(after.GlobalSettings));
+    }
+
+    [Fact]
     public async Task FullConfigurationRollsBackInvalidCrossCategoryReplacement()
     {
         await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
@@ -778,15 +848,20 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             version);
 
     private static ServiceConfiguration CreateFullService(Guid id, string secret) =>
+        CreateFullService(
+            id,
+            ImmutableDictionary<string, string>.Empty.Add("FULL_CONFIGURATION_SECRET", secret));
+
+    private static ServiceConfiguration CreateFullService(
+        Guid id,
+        ImmutableDictionary<string, string> environment) =>
         new(
             id,
             enabled: true,
             fileName: "/usr/bin/full-configuration-service",
             argumentList: ImmutableArray.Create("--full-configuration"),
             workingDirectory: "/tmp",
-            environment: ImmutableDictionary<string, string>.Empty.Add(
-                "FULL_CONFIGURATION_SECRET",
-                secret),
+            environment: environment,
             startMode: ServiceStartMode.Lazy,
             restartPolicy: ServiceRestartPolicy.OnFailure,
             healthCheck: new ServiceHealthCheckConfiguration(
