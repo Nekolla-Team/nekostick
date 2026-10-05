@@ -8,7 +8,7 @@ using Nekolla.Nekostick.Persistence.Entities;
 namespace Nekolla.Nekostick.Host;
 
 /// <summary>Registers this process and maintains its persisted node heartbeat.</summary>
-public sealed class HostNodeRegistrationService : BackgroundService
+public sealed class HostNodeRegistrationService : BackgroundService, IAsyncDisposable
 {
     private readonly IDbContextFactory<NekostickDbContext> _dbContextFactory;
     private readonly IHostConfigurationSnapshotAccessor _snapshotAccessor;
@@ -19,6 +19,9 @@ public sealed class HostNodeRegistrationService : BackgroundService
     private readonly HostTerminationState _terminationState;
     private readonly ILogger<HostNodeRegistrationService> _logger;
     private NekostickDbContext? _dbContext;
+    private readonly object _initialRegistrationLock = new();
+    private Task? _initialRegistrationTask;
+    private int _asyncDisposed;
     private int _retryAttempt;
     private int _alreadyActiveAttempts;
 
@@ -46,18 +49,44 @@ public sealed class HostNodeRegistrationService : BackgroundService
     /// <inheritdoc />
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
+        await EnsureInitialRegistrationAsync(cancellationToken);
         try
         {
-            _dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
-            await _dbContext.Database.OpenConnectionAsync(cancellationToken);
-            await _activityLease.AcquireAsync(
-                _dbContext.Database.GetDbConnection(),
-                cancellationToken);
+            await _activityLease.EnsureHeldAsync(cancellationToken);
             await base.StartAsync(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            HostLogMessages.FailureDetails(_logger, exception, nameof(StartAsync));
+            await DisposeResourcesAsync();
+            throw;
+        }
+    }
+
+    /// <summary>Ensures this node is registered before configuration publication.</summary>
+    internal Task EnsureInitialRegistrationAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_initialRegistrationLock)
+        {
+            return _initialRegistrationTask ??= RegisterInitialNodeAsync(cancellationToken);
+        }
+    }
+
+    private async Task RegisterInitialNodeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+            _dbContext = dbContext;
+            await dbContext.Database.OpenConnectionAsync(cancellationToken);
+            await _activityLease.AcquireAsync(
+                dbContext.Database.GetDbConnection(),
+                cancellationToken);
+            await UpsertNodeAsync(configurationVersion: null, cancellationToken: cancellationToken);
         }
         catch (HostNodeAlreadyActiveException exception)
         {
-            HostLogMessages.FailureDetails(_logger, exception, nameof(StartAsync));
+            HostLogMessages.FailureDetails(_logger, exception, nameof(EnsureInitialRegistrationAsync));
             HostLogMessages.HostNodeActivityLost(_logger, _options.NodeId);
             _terminationState.MarkFatal();
             _applicationLifetime?.StopApplication();
@@ -66,7 +95,7 @@ public sealed class HostNodeRegistrationService : BackgroundService
         }
         catch (Exception exception)
         {
-            HostLogMessages.FailureDetails(_logger, exception, nameof(StartAsync));
+            HostLogMessages.FailureDetails(_logger, exception, nameof(EnsureInitialRegistrationAsync));
             await DisposeResourcesAsync();
             throw;
         }
@@ -118,6 +147,30 @@ public sealed class HostNodeRegistrationService : BackgroundService
         finally
         {
             await DisposeResourcesAsync();
+        }
+    }
+
+    async ValueTask IAsyncDisposable.DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _asyncDisposed, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await base.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                base.Dispose();
+            }
+            finally
+            {
+                await DisposeResourcesAsync();
+            }
         }
     }
 
@@ -208,6 +261,13 @@ public sealed class HostNodeRegistrationService : BackgroundService
             return;
         }
 
+        await UpsertNodeAsync(snapshot.Version, cancellationToken);
+    }
+
+    private async Task UpsertNodeAsync(
+        long? configurationVersion,
+        CancellationToken cancellationToken)
+    {
         await _activityLease.EnsureHeldAsync(cancellationToken);
         var dbContext = _dbContext ?? throw new InvalidOperationException("The node database context is unavailable.");
         await using var transaction = await dbContext.Database.BeginTransactionAsync(
@@ -236,10 +296,16 @@ public sealed class HostNodeRegistrationService : BackgroundService
         }
 
         node.LastHeartbeatAt = now;
-        node.LastConfigurationVersion = snapshot.Version;
-        node.RuntimeState = _runtimeState.Status.Readiness == HostReadinessState.Ready
-            ? "ready"
-            : "degraded";
+        if (configurationVersion is { } acceptedVersion)
+        {
+            node.LastConfigurationVersion = acceptedVersion;
+        }
+
+        node.RuntimeState = configurationVersion is null
+            ? "registered"
+            : _runtimeState.Status.Readiness == HostReadinessState.Ready
+                ? "ready"
+                : "degraded";
         node.IsActive = true;
         node.UpdatedAt = now;
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -250,7 +316,11 @@ public sealed class HostNodeRegistrationService : BackgroundService
         {
             HostLogMessages.NodeRegistered(_logger, _options.NodeId);
         }
-        HostLogMessages.NodeHeartbeatUpdated(_logger, _options.NodeId, snapshot.Version);
+
+        if (configurationVersion is { } heartbeatVersion)
+        {
+            HostLogMessages.NodeHeartbeatUpdated(_logger, _options.NodeId, heartbeatVersion);
+        }
     }
 
     private async ValueTask DisposeResourcesAsync()

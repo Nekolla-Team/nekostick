@@ -165,13 +165,102 @@ public sealed class HostDurableStoreOutageTests
         await fixture.Manager.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task EagerStartupResumesAfterInitialDatabaseGateOpens()
+    {
+        await using var runtimeRegistry = new HostServiceRuntimeRegistry();
+        var fixture = CreateFixture(
+            ContractStartMode.Eager,
+            ContractRestartPolicy.Never,
+            runtimeRegistry: runtimeRegistry);
+        var retryScheduled = new TaskCompletionSource<HostServiceRuntimeSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var serviceReady = new TaskCompletionSource<HostServiceRuntimeSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = runtimeRegistry.Subscribe(change =>
+        {
+            if (change.Snapshot is not { } changed || changed.ServiceId != ServiceId)
+            {
+                return;
+            }
+
+            if (changed.RetryAt is not null)
+            {
+                retryScheduled.TrySetResult(changed);
+            }
+
+            if (changed.LifecycleState == ExtensionServiceLifecycleState.Running)
+            {
+                serviceReady.TrySetResult(changed);
+            }
+        });
+
+        fixture.Runtime.MarkDatabaseUnavailable();
+        fixture.Runtime.MarkDatabaseAvailable();
+        await fixture.Manager.StartAsync(TestContext.Current.CancellationToken);
+
+        var blocked = await retryScheduled.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(fixture.Snapshot.Version, blocked.ConfigurationVersion);
+        Assert.Empty(fixture.LeaseStore.AcquireIntents);
+        Assert.Empty(fixture.Executor.StartedServices);
+
+        fixture.Runtime.MarkSnapshotAccepted();
+        await fixture.LeaseStore.AcquireObserved.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var runtime = await serviceReady.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.Single(fixture.LeaseStore.AcquireIntents);
+        Assert.Equal(new[] { ServiceId }, fixture.Executor.StartedServices);
+        Assert.Equal(fixture.Snapshot.Version, runtime.ConfigurationVersion);
+        Assert.Equal(ExtensionServiceLifecycleState.Running, runtime.LifecycleState);
+
+        await fixture.Manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task EagerStartupRetriesTransientAcquireFailureWithoutSnapshotRewrite()
+    {
+        var fixture = CreateFixture(ContractStartMode.Eager, ContractRestartPolicy.Never);
+        fixture.LeaseStore.FailNextAcquireAsDatabaseUnavailable = true;
+
+        await fixture.Manager.ReconcileAsync(fixture.Snapshot, TestContext.Current.CancellationToken);
+
+        Assert.Single(fixture.LeaseStore.AcquireIntents);
+        Assert.Empty(fixture.Executor.StartedServices);
+        Assert.False(fixture.Runtime.NewServicesAllowed);
+        var blocked = await fixture.Manager.EnsureReadyAsync(
+            fixture.Snapshot,
+            ServiceId,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, blocked.Status);
+
+        fixture.Runtime.MarkSnapshotAccepted();
+
+        await fixture.Manager.RetryWaitingServicesAsync(
+            DateTimeOffset.UtcNow,
+            TestContext.Current.CancellationToken);
+        Assert.Single(fixture.LeaseStore.AcquireIntents);
+        Assert.Empty(fixture.Executor.StartedServices);
+        await fixture.Manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, fixture.LeaseStore.AcquireIntents.Count);
+        Assert.Equal(new[] { ServiceId }, fixture.Executor.StartedServices);
+        var runtime = Assert.Single(fixture.Manager.ReadCurrent());
+        Assert.Equal(fixture.Snapshot.Version, runtime.ConfigurationVersion);
+        Assert.Equal(ExtensionServiceLifecycleState.Running, runtime.LifecycleState);
+
+        await fixture.Manager.StopAsync(CancellationToken.None);
+    }
+
     private static Fixture CreateFixture(
         ContractStartMode startMode,
         ContractRestartPolicy restartPolicy,
         long snapshotVersion = 1,
         long serviceVersion = 1,
         bool publishSnapshot = true,
-        bool acceptSnapshot = true)
+        bool acceptSnapshot = true,
+        HostServiceRuntimeRegistry? runtimeRegistry = null)
     {
         var snapshot = CreateSnapshot(startMode, restartPolicy, snapshotVersion, serviceVersion);
         var holder = new HostConfigurationSnapshotHolder();
@@ -201,7 +290,9 @@ public sealed class HostDurableStoreOutageTests
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
             new MicroserviceDrainTracker(),
-            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false),
+            runtimeManager: null,
+            runtimeRegistry: runtimeRegistry);
         return new Fixture(manager, snapshot, holder, runtime, executor, leaseStore, publisher);
     }
 
@@ -294,6 +385,9 @@ public sealed class HostDurableStoreOutageTests
         public List<PortLeaseIntent> AcquireIntents { get; } = [];
         public int RenewCalls { get; private set; }
         public int ReleaseCalls { get; private set; }
+        public bool FailNextAcquireAsDatabaseUnavailable { get; set; }
+        public TaskCompletionSource<bool> AcquireObserved { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
@@ -303,6 +397,13 @@ public sealed class HostDurableStoreOutageTests
             {
                 case PortLeaseIntentKind.Acquire:
                     AcquireIntents.Add(intent);
+                    AcquireObserved.TrySetResult(true);
+                    if (FailNextAcquireAsDatabaseUnavailable)
+                    {
+                        FailNextAcquireAsDatabaseUnavailable = false;
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.DatabaseUnavailable));
+                    }
                     var request = intent.Request!;
                     var now = DateTimeOffset.UtcNow;
                     return ValueTask.FromResult(new PortLeaseOperationResult(

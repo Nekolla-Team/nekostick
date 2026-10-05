@@ -62,7 +62,7 @@ CLI 仅承担启动覆盖、诊断和安全恢复，不负责 route/service/exte
 - `status`：读取数据库和本节点状态，输出配置版本、节点注册状态、扩展与子进程摘要。
 - `doctor`：检查数据库连接、migration 状态、配置快照合法性、扩展 manifest 与本机目录可访问性。
 - `--skip-extensions`：安全启动时不加载任何扩展；指向扩展处理器的 route 返回 `503`。
-- `--disable-supervisor`：不启动、停止或重启微服务子进程；微服务 route 返回 `503`。
+- `--disable-supervisor`：不启动、停止或重启微服务子进程，也不发布微服务 endpoint；节点注册、心跳和默认节点排他仍生效；微服务 route 返回 `503`。
 - `--read-only`：禁止本节点通过 Host Config API 提交配置写入，但仍可消费已发布的配置变更。
 
 `status` 与 `doctor` 需要数据库连接；其余开关只影响当前启动的节点，不写入全局业务配置。
@@ -85,7 +85,7 @@ Docker 和 systemd 都必须将 SIGTERM 传递给主进程。主进程收到停�
 
 1. 以 PostgreSQL advisory lock 串行获取全局迁移锁。
 2. 在单一事务内按 migration history 执行尚未应用的 idempotent script。
-3. 成功后释放锁并继续节点注册、快照加载。
+3. 成功后释放锁；`Run` 先提交初始节点注册，再加载并发布首份配置快照，之后才启动依赖节点状态的后台 worker；初始注册失败时清理资源并终止启动。
 4. migration 锁等待、脚本执行或 schema 校验失败时，写出结构化错误并退出进程；不启动不就绪节点，也不自动回滚。
 
 迁移执行账号须拥有目标 schema 的 DDL 权限。生产部署应使用权限最小化的独立运行账号和迁移账号；即使当前由应用执行 migration，也不得将超级用户连接串提供给扩展。
@@ -251,7 +251,7 @@ service 是独立实体，可被多条 route 引用。其启动配置只公开 `
 - `${HOST:VAR}` 保持原样交给 `PosixProcessExecutor` 处理；宿主缺少该变量时启动被明确拒绝（原因码 `MissingHostEnvironment`），失败信息只包含占位符 token 本身。
 - `\$` 用于产生字面 `$`；为兼容旧配置，`ArgumentList` 中的 legacy `$PORT` 仍替换为分配到的端口。
 
-service 启动模式为 `Eager` 或 `Lazy`。Eager 在节点加载配置后启动；Lazy 由首个请求触发，并合并同一 service 的并发启动。Lazy 请求等待服务通过 startup health check，超时或失败时返回 `503`。服务配置变更时，supervisor 先启动并验证新实例，再切换 route 所用实例并停止旧实例；端口不足或新实例不健康时保留旧的健康实例。禁用或删除服务后，引用它的 route 返回 `503`。
+service 启动模式为 `Eager` 或 `Lazy`。Eager 在节点加载配置后启动；Lazy 由首个请求触发，并合并同一 service 的并发启动。Lazy 请求等待服务通过 startup health check，超时或失败时返回 `503`。服务配置变更时，supervisor 先启动并验证新实例，再切换 route 所用实例并停止旧实例；端口不足或新实例不健康时保留旧的健康实例。禁用或删除服务后，引用它的 route 返回 `503`。仅当已启用的 `Eager` 服务启动尚未产生进程代次且失败属于可恢复的 transient DB/DB revalidation（含 transient dependency failure 的传播）时，沿用现有 lifecycle tick/backoff 自动重试，并通过 `RetryAt` 暴露下一次期限；永久 `Rejected`/`Conflict`、无效配置和独立 `OnDemand` 不自动重试。
 
 每个子进程处于独立 POSIX process group。停止时向整个进程组发送 SIGTERM，宽限期后发送 SIGKILL；子孙进程终止失败只写日志，不阻塞主服务停止。
 

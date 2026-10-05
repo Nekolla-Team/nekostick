@@ -81,7 +81,7 @@ Supported run switches:
 
 ```text
 --skip-extensions       Do not load extensions for this invocation.
---disable-supervisor    Do not manage local microservice processes.
+--disable-supervisor    Do not manage local microservice processes or publish their endpoints; node registration, heartbeat, and default-node exclusion remain active.
 --read-only             Disable configuration writes from this node.
 ```
 

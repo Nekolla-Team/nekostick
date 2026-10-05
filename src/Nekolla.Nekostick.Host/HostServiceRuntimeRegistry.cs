@@ -52,6 +52,21 @@ internal sealed class HostServiceRuntimeRegistry :
         snapshot = null!;
         return false;
     }
+    internal bool HasCurrentEnabledEntry(
+        Guid serviceId,
+        long configurationVersion,
+        long serviceVersion)
+    {
+        lock (_gate)
+        {
+            return !_disposed &&
+                _entries.TryGetValue(serviceId, out var current) &&
+                current.Enabled &&
+                current.ServiceVersion == serviceVersion &&
+                current.Snapshot.ConfigurationVersion == configurationVersion;
+        }
+    }
+
 
     internal void Publish(
         HostServiceRuntimeSnapshot snapshot,
@@ -75,6 +90,48 @@ internal sealed class HostServiceRuntimeRegistry :
             }
 
             PublishLocked(snapshot, serviceVersion, enabled, restartCountIncrement);
+        }
+    }
+
+    internal void SetRetryAt(
+        Guid serviceId,
+        long configurationVersion,
+        long serviceVersion,
+        DateTimeOffset retryAt)
+    {
+        lock (_gate)
+        {
+            if (_disposed ||
+                !_entries.TryGetValue(serviceId, out var current) ||
+                !current.Enabled ||
+                current.ServiceVersion != serviceVersion ||
+                current.Snapshot.ConfigurationVersion != configurationVersion)
+            {
+                return;
+            }
+
+            PublishLocked(
+                current.Snapshot.WithRetryAt(retryAt),
+                current.ServiceVersion,
+                current.Enabled);
+        }
+    }
+
+    internal void ClearRetryAt(Guid serviceId, DateTimeOffset expectedRetryAt)
+    {
+        lock (_gate)
+        {
+            if (_disposed ||
+                !_entries.TryGetValue(serviceId, out var current) ||
+                current.Snapshot.RetryAt != expectedRetryAt)
+            {
+                return;
+            }
+
+            PublishLocked(
+                current.Snapshot.WithRetryAt(null),
+                current.ServiceVersion,
+                current.Enabled);
         }
     }
 

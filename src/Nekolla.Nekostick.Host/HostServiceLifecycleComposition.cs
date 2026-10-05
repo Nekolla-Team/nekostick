@@ -37,13 +37,17 @@ public sealed record HostServiceReadinessResult
         Guid serviceId,
         long configurationVersion,
         HostServiceReadinessStatus status,
-        ServiceRuntimeSnapshot? snapshot = null)
+        ServiceRuntimeSnapshot? snapshot = null,
+        bool databaseUnavailableProvenance = false)
     {
         ServiceId = serviceId;
         ConfigurationVersion = configurationVersion;
         Status = status;
         Snapshot = snapshot;
+        DatabaseUnavailableProvenance = databaseUnavailableProvenance;
     }
+
+    internal bool DatabaseUnavailableProvenance { get; }
 
     /// <summary>Gets the requested service identifier.</summary>
     public Guid ServiceId { get; }
@@ -89,6 +93,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private static readonly TimeSpan SupervisorStopBound = StopGracePeriod + TimeSpan.FromSeconds(6);
     private static readonly PortLeasePolicy LeasePolicy = PortLeasePolicy.Default;
     private static readonly HealthRetryPolicy HealthPolicy = HealthRetryPolicy.Default;
+    private static readonly RestartBackoffPolicy EagerStartupBackoff = RestartBackoffPolicy.Default;
 
     private readonly IProcessExecutor _processExecutor;
     private readonly IServiceHealthProbe _healthProbe;
@@ -301,6 +306,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         {
             return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Unavailable);
         }
+
         var service = snapshot.Services.FirstOrDefault(value => value.Id == serviceId);
         if (service is null || !service.Enabled || !IsServiceEnabledForSnapshot(snapshot, serviceId))
         {
@@ -309,7 +315,9 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         }
 
         var slot = _slots.GetOrAdd(serviceId, static _ => new ServiceSlot());
-        Task<HostServiceReadinessResult> startup;
+        Task<HostServiceReadinessResult>? startup = null;
+        HostServiceReadinessResult? immediateResult = null;
+        long operationId;
         lock (_lifecycleGate)
         {
             if (IsStopping)
@@ -317,45 +325,67 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
 
+            var startupGate = _runtimeState.ObserveNewServiceGate();
             lock (slot.Gate)
             {
                 if (slot.Active is { Ready: true } active &&
                     active.Configuration.Version == service.Version &&
                     active.Lease is { } lease && !lease.IsExpired(DateTimeOffset.UtcNow))
                 {
-                    return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Ready, active.Supervisor.Snapshot);
+                    immediateResult = new(
+                        serviceId,
+                        snapshot.Version,
+                        HostServiceReadinessStatus.Ready,
+                        active.Supervisor.Snapshot);
                 }
-                if (slot.Active is { Ready: false } waiting &&
+                else if (slot.Active is { Ready: false } waiting &&
                     waiting.Configuration.Version == service.Version &&
                     waiting.Supervisor.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
                 {
-                    return new(
+                    var waitingState = waiting.Supervisor.Snapshot;
+                    immediateResult = new(
                         serviceId,
                         snapshot.Version,
                         HostServiceReadinessStatus.Unavailable,
-                        waiting.Supervisor.Snapshot);
+                        waitingState,
+                        databaseUnavailableProvenance:
+                            waitingState.Reason == ServiceStateReasonCode.DatabaseUnavailable);
                 }
-
-                if (!_runtimeState.NewServicesAllowed)
+                else if (!startupGate.NewServicesAllowed)
                 {
-                    return new(serviceId, snapshot.Version, HostServiceReadinessStatus.DatabaseUnavailable);
-                }
-                if (slot.Startup is null)
-                {
-                    slot.StartupGeneration = service.Version;
-                    startup = StartOrSwitchAsync(slot, snapshot, service, dependencyChain);
+                    immediateResult = new(
+                        serviceId,
+                        snapshot.Version,
+                        HostServiceReadinessStatus.DatabaseUnavailable,
+                        databaseUnavailableProvenance: startupGate.DatabaseUnavailableGateObserved);
                 }
                 else
                 {
-                    startup = slot.Startup!;
+                    if (slot.Startup is null)
+                    {
+                        slot.StartupGeneration = service.Version;
+                        startup = StartOrSwitchAsync(slot, snapshot, service, dependencyChain);
+                    }
+                    else
+                    {
+                        startup = slot.Startup;
+                    }
                 }
+
+                operationId = slot.StartupOperationId;
             }
+        }
+
+        if (immediateResult is not null)
+        {
+            TrackEagerStartupResult(slot, snapshot, service, immediateResult, operationId);
+            return immediateResult;
         }
 
         HostServiceReadinessResult result;
         try
         {
-            result = await startup.WaitAsync(cancellationToken).ConfigureAwait(false);
+            result = await startup!.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -373,7 +403,11 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 active.Lease is { } lease && !lease.IsExpired(DateTimeOffset.UtcNow) &&
                 _runtimeState.Status.DatabaseAvailable)
             {
-                return new(serviceId, snapshot.Version, HostServiceReadinessStatus.Ready, active.Supervisor.Snapshot);
+                result = new(
+                    serviceId,
+                    snapshot.Version,
+                    HostServiceReadinessStatus.Ready,
+                    active.Supervisor.Snapshot);
             }
         }
 
@@ -382,6 +416,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             return await EnsureReadyAsync(snapshot, serviceId, dependencyChain, cancellationToken).ConfigureAwait(false);
         }
 
+        TrackEagerStartupResult(slot, snapshot, service, result, operationId);
         return result;
     }
 
@@ -400,7 +435,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 await ReconcileAsync(snapshot, stoppingToken).ConfigureAwait(false);
             }
 
-            await RetryWaitingServicesAsync(stoppingToken).ConfigureAwait(false);
+            await RetryWaitingServicesAsync(DateTimeOffset.UtcNow, stoppingToken).ConfigureAwait(false);
             await RenewLeasesAsync(stoppingToken).ConfigureAwait(false);
             await ObserveReadyHealthAsync(stoppingToken).ConfigureAwait(false);
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
@@ -411,16 +446,25 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         (ServiceSlot Slot, Task<HostServiceReadinessResult> Startup)[] startups;
+        (Guid ServiceId, DateTimeOffset RetryAt)[] retryDeadlines;
         lock (_lifecycleGate)
         {
             Interlocked.Exchange(ref _stopping, 1);
             _shutdownCts.Cancel();
 
             var pending = new List<(ServiceSlot Slot, Task<HostServiceReadinessResult> Startup)>();
-            foreach (var slot in _slots.Values)
+            var pendingRetryDeadlines = new List<(Guid ServiceId, DateTimeOffset RetryAt)>();
+            foreach (var slotPair in _slots)
             {
+                var slot = slotPair.Value;
                 lock (slot.Gate)
                 {
+                    if (slot.EagerStartupRetry is { } retry)
+                    {
+                        slot.EagerStartupRetry = null;
+                        pendingRetryDeadlines.Add((slotPair.Key, retry.RetryAt));
+                    }
+
                     if (slot.Startup is { } startup)
                     {
                         pending.Add((slot, startup));
@@ -429,6 +473,12 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             }
 
             startups = pending.ToArray();
+            retryDeadlines = pendingRetryDeadlines.ToArray();
+        }
+
+        foreach (var retry in retryDeadlines)
+        {
+            _runtimeRegistry.ClearRetryAt(retry.ServiceId, retry.RetryAt);
         }
 
         await QuiesceStartupsAsync(startups, _logger).ConfigureAwait(false);
@@ -623,76 +673,313 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         }
     }
 
-    private async Task RetryWaitingServicesAsync(CancellationToken cancellationToken)
+    private void TrackEagerStartupResult(
+        ServiceSlot slot,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        HostServiceReadinessResult result,
+        long operationId)
     {
-        foreach (var slot in _slots.Values)
+        if (service.StartMode != ContractStartMode.Eager || IsStopping)
+        {
+            return;
+        }
+
+        if (!result.DatabaseUnavailableProvenance)
+        {
+            ClearEagerStartupRetry(slot, service.Id, snapshot.Version, service.Version, operationId);
+            return;
+        }
+
+        var currentSnapshot = _snapshotHolder.Current;
+        var currentService = currentSnapshot?.Services.FirstOrDefault(value => value.Id == service.Id);
+        if (currentSnapshot is null ||
+            currentSnapshot.Version != snapshot.Version ||
+            currentService is null ||
+            currentService.Version != service.Version ||
+            !currentService.Enabled ||
+            currentService.StartMode != ContractStartMode.Eager ||
+            !IsServiceEnabledForSnapshot(currentSnapshot, service.Id))
+        {
+            ClearEagerStartupRetry(slot, service.Id, snapshot.Version, service.Version, operationId);
+            return;
+        }
+
+        if (_runtimeRegistry.TryGet(service.Id, out var runtimeSnapshot) &&
+            runtimeSnapshot.ConfigurationVersion == snapshot.Version &&
+            runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.None &&
+            runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.RuntimeUnavailable &&
+            runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.DependencyUnavailable)
+        {
+            ClearEagerStartupRetry(slot, service.Id, snapshot.Version, service.Version, operationId);
+            return;
+        }
+
+        if (!_runtimeRegistry.HasCurrentEnabledEntry(service.Id, snapshot.Version, service.Version))
+        {
+            SynchronizePublishedRuntimeConfiguration();
+        }
+
+        lock (slot.Gate)
+        {
+            if (IsStopping ||
+                slot.StartupOperationId != operationId ||
+                slot.Active is not null ||
+                slot.Starting is not null)
+            {
+                return;
+            }
+
+            var attempt = 1;
+            if (slot.EagerStartupRetry is { } previous)
+            {
+                if (previous.SnapshotVersion > snapshot.Version ||
+                    previous.SnapshotVersion == snapshot.Version && previous.ServiceVersion > service.Version ||
+                    previous.OperationId > operationId)
+                {
+                    return;
+                }
+
+                if (previous.SnapshotVersion == snapshot.Version &&
+                    previous.ServiceVersion == service.Version)
+                {
+                    if (previous.OperationId == operationId)
+                    {
+                        return;
+                    }
+
+                    attempt = previous.Attempt < int.MaxValue
+                        ? previous.Attempt + 1
+                        : int.MaxValue;
+                }
+            }
+
+            var retryAt = DateTimeOffset.UtcNow.Add(EagerStartupBackoff.GetBaseDelay(attempt));
+            var retry = new EagerStartupRetryState(
+                snapshot.Version,
+                service.Version,
+                attempt,
+                retryAt,
+                operationId);
+            slot.EagerStartupRetry = retry;
+            _runtimeRegistry.SetRetryAt(service.Id, snapshot.Version, service.Version, retry.RetryAt);
+        }
+    }
+
+    private void ClearEagerStartupRetry(
+        ServiceSlot slot,
+        Guid serviceId,
+        long snapshotVersion,
+        long serviceVersion,
+        long operationId)
+    {
+        lock (slot.Gate)
+        {
+            if (slot.StartupOperationId == operationId &&
+                slot.EagerStartupRetry is { } retry &&
+                retry.SnapshotVersion == snapshotVersion &&
+                retry.ServiceVersion == serviceVersion &&
+                retry.OperationId <= operationId)
+            {
+                slot.EagerStartupRetry = null;
+                _runtimeRegistry.ClearRetryAt(serviceId, retry.RetryAt);
+            }
+        }
+    }
+
+    private void ClearEagerStartupRetry(
+        ServiceSlot slot,
+        Guid serviceId,
+        EagerStartupRetryState retry)
+    {
+        lock (slot.Gate)
+        {
+            if (slot.EagerStartupRetry == retry)
+            {
+                slot.EagerStartupRetry = null;
+                _runtimeRegistry.ClearRetryAt(serviceId, retry.RetryAt);
+            }
+        }
+    }
+
+    private bool TryGetCurrentEagerRetryService(
+        HostConfigurationSnapshot? snapshot,
+        Guid serviceId,
+        EagerStartupRetryState retry,
+        out ServiceConfiguration service)
+    {
+        service = null!;
+        if (snapshot is null || snapshot.Version != retry.SnapshotVersion)
+        {
+            return false;
+        }
+
+        service = snapshot.Services.FirstOrDefault(value =>
+            value.Id == serviceId &&
+            value.Version == retry.ServiceVersion &&
+            value.Enabled &&
+            value.StartMode == ContractStartMode.Eager)!;
+        return service is not null && IsServiceEnabledForSnapshot(snapshot, serviceId);
+    }
+
+    private async Task RetryEagerStartupForSlotAsync(
+        ServiceSlot slot,
+        Guid serviceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (IsStopping || cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var snapshot = _snapshotHolder.Current;
+        ServiceConfiguration? service = null;
+        EagerStartupRetryState retry;
+        lock (_lifecycleGate)
+        {
+            lock (slot.Gate)
+            {
+                if (slot.EagerStartupRetry is not { } pending)
+                {
+                    return;
+                }
+
+                retry = pending;
+                if (!TryGetCurrentEagerRetryService(snapshot, serviceId, retry, out var currentService))
+                {
+                    if (slot.EagerStartupRetry == pending)
+                    {
+                        slot.EagerStartupRetry = null;
+                        _runtimeRegistry.ClearRetryAt(serviceId, pending.RetryAt);
+                    }
+
+                    return;
+                }
+
+                if (slot.Active is not null)
+                {
+                    slot.EagerStartupRetry = null;
+                    _runtimeRegistry.ClearRetryAt(serviceId, pending.RetryAt);
+                    return;
+                }
+
+                if (slot.Starting is not null ||
+                    slot.Startup is not null ||
+                    !_runtimeState.NewServicesAllowed ||
+                    retry.RetryAt > now)
+                {
+                    return;
+                }
+
+                service = currentService;
+            }
+        }
+
+        if (snapshot is null || service is null || IsStopping || cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var latestSnapshot = _snapshotHolder.Current;
+        if (!TryGetCurrentEagerRetryService(latestSnapshot, service.Id, retry, out var latestService))
+        {
+            ClearEagerStartupRetry(slot, serviceId, retry);
+            return;
+        }
+
+        try
+        {
+            var result = await EnsureReadyAsync(latestSnapshot!, latestService.Id, cancellationToken).ConfigureAwait(false);
+            if (result.Status == HostServiceReadinessStatus.Cancelled && cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            ClearEagerStartupRetry(slot, serviceId, retry);
+            HostLogMessages.FailureDetails(_logger, exception, nameof(RetryEagerStartupForSlotAsync));
+        }
+    }
+
+    internal async Task RetryWaitingServicesAsync(
+        DateTimeOffset eagerRetryNow,
+        CancellationToken cancellationToken)
+    {
+        foreach (var slotPair in _slots)
         {
             if (IsStopping || cancellationToken.IsCancellationRequested)
             {
                 return;
             }
 
-            ServiceGeneration? generation;
+            var slot = slotPair.Value;
             Task<HostServiceReadinessResult>? retryTask = null;
             HostConfigurationSnapshot? snapshot = _snapshotHolder.Current;
             lock (_lifecycleGate)
             {
                 lock (slot.Gate)
                 {
-                    generation = slot.Active;
+                    var generation = slot.Active;
                     var current = generation?.Supervisor.Snapshot;
-                    if (slot.Startup is not null ||
-                        generation is null ||
-                        generation.Ready ||
-                        current is null ||
-                        current.ObservedLifecycle != ServiceLifecycleState.Waiting ||
-                        current.Deadline is not { } deadline ||
-                        !deadline.IsReached(DateTimeOffset.UtcNow) ||
-                        snapshot is null ||
-                        !_runtimeState.NewServicesAllowed ||
-                        !snapshot.Services.Any(value =>
+                    if (slot.Startup is null &&
+                        generation is not null &&
+                        !generation.Ready &&
+                        current is { ObservedLifecycle: ServiceLifecycleState.Waiting } &&
+                        current.Deadline is { } deadline &&
+                        deadline.IsReached(DateTimeOffset.UtcNow) &&
+                        snapshot is not null &&
+                        _runtimeState.NewServicesAllowed &&
+                        snapshot.Services.Any(value =>
                             value.Id == generation.Configuration.Id &&
                             value.Version == generation.Configuration.Version &&
-                            value.Enabled) ||
-                        !IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id))
+                            value.Enabled) &&
+                        IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id))
                     {
-                        continue;
+                        slot.StartupGeneration = generation.Configuration.Version;
+                        retryTask = RetryWaitingGenerationAsync(slot, generation, snapshot, cancellationToken);
+                        slot.Startup = retryTask;
                     }
-
-                    slot.StartupGeneration = generation.Configuration.Version;
-                    retryTask = RetryWaitingGenerationAsync(slot, generation, snapshot, cancellationToken);
-                    slot.Startup = retryTask;
                 }
             }
 
-            if (retryTask is null)
+            if (retryTask is not null)
             {
-                continue;
-            }
-
-            try
-            {
-                await retryTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception exception)
-            {
-                HostLogMessages.FailureDetails(_logger, exception, nameof(RetryWaitingServicesAsync));
-            }
-            finally
-            {
-                lock (slot.Gate)
+                try
                 {
-                    if (ReferenceEquals(slot.Startup, retryTask))
-                    {
-                        slot.Startup = null;
-                    }
+                    await retryTask.ConfigureAwait(false);
                 }
-                SynchronizePublishedRuntimeConfiguration();
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception exception)
+                {
+                    HostLogMessages.FailureDetails(_logger, exception, nameof(RetryWaitingServicesAsync));
+                }
+                finally
+                {
+                    lock (slot.Gate)
+                    {
+                        if (ReferenceEquals(slot.Startup, retryTask))
+                        {
+                            slot.Startup = null;
+                        }
+                    }
+                    SynchronizePublishedRuntimeConfiguration();
+                }
             }
+
+            await RetryEagerStartupForSlotAsync(
+                slot,
+                slotPair.Key,
+                eagerRetryNow,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -762,7 +1049,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 generation.Configuration.Id,
                 snapshot.Version,
                 HostServiceReadinessStatus.DatabaseUnavailable,
-                started.Snapshot);
+                started.Snapshot,
+                databaseUnavailableProvenance: true);
         }
 
 
@@ -795,7 +1083,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                     generation.Configuration.Id,
                     snapshot.Version,
                     HostServiceReadinessStatus.DatabaseUnavailable,
-                    started.Snapshot);
+                    started.Snapshot,
+                    databaseUnavailableProvenance: true);
             }
 
             var failureCode = MapFailureCode(started.Reason);

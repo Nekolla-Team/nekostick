@@ -88,13 +88,28 @@ internal static class Program
         }
     }
 
-    private static async Task<int> ExecuteAsync(CliCommand command, CancellationToken cancellationToken)
+    private static Task<int> ExecuteAsync(CliCommand command, CancellationToken cancellationToken) =>
+        ExecuteAsyncCore(command, serviceConfiguration: null, cancellationToken: cancellationToken);
+
+    internal static Task<int> ExecuteWithServiceConfigurationAsync(
+        CliCommand command,
+        Action<IServiceCollection> serviceConfiguration,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(serviceConfiguration);
+        return ExecuteAsyncCore(command, serviceConfiguration, cancellationToken);
+    }
+
+    private static async Task<int> ExecuteAsyncCore(
+        CliCommand command,
+        Action<IServiceCollection>? serviceConfiguration,
+        CancellationToken cancellationToken)
     {
         var options = command.BootstrapOptions;
         var listenAddress = command.Kind == CliCommandKind.Run
             ? IPAddress.Parse(options.ListenAddress)
             : null;
-        await using var app = BuildApplication(command, listenAddress);
+        await using var app = BuildApplicationCore(command, listenAddress, serviceConfiguration);
         var logger = app.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger(HostLoggerCategory.Startup);
         var outputSink = app.Services.GetService<IProcessOutputSink>() as HostProcessOutputLogSink;
@@ -137,6 +152,9 @@ internal static class Program
 
         if (command.Kind == CliCommandKind.Run)
         {
+            var nodeRegistration = app.Services.GetRequiredService<HostNodeRegistrationService>();
+            await nodeRegistration.EnsureInitialRegistrationAsync(cancellationToken);
+
             var snapshotReader = app.Services.GetRequiredService<IHostConfigurationSnapshotReader>();
             var snapshotResult = await snapshotReader.ReadCompleteAsync(cancellationToken);
             if (!snapshotResult.IsSuccess || snapshotResult.Value is null)
@@ -232,7 +250,13 @@ internal static class Program
         return DiagnosticJson.Write(doctorSuccessReport, logger);
     }
 
-    private static WebApplication BuildApplication(CliCommand command, IPAddress? listenAddress)
+    private static WebApplication BuildApplication(CliCommand command, IPAddress? listenAddress) =>
+        BuildApplicationCore(command, listenAddress, serviceConfiguration: null);
+
+    private static WebApplication BuildApplicationCore(
+        CliCommand command,
+        IPAddress? listenAddress,
+        Action<IServiceCollection>? serviceConfiguration)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -364,6 +388,9 @@ internal static class Program
                 new PostgresHostNodeActivityLease(
                     serviceProvider.GetRequiredService<HostRuntimeOptions>(),
                     logger: serviceProvider.GetRequiredService<ILogger<PostgresHostNodeActivityLease>>()));
+            builder.Services.AddSingleton<HostNodeRegistrationService>();
+            builder.Services.AddHostedService(serviceProvider =>
+                serviceProvider.GetRequiredService<HostNodeRegistrationService>());
             builder.Services.AddHostedService<HostConfigurationRefreshService>();
             if (!command.RunOptions.DisableSupervisor)
             {
@@ -421,7 +448,6 @@ internal static class Program
                 builder.Services.AddHostedService(serviceProvider =>
                     serviceProvider.GetRequiredService<HostServiceLifecycleManager>());
                 builder.Services.AddHostedService<HostServiceEndpointPublicationService>();
-                builder.Services.AddHostedService<HostNodeRegistrationService>();
             }
 
             // ConfigureKestrel only builds endpoint options. The endpoint is not bound until
@@ -441,6 +467,7 @@ internal static class Program
             });
         }
 
+        serviceConfiguration?.Invoke(builder.Services);
         return builder.Build();
     }
 

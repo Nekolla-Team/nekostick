@@ -63,6 +63,393 @@ public sealed class HostServiceLifecycleManagerTests
     }
 
     [Fact]
+    public async Task OnDemandServiceIsNotAutomaticallyRetriedAfterDatabaseRecovery()
+    {
+        var service = CreateService(LazyServiceId, ServiceStartMode.Lazy, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+        runtime.MarkDatabaseUnavailable();
+
+        var readiness = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, readiness.Status);
+        Assert.Empty(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+
+        runtime.MarkSnapshotAccepted();
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData(PortLeaseOperationStatus.Rejected, false)]
+    [InlineData(PortLeaseOperationStatus.Conflict, false)]
+    [InlineData(PortLeaseOperationStatus.Applied, false)]
+    public async Task EagerStartupDoesNotAutomaticallyRetryNonDatabaseLeaseFailures(
+        PortLeaseOperationStatus status,
+        bool validLease)
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        leaseStore.AcquireResults.Enqueue((status, validLease));
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+
+        await manager.ReconcileAsync(snapshot, TestContext.Current.CancellationToken);
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(runtime.NewServicesAllowed);
+        Assert.Single(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task EagerDependencyAndConsumerRecoverAfterDatabaseUnavailable()
+    {
+        var dependency = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            ImmutableArray.Create(string.Concat("${PORT@", EagerServiceId, "}")),
+            ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        leaseStore.AcquireResults.Enqueue((PortLeaseOperationStatus.DatabaseUnavailable, true));
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+
+        var initial = await manager.EnsureReadyAsync(
+            snapshot,
+            consumer.Id,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, initial.Status);
+        Assert.Single(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        Assert.True(manager.TryGet(consumer.Id, out var blockedConsumer));
+        Assert.Equal(ExtensionServiceFailureCode.DependencyUnavailable, blockedConsumer.FailureCode);
+        Assert.Equal("A required startup dependency is unavailable.", blockedConsumer.FailureReason);
+
+        runtime.MarkSnapshotAccepted();
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, leaseStore.AcquireIntents.Count);
+        Assert.Equal(new[] { dependency.Id, consumer.Id }, executor.StartedServices);
+        Assert.True(manager.TryGet(dependency.Id, out var readyDependency));
+        Assert.Equal(ExtensionServiceLifecycleState.Running, readyDependency.LifecycleState);
+        Assert.True(manager.TryGet(consumer.Id, out var readyConsumer));
+        Assert.Equal(ExtensionServiceLifecycleState.Running, readyConsumer.LifecycleState);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task PermanentDependencyLeaseFailureDoesNotQueueEagerConsumerRetry()
+    {
+        var dependency = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            ImmutableArray.Create(string.Concat("${PORT@", EagerServiceId, "}")),
+            ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        leaseStore.AcquireResults.Enqueue((PortLeaseOperationStatus.Conflict, true));
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out _);
+
+        var initial = await manager.EnsureReadyAsync(
+            snapshot,
+            consumer.Id,
+            TestContext.Current.CancellationToken);
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, initial.Status);
+        Assert.Single(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        Assert.True(manager.TryGet(consumer.Id, out var blockedConsumer));
+        Assert.Equal(ExtensionServiceFailureCode.DependencyUnavailable, blockedConsumer.FailureCode);
+        Assert.Equal("A required startup dependency is unavailable.", blockedConsumer.FailureReason);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task EagerRetryDeadlineClearsAfterPermanentLeaseFailure()
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        leaseStore.AcquireResults.Enqueue((PortLeaseOperationStatus.DatabaseUnavailable, true));
+        leaseStore.AcquireResults.Enqueue((PortLeaseOperationStatus.Conflict, true));
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+
+        var initial = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, initial.Status);
+        Assert.True(manager.TryGet(service.Id, out var queuedRetry));
+        Assert.NotNull(queuedRetry.RetryAt);
+
+        runtime.MarkSnapshotAccepted();
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, leaseStore.AcquireIntents.Count);
+        Assert.True(manager.TryGet(service.Id, out var terminalFailure));
+        Assert.Equal(ExtensionServiceFailureCode.PortLeaseUnavailable, terminalFailure.FailureCode);
+        Assert.Null(terminalFailure.RetryAt);
+
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, leaseStore.AcquireIntents.Count);
+        Assert.Empty(executor.StartedServices);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ConfigurationOnlyGateClosureDoesNotQueueEagerRetry()
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+        runtime.MarkSnapshotRejected();
+
+        var initial = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+        Assert.True(manager.TryGet(service.Id, out var rejectedGate));
+        Assert.Null(rejectedGate.RetryAt);
+        runtime.MarkSnapshotAccepted();
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, initial.Status);
+        Assert.Empty(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("removed")]
+    [InlineData("disabled")]
+    [InlineData("service-version")]
+    [InlineData("global-version")]
+    [InlineData("start-mode")]
+    public async Task PendingEagerRetryIsDiscardedWhenAcceptedConfigurationChanges(string change)
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out var holder,
+            out var runtime);
+        runtime.MarkDatabaseUnavailable();
+
+        await manager.ReconcileAsync(snapshot, TestContext.Current.CancellationToken);
+        Assert.True(manager.TryGet(service.Id, out var queuedRetry));
+        Assert.NotNull(queuedRetry.RetryAt);
+        Assert.Empty(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+
+        runtime.MarkSnapshotAccepted();
+        var updated = change switch
+        {
+            "removed" => CreateSnapshot(2),
+            "disabled" => CreateSnapshot(
+                CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: false)),
+            "service-version" => CreateSnapshot(
+                2,
+                CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true, version: 2)),
+            "global-version" => CreateSnapshot(2, service),
+            "start-mode" => CreateSnapshot(
+                CreateService(EagerServiceId, ServiceStartMode.Lazy, enabled: true)),
+            _ => throw new ArgumentOutOfRangeException(nameof(change))
+        };
+        Assert.True(holder.TryReplace(updated));
+
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        if (change == "removed")
+        {
+            Assert.False(manager.TryGet(service.Id, out _));
+        }
+        else
+        {
+            Assert.True(manager.TryGet(service.Id, out var discardedRetry));
+            Assert.Null(discardedRetry.RetryAt);
+        }
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task OwnedEagerRetryIsDiscardedWhenExtensionIsDisabled()
+    {
+        const string owner = "pending-eager-owner";
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var loaded = CreateOwnedSnapshot(
+            1,
+            service,
+            owner,
+            Nekolla.Nekostick.Contracts.ExtensionLoadState.Loaded);
+        var disabled = CreateOwnedSnapshot(
+            1,
+            service,
+            owner,
+            Nekolla.Nekostick.Contracts.ExtensionLoadState.Disabled);
+        var serviceOwners = ImmutableDictionary<Guid, string?>.Empty.Add(service.Id, owner);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            loaded,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out var holder,
+            out var runtime,
+            serviceOwners);
+        runtime.MarkDatabaseUnavailable();
+
+        await manager.ReconcileAsync(loaded, TestContext.Current.CancellationToken);
+        Assert.True(manager.TryGet(service.Id, out var queuedRetry));
+        Assert.NotNull(queuedRetry.RetryAt);
+        Assert.Empty(leaseStore.AcquireIntents);
+
+        runtime.MarkSnapshotAccepted();
+        Assert.Equal(
+            SnapshotAdmission.Accepted,
+            holder.TryReplace(disabled, dispatchGeneration: null, serviceOwners));
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Empty(leaseStore.AcquireIntents);
+        Assert.Empty(executor.StartedServices);
+        Assert.True(manager.TryGet(service.Id, out var disabledRuntime));
+        Assert.Null(disabledRuntime.RetryAt);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ManualReadinessJoinsEagerRetryWithoutStartingDuplicateProcess()
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var executor = new RecordingExecutor(blockStart: true);
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+        runtime.MarkDatabaseUnavailable();
+        await manager.ReconcileAsync(snapshot, TestContext.Current.CancellationToken);
+
+        Assert.Empty(leaseStore.AcquireIntents);
+        runtime.MarkSnapshotAccepted();
+        var retry = manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+        await executor.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var manual = manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken).AsTask();
+        Assert.False(manual.IsCompleted);
+
+        executor.ReleaseStart();
+        await retry.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var readiness = await manual;
+
+        Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
+        Assert.Single(leaseStore.AcquireIntents);
+        Assert.Equal(new[] { EagerServiceId }, executor.StartedServices);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task LaunchTemplatesResolveDynamicLegacyAndOwnEnvironmentValues()
     {
         var service = CreateServiceWithLaunch(
@@ -667,11 +1054,32 @@ public sealed class HostServiceLifecycleManagerTests
         RecordingExecutor executor,
         IServiceHealthProbe probe,
         HostServiceEndpointSnapshotPublisher publisher,
-        RecordingLeaseStore leaseStore)
+        RecordingLeaseStore leaseStore) =>
+        CreateManager(snapshot, executor, probe, publisher, leaseStore, out _, out _);
+
+    private static HostServiceLifecycleManager CreateManager(
+        HostConfigurationSnapshot snapshot,
+        RecordingExecutor executor,
+        IServiceHealthProbe probe,
+        HostServiceEndpointSnapshotPublisher publisher,
+        RecordingLeaseStore leaseStore,
+        out HostConfigurationSnapshotHolder holder,
+        out HostRuntimeState runtime,
+        ImmutableDictionary<Guid, string?>? serviceOwners = null)
     {
-        var holder = new HostConfigurationSnapshotHolder();
-        Assert.True(holder.TryReplace(snapshot));
-        var runtime = CreateRuntimeState(snapshot, holder);
+        holder = new HostConfigurationSnapshotHolder();
+        if (serviceOwners is null)
+        {
+            Assert.True(holder.TryReplace(snapshot));
+        }
+        else
+        {
+            Assert.Equal(
+                SnapshotAdmission.Accepted,
+                holder.TryReplace(snapshot, dispatchGeneration: null, serviceOwners));
+        }
+
+        runtime = CreateRuntimeState(snapshot, holder);
         return new HostServiceLifecycleManager(
             executor,
             probe,
@@ -684,6 +1092,22 @@ public sealed class HostServiceLifecycleManagerTests
             new MicroserviceDrainTracker(),
             new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
     }
+    private static HostConfigurationSnapshot CreateSnapshot(params ServiceConfiguration[] services) =>
+        CreateSnapshot(1, services);
+
+    private static HostConfigurationSnapshot CreateSnapshot(
+        long version,
+        params ServiceConfiguration[] services) =>
+        new(
+            version,
+            new GlobalSettingsConfiguration(
+                version: version,
+                autoPortRangeStart: 35000,
+                autoPortRangeEnd: 35099),
+            default,
+            services.ToImmutableArray(),
+            default,
+            default);
 
     private static HostRuntimeState CreateRuntimeState(
         HostConfigurationSnapshot snapshot,
@@ -701,18 +1125,6 @@ public sealed class HostServiceLifecycleManagerTests
         runtime.MarkSnapshotAccepted();
         return runtime;
     }
-
-    private static HostConfigurationSnapshot CreateSnapshot(params ServiceConfiguration[] services) =>
-        new(
-            1,
-            new GlobalSettingsConfiguration(
-                version: 1,
-                autoPortRangeStart: 35000,
-                autoPortRangeEnd: 35099),
-            default,
-            services.ToImmutableArray(),
-            default,
-            default);
     private static HostConfigurationSnapshot CreateOwnedSnapshot(
         long version,
         ServiceConfiguration service,
@@ -739,7 +1151,8 @@ public sealed class HostServiceLifecycleManagerTests
     private static ServiceConfiguration CreateService(
         Guid id,
         ServiceStartMode startMode,
-        bool enabled) =>
+        bool enabled,
+        long version = 1) =>
         new(
             id,
             enabled,
@@ -755,7 +1168,7 @@ public sealed class HostServiceLifecycleManagerTests
                 TimeSpan.FromSeconds(1)),
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
-            1);
+            version);
     private static ServiceConfiguration CreateServiceWithLaunch(
         Guid id,
         ServiceStartMode startMode,
@@ -868,6 +1281,8 @@ public sealed class HostServiceLifecycleManagerTests
         public PortLease? ReturnedAcquireLease { get; set; }
         public List<PortLease> HeldLeases { get; } = [];
         public List<PortLeaseIntent> ReleaseIntents { get; } = [];
+        public Queue<(PortLeaseOperationStatus Status, bool ValidLease)> AcquireResults { get; } = new();
+        public List<PortLeaseIntent> AcquireIntents { get; } = [];
 
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
@@ -875,6 +1290,15 @@ public sealed class HostServiceLifecycleManagerTests
         {
             if (intent.Kind == PortLeaseIntentKind.Acquire)
             {
+                AcquireIntents.Add(intent);
+                var outcome = AcquireResults.Count == 0
+                    ? (Status: PortLeaseOperationStatus.Applied, ValidLease: true)
+                    : AcquireResults.Dequeue();
+                if (outcome.Status != PortLeaseOperationStatus.Applied)
+                {
+                    return ValueTask.FromResult(new PortLeaseOperationResult(outcome.Status));
+                }
+
                 var request = intent.Request!;
                 var lease = ReturnedAcquireLease;
                 if (lease is null)
@@ -890,6 +1314,17 @@ public sealed class HostServiceLifecycleManagerTests
                         now,
                         now.Add(AcquireLifetime),
                         1);
+                }
+
+                if (!outcome.ValidLease)
+                {
+                    lease = new PortLease(
+                        lease.NodeId,
+                        LazyServiceId,
+                        lease.Port,
+                        lease.AcquiredAt,
+                        lease.ExpiresAt,
+                        lease.Version);
                 }
 
                 HeldLeases.Add(lease);

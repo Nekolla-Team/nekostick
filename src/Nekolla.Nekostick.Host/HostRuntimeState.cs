@@ -67,6 +67,7 @@ public sealed class HostRuntimeState
     private readonly HostConfigurationSnapshotHolder _snapshotHolder;
     private readonly HostNodeOptions _nodeOptions;
     private readonly bool _readOnly;
+    private readonly object _stateGate = new();
     private int _databaseAvailable;
     private int _databaseUnavailable;
     private int _configurationValid;
@@ -143,14 +144,32 @@ public sealed class HostRuntimeState
 
     /// <summary>Gets whether new services are currently allowed.</summary>
     public bool NewServicesAllowed => Status.NewServicesAllowed;
+    internal (bool NewServicesAllowed, bool DatabaseUnavailableGateObserved) ObserveNewServiceGate()
+    {
+        var snapshotAvailable = _snapshotHolder.Current is not null;
+        lock (_stateGate)
+        {
+            var databaseAvailable = Volatile.Read(ref _databaseAvailable) == 1;
+            var configurationValid = Volatile.Read(ref _configurationValid) == 1;
+            var newServicesAllowed = snapshotAvailable && databaseAvailable && configurationValid;
+            var databaseUnavailableGateObserved = !newServicesAllowed &&
+                snapshotAvailable &&
+                !configurationValid &&
+                LastSnapshotState == ExtensionHostSnapshotState.Accepted;
+            return (newServicesAllowed, databaseUnavailableGateObserved);
+        }
+    }
 
     internal void MarkSnapshotAccepted()
     {
-        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
-        Volatile.Write(ref _databaseUnavailable, 0);
-        Volatile.Write(ref _databaseAvailable, 1);
-        Volatile.Write(ref _configurationValid, 1);
-        RecordSnapshotState(ExtensionHostSnapshotState.Accepted);
+        lock (_stateGate)
+        {
+            Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
+            Volatile.Write(ref _databaseUnavailable, 0);
+            Volatile.Write(ref _databaseAvailable, 1);
+            Volatile.Write(ref _configurationValid, 1);
+            RecordSnapshotState(ExtensionHostSnapshotState.Accepted);
+        }
     }
 
     internal void BeginStagedConfigurationWrites()
@@ -167,23 +186,32 @@ public sealed class HostRuntimeState
 
     internal void MarkSnapshotRejected()
     {
-        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
-        Volatile.Write(ref _configurationValid, 0);
-        RecordSnapshotState(ExtensionHostSnapshotState.Rejected);
+        lock (_stateGate)
+        {
+            Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
+            Volatile.Write(ref _configurationValid, 0);
+            RecordSnapshotState(ExtensionHostSnapshotState.Rejected);
+        }
     }
 
     internal void MarkDatabaseAvailable()
     {
-        Volatile.Write(ref _databaseUnavailable, 0);
-        Volatile.Write(ref _databaseAvailable, 1);
+        lock (_stateGate)
+        {
+            Volatile.Write(ref _databaseUnavailable, 0);
+            Volatile.Write(ref _databaseAvailable, 1);
+        }
     }
 
     internal void MarkDatabaseUnavailable()
     {
-        Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
-        Volatile.Write(ref _databaseUnavailable, 1);
-        Volatile.Write(ref _databaseAvailable, 0);
-        Volatile.Write(ref _configurationValid, 0);
+        lock (_stateGate)
+        {
+            Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
+            Volatile.Write(ref _databaseUnavailable, 1);
+            Volatile.Write(ref _databaseAvailable, 0);
+            Volatile.Write(ref _configurationValid, 0);
+        }
     }
     private void RecordSnapshotState(ExtensionHostSnapshotState state) =>
         Volatile.Write(

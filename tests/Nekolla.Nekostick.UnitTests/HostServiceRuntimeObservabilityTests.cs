@@ -25,6 +25,9 @@ public sealed class HostServiceRuntimeObservabilityTests
     private static readonly Guid CleanExitServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000082");
     private static readonly Guid RestartBailoutServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000084");
 
+    private static readonly Guid EagerRetryServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000085");
+    private static readonly Guid ShutdownRetryServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000086");
+
     private static readonly Guid CandidateProgressServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000083");
     private static readonly bool[] ExpectedInitialFlags = [true, true, false, false];
 
@@ -408,6 +411,121 @@ public sealed class HostServiceRuntimeObservabilityTests
     }
 
     [Fact]
+    public async Task EagerRetryDeadlinesArePublishedRescheduledAndClearedForWatchers()
+    {
+        var retryService = CreateService(
+            EagerRetryServiceId,
+            version: 1,
+            enabled: true,
+            healthCheckType: ServiceHealthCheckType.Process,
+            startMode: ServiceStartMode.Eager);
+        var shutdownService = CreateService(
+            ShutdownRetryServiceId,
+            version: 1,
+            enabled: true,
+            healthCheckType: ServiceHealthCheckType.Process,
+            startMode: ServiceStartMode.Eager);
+        var configuration = CreateSnapshot(1, retryService, shutdownService);
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(configuration));
+        var runtime = new HostRuntimeState(
+            holder,
+            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false));
+        runtime.MarkSnapshotAccepted();
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        leaseStore.AcquireResults.Enqueue(PortLeaseOperationStatus.DatabaseUnavailable);
+        leaseStore.AcquireResults.Enqueue(PortLeaseOperationStatus.DatabaseUnavailable);
+        await using var registry = new HostServiceRuntimeRegistry();
+        var manager = CreateManager(
+            holder,
+            executor,
+            new HealthyProbe(),
+            leaseStore,
+            runtime,
+            registry);
+        var changes = Channel.CreateUnbounded<HostServiceRuntimeStateChange>();
+        using var subscription = registry.Subscribe(change => changes.Writer.TryWrite(change));
+        var stopped = false;
+
+        try
+        {
+            var initial = await manager.EnsureReadyAsync(
+                configuration,
+                retryService.Id,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, initial.Status);
+            Assert.True(manager.TryGet(retryService.Id, out var queued));
+            var firstRetryAt = queued.RetryAt ?? throw new InvalidOperationException("The eager retry deadline was not published.");
+            var queuedUpdate = await WaitForRuntimeSnapshotChangeAsync(
+                changes.Reader,
+                retryService.Id,
+                snapshot => snapshot.RetryAt == firstRetryAt,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(firstRetryAt, queuedUpdate.RetryAt);
+
+            runtime.MarkSnapshotAccepted();
+            await manager.RetryWaitingServicesAsync(
+                DateTimeOffset.MaxValue,
+                TestContext.Current.CancellationToken);
+            Assert.True(manager.TryGet(retryService.Id, out var rescheduled));
+            var secondRetryAt = rescheduled.RetryAt ?? throw new InvalidOperationException("The eager retry deadline was not rescheduled.");
+            Assert.True(secondRetryAt > firstRetryAt);
+            var rescheduledUpdate = await WaitForRuntimeSnapshotChangeAsync(
+                changes.Reader,
+                retryService.Id,
+                snapshot => snapshot.RetryAt == secondRetryAt,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(secondRetryAt, rescheduledUpdate.RetryAt);
+
+            runtime.MarkSnapshotAccepted();
+            await manager.RetryWaitingServicesAsync(
+                DateTimeOffset.MaxValue,
+                TestContext.Current.CancellationToken);
+            var startedUpdate = await WaitForRuntimeSnapshotChangeAsync(
+                changes.Reader,
+                retryService.Id,
+                snapshot => snapshot.LifecycleState == ExtensionServiceLifecycleState.Running &&
+                    snapshot.RetryAt is null,
+                TestContext.Current.CancellationToken);
+            Assert.Null(startedUpdate.RetryAt);
+
+            runtime.MarkDatabaseUnavailable();
+            var shutdownRetry = await manager.EnsureReadyAsync(
+                configuration,
+                shutdownService.Id,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, shutdownRetry.Status);
+            Assert.True(manager.TryGet(shutdownService.Id, out var shutdownQueued));
+            var shutdownRetryAt = shutdownQueued.RetryAt ?? throw new InvalidOperationException("The shutdown retry deadline was not published.");
+            var shutdownQueuedUpdate = await WaitForRuntimeSnapshotChangeAsync(
+                changes.Reader,
+                shutdownService.Id,
+                snapshot => snapshot.RetryAt == shutdownRetryAt,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(shutdownRetryAt, shutdownQueuedUpdate.RetryAt);
+
+            await manager.StopAsync(CancellationToken.None);
+            stopped = true;
+            Assert.True(registry.TryGet(shutdownService.Id, out var shutdownCleared));
+            Assert.Null(shutdownCleared.RetryAt);
+            var shutdownClearedUpdate = await WaitForRuntimeSnapshotChangeAsync(
+                changes.Reader,
+                shutdownService.Id,
+                snapshot => snapshot.RetryAt is null,
+                TestContext.Current.CancellationToken);
+            Assert.Null(shutdownClearedUpdate.RetryAt);
+        }
+        finally
+        {
+            if (!stopped)
+            {
+                await manager.StopAsync(CancellationToken.None);
+            }
+        }
+    }
+
+    [Fact]
     public async Task RegistryReplaysInitialSnapshotsThenEmitsOrderedUpdatesAndRemoval()
     {
         await using var registry = new HostServiceRuntimeRegistry();
@@ -688,12 +806,33 @@ public sealed class HostServiceRuntimeObservabilityTests
         Assert.False(HasRuntimePersistenceDependency(typeof(HostServiceLifecycleManager)));
     }
 
+    private static async Task<HostServiceRuntimeSnapshot> WaitForRuntimeSnapshotChangeAsync(
+        ChannelReader<HostServiceRuntimeStateChange> changes,
+        Guid serviceId,
+        Func<HostServiceRuntimeSnapshot, bool> predicate,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        while (true)
+        {
+            var change = await changes.ReadAsync(timeout.Token);
+            if (change.ServiceId == serviceId &&
+                change.Snapshot is { } snapshot &&
+                predicate(snapshot))
+            {
+                return snapshot;
+            }
+        }
+    }
+
     private static HostServiceLifecycleManager CreateManager(
         HostConfigurationSnapshotHolder holder,
         RecordingExecutor executor,
         IServiceHealthProbe probe,
         IPortLeaseStore? leaseStore = null,
-        HostRuntimeState? runtimeState = null)
+        HostRuntimeState? runtimeState = null,
+        HostServiceRuntimeRegistry? runtimeRegistry = null)
     {
         var runtime = runtimeState ?? new HostRuntimeState(
             holder,
@@ -712,7 +851,9 @@ public sealed class HostServiceRuntimeObservabilityTests
             new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
             NullLogger<HostServiceLifecycleManager>.Instance,
             new MicroserviceDrainTracker(),
-            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false),
+            runtimeManager: null,
+            runtimeRegistry: runtimeRegistry);
     }
 
     private static ServiceConfiguration CreateService(
@@ -720,7 +861,8 @@ public sealed class HostServiceRuntimeObservabilityTests
         long version,
         bool enabled,
         ServiceHealthCheckType healthCheckType,
-        ContractRestartPolicy restartPolicy = ContractRestartPolicy.Never) =>
+        ContractRestartPolicy restartPolicy = ContractRestartPolicy.Never,
+        ServiceStartMode startMode = ServiceStartMode.Lazy) =>
         new(
             serviceId,
             enabled,
@@ -728,7 +870,7 @@ public sealed class HostServiceRuntimeObservabilityTests
             ImmutableArray<string>.Empty,
             "/tmp",
             ImmutableDictionary<string, string>.Empty,
-            ServiceStartMode.Lazy,
+            startMode,
             restartPolicy,
             new ServiceHealthCheckConfiguration(
                 healthCheckType,
@@ -924,6 +1066,9 @@ public sealed class HostServiceRuntimeObservabilityTests
     {
         private long _version;
 
+        internal Queue<PortLeaseOperationStatus> AcquireResults { get; } = new();
+        internal List<PortLeaseIntent> AcquireIntents { get; } = [];
+
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
             CancellationToken cancellationToken = default)
@@ -931,6 +1076,15 @@ public sealed class HostServiceRuntimeObservabilityTests
             if (intent.Kind != PortLeaseIntentKind.Acquire)
             {
                 return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.NotFound));
+            }
+
+            AcquireIntents.Add(intent);
+            var status = AcquireResults.Count == 0
+                ? PortLeaseOperationStatus.Applied
+                : AcquireResults.Dequeue();
+            if (status != PortLeaseOperationStatus.Applied)
+            {
+                return ValueTask.FromResult(new PortLeaseOperationResult(status));
             }
 
             var request = intent.Request!;

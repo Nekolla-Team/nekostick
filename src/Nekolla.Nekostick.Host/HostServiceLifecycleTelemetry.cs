@@ -170,6 +170,25 @@ public sealed record HostServiceRuntimeSnapshot
             RestartCount,
             StateEnteredAt,
             RetryAt);
+    internal HostServiceRuntimeSnapshot WithRetryAt(DateTimeOffset? retryAt) => new(
+        ServiceId,
+        ConfigurationVersion,
+        ProcessId,
+        ProcessInstanceId,
+        StartedAt,
+        LastUpdatedAt,
+        LastHealthAt,
+        LifecycleState,
+        Health,
+        OwnerExtensionId,
+        FailureStage,
+        FailureCode,
+        FailureReason,
+        LastProbe,
+        ProcessExitCode,
+        RestartCount,
+        StateEnteredAt,
+        retryAt);
 
     internal HostServiceRuntimeSnapshot WithRestartCount(int restartCount) => new(
         ServiceId,

@@ -980,6 +980,13 @@ public sealed partial class HostServiceLifecycleManager
         }
     }
 
+    private readonly record struct EagerStartupRetryState(
+        long SnapshotVersion,
+        long ServiceVersion,
+        int Attempt,
+        DateTimeOffset RetryAt,
+        long OperationId);
+
     private sealed class ServiceSlot
     {
         internal readonly object Gate = new();
@@ -988,6 +995,9 @@ public sealed partial class HostServiceLifecycleManager
         internal Task<HostServiceReadinessResult>? Startup;
         internal long StartupGeneration;
         internal int StartAttemptNumber;
+        internal long StartupOperationId;
+        internal EagerStartupRetryState? EagerStartupRetry;
+
 
         internal int ReserveStartAttemptNumber()
         {
