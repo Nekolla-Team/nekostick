@@ -94,6 +94,83 @@ public sealed class HostServiceLifecycleRestartTests
     }
 
     [Fact]
+    public async Task CrashRestartStartsFreshStartupHealthPhase()
+    {
+        var executor = new RecordingExecutor();
+        var service = CreateService(version: 1, ContractRestartPolicy.Always);
+        var snapshot = CreateSnapshot(version: 1, service);
+        var probe = new CandidateWarmupProbe();
+        var harness = CreateHarness(snapshot, executor, probe, new TimeoutDrainTracker());
+
+        var initial = await harness.Manager.EnsureReadyAsync(
+            snapshot,
+            ServiceId,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Ready, initial.Status);
+        var originalPort = harness.Publisher.Current[ServiceId].Port;
+        Assert.NotNull(executor.FirstInstanceId);
+
+        var restarting = harness.Manager.NotifyProcessExitAsync(
+            ServiceId,
+            executor.FirstInstanceId!.Value,
+            successfulExit: false);
+        await probe.HealthyProbeEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(20),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(6, probe.CallCount);
+        Assert.Equal(2, executor.StartCount);
+        Assert.Equal(0, executor.StopCount);
+
+        probe.ReleaseHealthy();
+        await restarting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Equal(originalPort, harness.Publisher.Current[ServiceId].Port);
+        await harness.Manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task CandidateWarmupKeepsOldHealthyGenerationAfterFourMisses()
+    {
+        var executor = new RecordingExecutor();
+        var serviceV1 = CreateService(version: 1, ContractRestartPolicy.Never);
+        var snapshotV1 = CreateSnapshot(version: 1, serviceV1);
+        var probe = new CandidateWarmupProbe();
+        var harness = CreateHarness(snapshotV1, executor, probe, new TimeoutDrainTracker());
+
+        var initial = await harness.Manager.EnsureReadyAsync(
+            snapshotV1,
+            ServiceId,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Ready, initial.Status);
+        var originalPort = harness.Publisher.Current[ServiceId].Port;
+
+        var serviceV2 = CreateService(version: 2, ContractRestartPolicy.Never);
+        var snapshotV2 = CreateSnapshot(version: 2, serviceV2);
+        var switching = harness.Manager.EnsureReadyAsync(
+            snapshotV2,
+            ServiceId,
+            TestContext.Current.CancellationToken).AsTask();
+        await probe.HealthyProbeEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(15),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(6, probe.CallCount);
+        Assert.Equal(2, executor.StartCount);
+        Assert.Equal(0, executor.StopCount);
+        Assert.Equal(originalPort, harness.Publisher.Current[ServiceId].Port);
+
+        probe.ReleaseHealthy();
+        var switched = await switching.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Ready, switched.Status);
+        Assert.NotEqual(originalPort, harness.Publisher.Current[ServiceId].Port);
+        Assert.Equal(1, executor.StopCount);
+        await harness.Manager.StopAsync(CancellationToken.None);
+    }
+
+
+    [Fact]
     public async Task NeverPolicyCrashReleasesHeldLeaseWithoutStopping()
     {
         var tracker = new BlockingDrainTracker();
@@ -439,7 +516,7 @@ public sealed class HostServiceLifecycleRestartTests
     private static Harness CreateHarness(
         HostConfigurationSnapshot snapshot,
         RecordingExecutor executor,
-        SequenceProbe probe,
+        IServiceHealthProbe probe,
         IMicroserviceDrainTracker tracker,
         SequencedLeaseStore? leaseStore = null)
     {
@@ -624,6 +701,53 @@ public sealed class HostServiceLifecycleRestartTests
                 TimeSpan.Zero,
                 1));
         }
+    }
+
+    private sealed class CandidateWarmupProbe : IServiceHealthProbe
+    {
+        private readonly TaskCompletionSource<bool> _releaseHealthy =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _callCount;
+
+        public TaskCompletionSource<bool> HealthyProbeEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public async ValueTask<HealthObservationResult> ProbeAsync(
+            ServiceHealthProbeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var call = Interlocked.Increment(ref _callCount);
+            HealthObservationStatus status;
+            if (call == 1)
+            {
+                status = HealthObservationStatus.Healthy;
+            }
+            else if (call <= 5)
+            {
+                status = HealthObservationStatus.Unavailable;
+            }
+            else if (call == 6)
+            {
+                HealthyProbeEntered.TrySetResult(true);
+                await _releaseHealthy.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                status = HealthObservationStatus.Healthy;
+            }
+            else
+            {
+                status = HealthObservationStatus.Healthy;
+            }
+
+            return new HealthObservationResult(
+                request.ServiceId,
+                status,
+                DateTimeOffset.UtcNow,
+                TimeSpan.Zero,
+                call);
+        }
+
+        public void ReleaseHealthy() => _releaseHealthy.TrySetResult(true);
     }
 
     private sealed class SequencedLeaseStore : IPortLeaseStore

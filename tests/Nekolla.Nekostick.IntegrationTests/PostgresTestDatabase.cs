@@ -28,12 +28,17 @@ internal sealed class PostgresTestDatabase : IAsyncDisposable
     ];
 
     private readonly string connectionString;
+    private readonly string isolatedConnectionString;
     private int disposed;
 
     private PostgresTestDatabase(string connectionString, string schema)
     {
         this.connectionString = connectionString;
         Schema = schema;
+        isolatedConnectionString = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            SearchPath = schema
+        }.ConnectionString;
     }
 
     /// <summary>Gets the unique sanitized schema name owned by this test.</summary>
@@ -62,10 +67,6 @@ internal sealed class PostgresTestDatabase : IAsyncDisposable
     internal NekostickDbContext CreateContext()
     {
         var optionsBuilder = new DbContextOptionsBuilder<NekostickDbContext>();
-        var isolatedConnectionString = new NpgsqlConnectionStringBuilder(connectionString)
-        {
-            SearchPath = Schema
-        }.ConnectionString;
         optionsBuilder.UseNpgsql(
             isolatedConnectionString,
             npgsql => npgsql.MigrationsHistoryTable(
@@ -238,7 +239,15 @@ internal sealed class PostgresTestDatabase : IAsyncDisposable
             return;
         }
 
-        await DropSchemaAsync();
+        try
+        {
+            await DropSchemaAsync();
+        }
+        finally
+        {
+            using var poolConnection = new NpgsqlConnection(isolatedConnectionString);
+            NpgsqlConnection.ClearPool(poolConnection);
+        }
     }
 
     private static string CreateSchemaName() => $"nekostick_it_{Guid.NewGuid():N}";

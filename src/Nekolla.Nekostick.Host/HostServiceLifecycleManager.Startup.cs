@@ -684,7 +684,7 @@ public sealed partial class HostServiceLifecycleManager
                             supervisor,
                             acquired,
                             snapshot.Version,
-                            HealthRetryState.Start(service.Id, now, HealthPolicy.StartupTimeout),
+                            HealthRetryState.StartStartup(service.Id, now, HealthPolicy.StartupTimeout),
                             ownerExtensionId,
                             resolvedEnvironment,
                             ready: false);
@@ -905,9 +905,11 @@ public sealed partial class HostServiceLifecycleManager
 
                 var failureCode = processExited
                     ? ExtensionServiceFailureCode.ProcessExited
-                    : failedState.LastHealthObservation is { } observation
-                        ? MapProbeFailure(observation.Status, failedState.Reason)
-                        : ExtensionServiceFailureCode.HealthTimeout;
+                    : candidate.LastHealthProbeReason == ServiceStateReasonCode.PortLeaseUnavailable
+                        ? ExtensionServiceFailureCode.PortLeaseUnavailable
+                        : failedState.LastHealthObservation is { } observation
+                            ? MapProbeFailure(observation.Status, failedState.Reason)
+                            : ExtensionServiceFailureCode.HealthTimeout;
                 if (failureCode == ExtensionServiceFailureCode.None)
                 {
                     failureCode = ExtensionServiceFailureCode.HealthTimeout;
@@ -942,9 +944,11 @@ public sealed partial class HostServiceLifecycleManager
 
                 failureCode = processExited
                     ? ExtensionServiceFailureCode.ProcessExited
-                    : failedState.LastHealthObservation is { } stoppedObservation
-                        ? MapProbeFailure(stoppedObservation.Status, failedState.Reason)
-                        : ExtensionServiceFailureCode.HealthTimeout;
+                    : candidate.LastHealthProbeReason == ServiceStateReasonCode.PortLeaseUnavailable
+                        ? ExtensionServiceFailureCode.PortLeaseUnavailable
+                        : failedState.LastHealthObservation is { } stoppedObservation
+                            ? MapProbeFailure(stoppedObservation.Status, failedState.Reason)
+                            : ExtensionServiceFailureCode.HealthTimeout;
                 if (failureCode == ExtensionServiceFailureCode.None)
                 {
                     failureCode = ExtensionServiceFailureCode.HealthTimeout;
@@ -998,14 +1002,21 @@ public sealed partial class HostServiceLifecycleManager
         CancellationToken cancellationToken)
     {
         var supervisor = generation.Supervisor;
-        var retry = HealthRetryState.Start(
+        var startupStartedAt = DateTimeOffset.UtcNow;
+        var retry = HealthRetryState.StartStartup(
             generation.Configuration.Id,
-            DateTimeOffset.UtcNow,
+            startupStartedAt,
             HealthPolicy.StartupTimeout);
+        generation.HealthRetryState = retry;
+        if (IsStopping ||
+            !await supervisor.BeginStartupHealthAsync(retry, startupStartedAt, cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
         while (!IsStopping)
         {
             var observationAt = DateTimeOffset.UtcNow;
-            var health = await supervisor.ObserveHealthAsync(retry, observationAt, cancellationToken).ConfigureAwait(false);
+            var health = await supervisor.ObserveStartupHealthAsync(retry, observationAt, cancellationToken).ConfigureAwait(false);
             var decision = health.Health;
             var observedState = supervisor.Snapshot;
             generation.LastHealthProbeReason = observedState.Reason;
@@ -1017,19 +1028,26 @@ public sealed partial class HostServiceLifecycleManager
                 ExtensionServiceLifecycleState.Starting,
                 observedState.Reason);
 
-            if (decision?.Action == HealthRetryAction.Healthy &&
-                supervisor.Lease is { } readyLease &&
-                !readyLease.IsExpired(observationAt))
+            if (decision?.Action == HealthRetryAction.Healthy)
             {
-                return (readyLease, decision.NextState);
-            }
+                if (supervisor.Lease is { } readyLease &&
+                    !readyLease.IsExpired(observationAt))
+                {
+                    return (readyLease, decision.NextState);
+                }
 
-            if (decision is null || decision.Action is HealthRetryAction.Cancelled or HealthRetryAction.Failed or HealthRetryAction.TimedOut)
-            {
+                generation.LastHealthProbeReason = ServiceStateReasonCode.PortLeaseUnavailable;
                 return null;
             }
+            else
+            {
+                if (decision is null || decision.Action is HealthRetryAction.Cancelled or HealthRetryAction.Failed or HealthRetryAction.TimedOut)
+                {
+                    return null;
+                }
 
-            retry = decision.NextState;
+                retry = decision.NextState;
+            }
             if (decision.NextAttemptAt is { } next)
             {
                 var delay = next - DateTimeOffset.UtcNow;

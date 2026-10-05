@@ -21,6 +21,13 @@ public enum HealthRetryAction
     Cancelled
 }
 
+internal enum HealthRetryPhase
+{
+    Generic,
+    Startup,
+    Steady
+}
+
 /// <summary>Contains immutable health retry state.</summary>
 public readonly record struct HealthRetryState
 {
@@ -30,6 +37,16 @@ public readonly record struct HealthRetryState
     /// <param name="consecutiveFailures">The failure count in the current sequence.</param>
     /// <param name="deadline">The UTC retry deadline.</param>
     public HealthRetryState(Guid serviceId, int attempt, int consecutiveFailures, DateTimeOffset deadline)
+        : this(serviceId, attempt, consecutiveFailures, deadline, HealthRetryPhase.Generic)
+    {
+    }
+
+    internal HealthRetryState(
+        Guid serviceId,
+        int attempt,
+        int consecutiveFailures,
+        DateTimeOffset deadline,
+        HealthRetryPhase phase)
     {
         if (serviceId == Guid.Empty)
         {
@@ -44,6 +61,7 @@ public readonly record struct HealthRetryState
         Attempt = attempt;
         ConsecutiveFailures = consecutiveFailures;
         Deadline = deadline.ToUniversalTime();
+        Phase = phase;
     }
 
     /// <summary>Gets the service identifier.</summary>
@@ -57,6 +75,13 @@ public readonly record struct HealthRetryState
 
     /// <summary>Gets the UTC retry deadline.</summary>
     public DateTimeOffset Deadline { get; }
+    internal HealthRetryPhase Phase { get; }
+
+    internal HealthRetryState WithFailures(int consecutiveFailures) =>
+        new(ServiceId, Attempt, consecutiveFailures, Deadline, Phase);
+
+    internal HealthRetryState ForNextAttempt(int attempt, int consecutiveFailures) =>
+        new(ServiceId, attempt, consecutiveFailures, Deadline, Phase);
 
     /// <summary>Creates initial retry state from a startup instant and timeout.</summary>
     /// <param name="serviceId">The service identifier.</param>
@@ -69,6 +94,24 @@ public readonly record struct HealthRetryState
 
         return new(serviceId, 1, 0, startedAt.ToUniversalTime().Add(timeout));
     }
+
+    internal static HealthRetryState StartStartup(Guid serviceId, DateTimeOffset startedAt, TimeSpan timeout)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+
+        return new(
+            serviceId,
+            1,
+            0,
+            startedAt.ToUniversalTime().Add(timeout),
+            HealthRetryPhase.Startup);
+    }
+
+    internal static HealthRetryState StartSteady(Guid serviceId, int attempt) =>
+        new(serviceId, attempt, 0, default, HealthRetryPhase.Steady);
+
+    internal HealthRetryState ToSteady() => StartSteady(ServiceId, Attempt);
+
 }
 
 /// <summary>Contains the immutable result of a health retry decision.</summary>
@@ -182,14 +225,63 @@ public sealed record HealthRetryPolicy
 
         if (observation.Status == HealthObservationStatus.Healthy)
         {
+            var nextState = state.Phase is HealthRetryPhase.Startup or HealthRetryPhase.Steady
+                ? state.ToSteady()
+                : state;
             return new HealthRetryDecision(
                 HealthRetryAction.Healthy,
                 null,
-                state,
+                nextState,
                 ServiceStateReasonCode.Healthy);
         }
 
         var failures = checked(state.ConsecutiveFailures + 1);
+        if (state.Phase == HealthRetryPhase.Startup)
+        {
+            if (utcNow >= state.Deadline || observation.ObservedAt >= state.Deadline)
+            {
+                return new HealthRetryDecision(
+                    HealthRetryAction.TimedOut,
+                    null,
+                    state.WithFailures(failures),
+                    ServiceStateReasonCode.HealthTimeout);
+            }
+
+            var nextStartupAttemptAt = utcNow.Add(RetryInterval);
+            if (nextStartupAttemptAt >= state.Deadline)
+            {
+                return new HealthRetryDecision(
+                    HealthRetryAction.TimedOut,
+                    null,
+                    state.WithFailures(failures),
+                    ServiceStateReasonCode.HealthTimeout);
+            }
+
+            return new HealthRetryDecision(
+                HealthRetryAction.Retry,
+                nextStartupAttemptAt,
+                state.ForNextAttempt(checked(state.Attempt + 1), failures),
+                ServiceStateReasonCode.HealthCheckFailed);
+        }
+
+        if (state.Phase == HealthRetryPhase.Steady)
+        {
+            if (failures >= FailureThreshold)
+            {
+                return new HealthRetryDecision(
+                    HealthRetryAction.Failed,
+                    null,
+                    state.WithFailures(failures),
+                    ServiceStateReasonCode.HealthFailureThreshold);
+            }
+
+            return new HealthRetryDecision(
+                HealthRetryAction.Retry,
+                utcNow.Add(RetryInterval),
+                state.ForNextAttempt(checked(state.Attempt + 1), failures),
+                ServiceStateReasonCode.HealthCheckFailed);
+        }
+
         if (utcNow >= state.Deadline || observation.ObservedAt >= state.Deadline)
         {
             return new HealthRetryDecision(

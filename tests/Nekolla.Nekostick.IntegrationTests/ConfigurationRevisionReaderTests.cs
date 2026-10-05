@@ -22,7 +22,9 @@ public sealed class ConfigurationRevisionReaderTests
         var migrated = await coordinator.MigrateAndValidateAsync(
             context,
             TestContext.Current.CancellationToken);
-        Assert.True(migrated.IsSuccess, migrated.Error?.Message);
+        Assert.True(
+            migrated.IsSuccess,
+            $"Migration failed. Code: {migrated.Error?.Code}; Message: {migrated.Error?.Message}; Detail: {migrated.Error?.Detail}");
 
         const string sensitiveJson = "[\"integration-secret-value\"]";
         await database.ExecuteSchemaCommandAsync(

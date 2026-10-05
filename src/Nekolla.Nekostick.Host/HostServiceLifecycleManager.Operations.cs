@@ -587,7 +587,7 @@ public sealed partial class HostServiceLifecycleManager
             SupervisorOperationResult result;
             try
             {
-                result = await generation.Supervisor.ObserveHealthAsync(
+                result = await generation.Supervisor.ObserveSteadyHealthAsync(
                     generation.HealthRetryState,
                     DateTimeOffset.UtcNow,
                     cancellationToken).ConfigureAwait(false);

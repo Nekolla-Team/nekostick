@@ -184,6 +184,31 @@ public static class ServiceStateTransition
             consecutiveHealthFailures: 0);
     }
 
+    internal static ServiceRuntimeSnapshot RecordStartupHealthStarted(
+        ServiceRuntimeSnapshot current,
+        HealthRetryState retryState,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+
+        if (retryState.ServiceId != current.ServiceId || retryState.Phase != HealthRetryPhase.Startup)
+        {
+            throw new ArgumentException("A startup health retry state for this service is required.", nameof(retryState));
+        }
+
+        return NewSnapshot(
+            current,
+            current.Desired,
+            current.ObservedLifecycle,
+            current.Health,
+            current.Reason,
+            now,
+            new ServiceDeadline(ServiceDeadlineKind.StartupHealth, retryState.Deadline),
+            observation: current.LastHealthObservation,
+            restartAttempts: current.RestartAttempts,
+            consecutiveHealthFailures: current.ConsecutiveHealthFailures);
+    }
+
     /// <summary>Records a health result using a consecutive-failure threshold.</summary>
     /// <param name="current">The current immutable snapshot.</param>
     /// <param name="observation">The safe health result.</param>
@@ -207,21 +232,7 @@ public static class ServiceStateTransition
 
         if (observation.Status == HealthObservationStatus.Healthy)
         {
-            return NewSnapshot(
-                current,
-                current.Desired,
-                current.Desired == DesiredServiceState.Running
-                    ? ServiceLifecycleState.Running
-                    : ServiceLifecycleState.Disabled,
-                ServiceHealthState.Healthy,
-                ServiceStateReasonCode.Healthy,
-                now,
-                deadline: null,
-                observation: observation,
-                consecutiveHealthFailures: 0,
-                restartAttempts: current.Desired == DesiredServiceState.Running
-                    ? RestartAttemptState.Empty
-                    : current.RestartAttempts);
+            return RecordHealthyObservation(current, observation, now);
         }
 
         var failures = checked(current.ConsecutiveHealthFailures + 1);
@@ -246,6 +257,82 @@ public static class ServiceStateTransition
             observation: observation,
             consecutiveHealthFailures: failures);
     }
+
+    internal static ServiceRuntimeSnapshot RecordHealthObservation(
+        ServiceRuntimeSnapshot current,
+        HealthObservationResult observation,
+        HealthRetryState retryState,
+        HealthRetryDecision decision,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+        ArgumentNullException.ThrowIfNull(observation);
+        ArgumentNullException.ThrowIfNull(decision);
+
+        if (observation.ServiceId != current.ServiceId ||
+            retryState.ServiceId != current.ServiceId ||
+            decision.NextState.ServiceId != current.ServiceId)
+        {
+            throw new ArgumentException("The health result belongs to another service.", nameof(observation));
+        }
+
+        if (retryState.Phase == HealthRetryPhase.Generic)
+        {
+            throw new ArgumentException("An explicit health retry phase is required.", nameof(retryState));
+        }
+
+        if (decision.Action == HealthRetryAction.Healthy)
+        {
+            return RecordHealthyObservation(current, observation, now);
+        }
+
+        var failures = decision.NextState.ConsecutiveFailures;
+        var terminal = decision.Action is HealthRetryAction.Failed or HealthRetryAction.TimedOut;
+        var lifecycle = terminal
+            ? ServiceLifecycleState.Failed
+            : retryState.Phase == HealthRetryPhase.Startup && current.Desired == DesiredServiceState.Running
+                ? ServiceLifecycleState.Starting
+                : current.ObservedLifecycle;
+        ServiceDeadline? deadline = retryState.Phase == HealthRetryPhase.Startup
+            ? new ServiceDeadline(ServiceDeadlineKind.StartupHealth, retryState.Deadline)
+            : null;
+
+        return NewSnapshot(
+            current,
+            current.Desired,
+            lifecycle,
+            decision.Action == HealthRetryAction.Cancelled
+                ? current.Health
+                : retryState.Phase == HealthRetryPhase.Startup
+                    ? ServiceHealthState.Unhealthy
+                    : observation.HealthState,
+            decision.Reason,
+            now,
+            deadline,
+            observation,
+            failures);
+    }
+
+    private static ServiceRuntimeSnapshot RecordHealthyObservation(
+        ServiceRuntimeSnapshot current,
+        HealthObservationResult observation,
+        DateTimeOffset now) =>
+        NewSnapshot(
+            current,
+            current.Desired,
+            current.Desired == DesiredServiceState.Running
+                ? ServiceLifecycleState.Running
+                : ServiceLifecycleState.Disabled,
+            ServiceHealthState.Healthy,
+            ServiceStateReasonCode.Healthy,
+            now,
+            deadline: null,
+            observation: observation,
+            consecutiveHealthFailures: 0,
+            restartAttempts: current.Desired == DesiredServiceState.Running
+                ? RestartAttemptState.Empty
+                : current.RestartAttempts);
+
 
     /// <summary>Records a process exit without exposing process output or handles.</summary>
     /// <param name="current">The current immutable snapshot.</param>

@@ -296,6 +296,185 @@ public sealed class ServiceSupervisorTests
         Assert.Equal(ServiceStateReasonCode.HealthFailureThreshold, second.Reason);
     }
 
+    [Fact]
+    public async Task StartupHealthRetriesPastFailureThresholdAndUsesActualDeadline()
+    {
+        var policy = new HealthRetryPolicy(TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), 3);
+        var probe = new SequenceProbe(
+            HealthObservationStatus.Unhealthy,
+            HealthObservationStatus.Unavailable,
+            HealthObservationStatus.TimedOut,
+            HealthObservationStatus.Unavailable,
+            HealthObservationStatus.Healthy)
+        {
+            ObservedAt = Now.AddSeconds(30)
+        };
+        var supervisor = Create(
+            new RecordingExecutor([]),
+            new RecordingLeaseStore([], Lease()),
+            probe,
+            policy);
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        var retry = HealthRetryState.StartStartup(ServiceId, Now.AddSeconds(10), policy.StartupTimeout);
+
+        for (var index = 0; index < 4; index++)
+        {
+            var result = await supervisor.ObserveStartupHealthAsync(
+                retry,
+                Now.AddSeconds(30 + index),
+                TestContext.Current.CancellationToken);
+            var decision = Assert.IsType<HealthRetryDecision>(result.Health);
+
+            Assert.Equal(HealthRetryAction.Retry, decision.Action);
+            Assert.Equal(ServiceLifecycleState.Starting, result.Snapshot.ObservedLifecycle);
+            Assert.Equal(ServiceHealthState.Unhealthy, result.Snapshot.Health);
+            Assert.Equal(index + 1, result.Snapshot.ConsecutiveHealthFailures);
+            Assert.Equal(retry.Deadline, result.Snapshot.Deadline?.At);
+            retry = decision.NextState;
+        }
+
+        var healthy = await supervisor.ObserveStartupHealthAsync(
+            retry,
+            Now.AddSeconds(34),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthRetryAction.Healthy, healthy.Health!.Action);
+        Assert.Equal(ServiceLifecycleState.Running, healthy.Snapshot.ObservedLifecycle);
+        Assert.Equal(0, healthy.Snapshot.ConsecutiveHealthFailures);
+        Assert.Null(healthy.Snapshot.Deadline);
+        Assert.Equal(HealthRetryPhase.Steady, healthy.Health.NextState.Phase);
+        Assert.Equal(default, healthy.Health.NextState.Deadline);
+    }
+
+    [Fact]
+    public async Task StartupHealthDeadlineRemainsBoundedAndUsesActualDeadline()
+    {
+        var policy = new HealthRetryPolicy(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), 3);
+        var probe = new SequenceProbe(HealthObservationStatus.Unhealthy)
+        {
+            ObservedAt = Now.AddSeconds(15)
+        };
+        var supervisor = Create(
+            new RecordingExecutor([]),
+            new RecordingLeaseStore([], Lease()),
+            probe,
+            policy);
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        var startupStartedAt = Now.AddSeconds(10);
+        var retry = HealthRetryState.StartStartup(ServiceId, startupStartedAt, policy.StartupTimeout);
+        Assert.True(await supervisor.BeginStartupHealthAsync(
+            retry,
+            startupStartedAt,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(retry.Deadline, supervisor.Snapshot.Deadline?.At);
+
+        var result = await supervisor.ObserveStartupHealthAsync(
+            retry,
+            retry.Deadline,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthRetryAction.TimedOut, result.Health!.Action);
+        Assert.Equal(ServiceStateReasonCode.HealthTimeout, result.Snapshot.Reason);
+        Assert.Equal(ServiceLifecycleState.Failed, result.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceHealthState.Unhealthy, result.Snapshot.Health);
+        Assert.Equal(retry.Deadline, result.Snapshot.Deadline?.At);
+    }
+
+    [Fact]
+    public async Task StartupHealthCancellationRemainsNonterminal()
+    {
+        var probe = new BlockingProbe();
+        var supervisor = Create(
+            new RecordingExecutor([]),
+            new RecordingLeaseStore([], Lease()),
+            probe);
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var retry = HealthRetryState.StartStartup(ServiceId, Now.AddSeconds(1), TimeSpan.FromSeconds(30));
+        var operation = supervisor.ObserveStartupHealthAsync(
+            retry,
+            Now.AddSeconds(1),
+            cancellation.Token).AsTask();
+
+        await probe.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        var result = await operation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.Cancelled, result.Status);
+        Assert.Equal(HealthRetryAction.Cancelled, result.Health!.Action);
+        Assert.Equal(ServiceLifecycleState.Starting, result.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceStateReasonCode.Cancelled, result.Snapshot.Reason);
+        Assert.Equal(0, result.Snapshot.ConsecutiveHealthFailures);
+    }
+
+    [Fact]
+    public async Task SteadyHealthIgnoresStartupDeadlineAndResetsConsecutiveFailures()
+    {
+        var policy = new HealthRetryPolicy(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), 3);
+        var probe = new SequenceProbe(
+            HealthObservationStatus.Healthy,
+            HealthObservationStatus.Unavailable,
+            HealthObservationStatus.Healthy,
+            HealthObservationStatus.Unhealthy,
+            HealthObservationStatus.Unavailable,
+            HealthObservationStatus.TimedOut)
+        {
+            ObservedAt = Now
+        };
+        var supervisor = Create(
+            new RecordingExecutor([]),
+            new RecordingLeaseStore([], Lease()),
+            probe,
+            policy);
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        var startup = HealthRetryState.StartStartup(ServiceId, Now, policy.StartupTimeout);
+        var started = await supervisor.ObserveStartupHealthAsync(
+            startup,
+            Now,
+            TestContext.Current.CancellationToken);
+        var steady = started.Health!.NextState;
+
+        Assert.Equal(HealthRetryPhase.Steady, steady.Phase);
+        Assert.Equal(default, steady.Deadline);
+
+        var firstMiss = await supervisor.ObserveSteadyHealthAsync(
+            steady,
+            Now.AddSeconds(31),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthRetryAction.Retry, firstMiss.Health!.Action);
+        Assert.Equal(1, firstMiss.Snapshot.ConsecutiveHealthFailures);
+        Assert.Equal(ServiceLifecycleState.Running, firstMiss.Snapshot.ObservedLifecycle);
+        Assert.Null(firstMiss.Snapshot.Deadline);
+
+        var recovered = await supervisor.ObserveSteadyHealthAsync(
+            firstMiss.Health.NextState,
+            Now.AddSeconds(32),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HealthRetryAction.Healthy, recovered.Health!.Action);
+        Assert.Equal(0, recovered.Snapshot.ConsecutiveHealthFailures);
+        Assert.Equal(0, recovered.Health.NextState.ConsecutiveFailures);
+        Assert.Null(recovered.Snapshot.Deadline);
+
+        steady = recovered.Health.NextState;
+        for (var index = 0; index < 3; index++)
+        {
+            var result = await supervisor.ObserveSteadyHealthAsync(
+                steady,
+                Now.AddSeconds(33 + index),
+                TestContext.Current.CancellationToken);
+            var decision = Assert.IsType<HealthRetryDecision>(result.Health);
+
+            Assert.Equal(index == 2 ? HealthRetryAction.Failed : HealthRetryAction.Retry, decision.Action);
+            Assert.Equal(index + 1, result.Snapshot.ConsecutiveHealthFailures);
+            Assert.Equal(index == 2 ? ServiceLifecycleState.Failed : ServiceLifecycleState.Running, result.Snapshot.ObservedLifecycle);
+            Assert.Null(result.Snapshot.Deadline);
+            steady = decision.NextState;
+        }
+    }
+
+
     [Theory]
     [InlineData(ServiceRestartPolicy.Never, false, ServiceStateReasonCode.RestartPolicyDisabled)]
     [InlineData(ServiceRestartPolicy.OnFailure, false, ServiceStateReasonCode.RestartPolicyDisabled)]
@@ -315,7 +494,7 @@ public sealed class ServiceSupervisorTests
         Assert.Equal(failed || policy == ServiceRestartPolicy.Always, result.Restart!.ShouldRestart);
     }
 
-    private static ServiceSupervisor Create(IProcessExecutor executor, RecordingLeaseStore store, RecordingProbe? probe = null, HealthRetryPolicy? healthPolicy = null, ServiceRestartPolicy restartPolicy = ServiceRestartPolicy.OnFailure)
+    private static ServiceSupervisor Create(IProcessExecutor executor, RecordingLeaseStore store, IServiceHealthProbe? probe = null, HealthRetryPolicy? healthPolicy = null, ServiceRestartPolicy restartPolicy = ServiceRestartPolicy.OnFailure)
     {
         var launch = new ProcessLaunchSpecification(ServiceId, "/bin/sh", "/tmp", ImmutableArray<string>.Empty, new ProcessEnvironment(new Dictionary<string, string>()));
         var request = new ServiceHealthProbeRequest(ServiceId, new HealthCheckDefinition(ServiceHealthCheckKind.Process, TimeSpan.FromSeconds(1)));
@@ -447,5 +626,54 @@ public sealed class ServiceSupervisorTests
         private readonly HealthObservationStatus _status;
         public RecordingProbe(HealthObservationStatus status) => _status = status;
         public ValueTask<HealthObservationResult> ProbeAsync(ServiceHealthProbeRequest request, CancellationToken cancellationToken = default) => ValueTask.FromResult(new HealthObservationResult(request.ServiceId, _status, Now, TimeSpan.Zero, 1));
+    }
+
+    private sealed class SequenceProbe : IServiceHealthProbe
+    {
+        private readonly HealthObservationStatus[] _statuses;
+        private int _index;
+
+        public SequenceProbe(params HealthObservationStatus[] statuses)
+        {
+            if (statuses.Length == 0)
+            {
+                throw new ArgumentException("At least one health status is required.", nameof(statuses));
+            }
+
+            _statuses = statuses;
+        }
+
+        public DateTimeOffset ObservedAt { get; set; } = Now;
+
+        public ValueTask<HealthObservationResult> ProbeAsync(
+            ServiceHealthProbeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var index = Interlocked.Increment(ref _index) - 1;
+            var status = _statuses[Math.Min(index, _statuses.Length - 1)];
+            return ValueTask.FromResult(new HealthObservationResult(
+                request.ServiceId,
+                status,
+                ObservedAt,
+                TimeSpan.Zero,
+                index + 1));
+        }
+    }
+
+    private sealed class BlockingProbe : IServiceHealthProbe
+    {
+        private readonly TaskCompletionSource<HealthObservationResult> _result =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<HealthObservationResult> ProbeAsync(
+            ServiceHealthProbeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult(true);
+            return await _result.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 }

@@ -585,10 +585,87 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
     /// <param name="now">The observation timestamp.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The operation result.</returns>
-    public async ValueTask<SupervisorOperationResult> ObserveHealthAsync(
+    public ValueTask<SupervisorOperationResult> ObserveHealthAsync(
         HealthRetryState retryState,
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
+    {
+        return ObserveHealthCoreAsync(retryState, now, cancellationToken);
+    }
+
+    internal ValueTask<SupervisorOperationResult> ObserveStartupHealthAsync(
+        HealthRetryState retryState,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        if (retryState.Phase != HealthRetryPhase.Startup)
+        {
+            throw new ArgumentException("A startup health retry state is required.", nameof(retryState));
+        }
+
+        return ObserveHealthCoreAsync(retryState, now, cancellationToken);
+    }
+
+    internal async ValueTask<bool> BeginStartupHealthAsync(
+        HealthRetryState retryState,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (retryState.ServiceId != launchSpecification.ServiceId)
+        {
+            throw new ArgumentException("The health retry state belongs to another service.", nameof(retryState));
+        }
+        if (retryState.Phase != HealthRetryPhase.Startup)
+        {
+            throw new ArgumentException("A startup health retry state is required.", nameof(retryState));
+        }
+
+        try
+        {
+            await lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            SupervisionLogMessages.OperationCancelled(_logger, "BeginStartupHealth", launchSpecification.ServiceId);
+            return false;
+        }
+
+        try
+        {
+            var current = Snapshot;
+            if (cancellationToken.IsCancellationRequested ||
+                current.Desired != DesiredServiceState.Running ||
+                current.ObservedLifecycle != ServiceLifecycleState.Starting)
+            {
+                return false;
+            }
+
+            var next = ServiceStateTransition.RecordStartupHealthStarted(current, retryState, now);
+            return ReferenceEquals(Interlocked.CompareExchange(ref snapshot, next, current), current);
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
+    }
+
+    internal ValueTask<SupervisorOperationResult> ObserveSteadyHealthAsync(
+        HealthRetryState retryState,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        if (retryState.Phase != HealthRetryPhase.Steady)
+        {
+            throw new ArgumentException("A steady health retry state is required.", nameof(retryState));
+        }
+
+        return ObserveHealthCoreAsync(retryState, now, cancellationToken);
+    }
+
+    private async ValueTask<SupervisorOperationResult> ObserveHealthCoreAsync(
+        HealthRetryState retryState,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
         if (retryState.ServiceId != launchSpecification.ServiceId)
         {
@@ -672,6 +749,8 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             lifecycle.Epoch,
             observation,
             healthPolicy.FailureThreshold,
+            retryState,
+            decision,
             now).ConfigureAwait(false);
         if (!applied.Applied)
         {
@@ -722,6 +801,8 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         long observationEpoch,
         HealthObservationResult observation,
         int failureThreshold,
+        HealthRetryState retryState,
+        HealthRetryDecision decision,
         DateTimeOffset now)
     {
         await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -733,11 +814,19 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 return (false, current, null);
             }
 
-            var next = Exchange(ServiceStateTransition.RecordHealthObservation(
-                current,
-                observation,
-                failureThreshold,
-                now));
+            var next = retryState.Phase == HealthRetryPhase.Generic
+                ? ServiceStateTransition.RecordHealthObservation(
+                    current,
+                    observation,
+                    failureThreshold,
+                    now)
+                : ServiceStateTransition.RecordHealthObservation(
+                    current,
+                    observation,
+                    retryState,
+                    decision,
+                    now);
+            Exchange(next);
             return (true, next, Volatile.Read(ref lease));
         }
         finally

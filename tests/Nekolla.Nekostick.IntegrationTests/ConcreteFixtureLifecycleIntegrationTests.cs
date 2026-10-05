@@ -167,7 +167,8 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             additionalArguments: ["--mode", "fail", "--status-code", "503"],
             shortRenewalLease: false,
             CancellationToken.None,
-            healthPath: "/fixture/not-found");
+            healthPath: "/fixture/not-found",
+            callerTimeoutSeconds: 45);
 
         var result = await host.Manager.EnsureReadyAsync(
             host.Snapshot,
@@ -888,7 +889,8 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             bool shortRenewalLease,
             CancellationToken cancellationToken,
             string healthPath = "/fixture/health",
-            int automaticRangeWidth = 0)
+            int automaticRangeWidth = 0,
+            int callerTimeoutSeconds = 20)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ArgumentOutOfRangeException.ThrowIfNegative(automaticRangeWidth);
@@ -964,7 +966,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
                 new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
             await fixture.DisposeAsync().ConfigureAwait(false);
             var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            timeout.CancelAfter(TimeSpan.FromSeconds(callerTimeoutSeconds));
             // Ownership is transferred to the manager's executor; fixture only provided paths and port.
             await Task.CompletedTask;
             return new HostLifecycleHarness(
