@@ -483,6 +483,7 @@ public sealed class HostPostgresAcceptanceTests
         await MigrateAsync(database, migrationContext);
 
         var previousUpdateAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        DateTimeOffset persistedCreatedAt;
         await using (var seedContext = database.CreateContext())
         {
             seedContext.Nodes.Add(new Node
@@ -498,6 +499,10 @@ public sealed class HostPostgresAcceptanceTests
                 Version = 5
             });
             await seedContext.SaveChangesAsync(TestContext.Current.CancellationToken);
+            persistedCreatedAt = await seedContext.Nodes.AsNoTracking()
+                .Where(value => value.NodeId == "0")
+                .Select(value => value.CreatedAt)
+                .SingleAsync(TestContext.Current.CancellationToken);
         }
 
         var snapshotHolder = new HostConfigurationSnapshotHolder();
@@ -523,7 +528,7 @@ public sealed class HostPostgresAcceptanceTests
         Assert.Equal("registered", node.RuntimeState);
         Assert.True(node.IsActive);
         Assert.Equal(6L, node.Version);
-        Assert.Equal(previousUpdateAt, node.CreatedAt);
+        Assert.Equal(persistedCreatedAt, node.CreatedAt);
         Assert.True(node.LastHeartbeatAt > previousUpdateAt);
         Assert.True(node.UpdatedAt > previousUpdateAt);
     }
