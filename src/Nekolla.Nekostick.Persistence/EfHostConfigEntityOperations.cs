@@ -388,8 +388,9 @@ internal sealed class EfHostConfigEntityOperations
         var changed = entity.Enabled != value.Enabled ||
             entity.MatcherType != matcherType ||
             !string.Equals(entity.Pattern, value.Matcher.Pattern, StringComparison.Ordinal) ||
-            !string.Equals(entity.HostPatternsJson, hostPatternsJson, StringComparison.Ordinal) ||
-            !string.Equals(entity.MethodsJson, methodsJson, StringComparison.Ordinal) ||
+            !incrementVersion ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.HostPatternsJson, hostPatternsJson) ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.MethodsJson, methodsJson) ||
             entity.TargetType != targetType ||
             !string.Equals(entity.TargetId, targetId, StringComparison.Ordinal) ||
             entity.ServiceId != serviceId ||
@@ -398,9 +399,9 @@ internal sealed class EfHostConfigEntityOperations
             entity.Priority != value.Priority ||
             entity.ForwardingMode != forwardingMode ||
             !string.Equals(entity.ReplaceTemplate, replaceTemplate, StringComparison.Ordinal) ||
-            !string.Equals(entity.RequestHeaderRewritesJson, requestHeaderRewritesJson, StringComparison.Ordinal) ||
-            !string.Equals(entity.ResponseHeaderRewritesJson, responseHeaderRewritesJson, StringComparison.Ordinal) ||
-            !string.Equals(entity.MetadataJson, metadataJson, StringComparison.Ordinal) ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.RequestHeaderRewritesJson, requestHeaderRewritesJson) ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.ResponseHeaderRewritesJson, responseHeaderRewritesJson) ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.MetadataJson, metadataJson) ||
             entity.ClientIpRateTokenLimit != ratePolicy.TokenLimit ||
             entity.ClientIpRateTokensPerPeriod != ratePolicy.TokensPerPeriod ||
             entity.ClientIpRateReplenishmentPeriodMilliseconds != ratePolicy.ReplenishmentPeriodMilliseconds ||
@@ -485,9 +486,10 @@ internal sealed class EfHostConfigEntityOperations
         var healthCheckTimeoutMilliseconds = checked((int)value.HealthCheck.Timeout.TotalMilliseconds);
         var changed = entity.Enabled != value.Enabled ||
             !string.Equals(entity.FileName, value.FileName, StringComparison.Ordinal) ||
-            !string.Equals(entity.ArgumentListJson, argumentListJson, StringComparison.Ordinal) ||
+            !incrementVersion ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.ArgumentListJson, argumentListJson) ||
             !string.Equals(entity.WorkingDirectory, value.WorkingDirectory, StringComparison.Ordinal) ||
-            !string.Equals(entity.EnvironmentJson, environmentJson, StringComparison.Ordinal) ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.EnvironmentJson, environmentJson) ||
             entity.StartMode != startMode ||
             entity.RestartPolicy != restartPolicy ||
             entity.HealthCheckType != healthCheckType ||
@@ -572,7 +574,7 @@ internal sealed class EfHostConfigEntityOperations
     {
         var settingsJson = HostConfigurationSemanticValidator.NormalizeJson(value.SettingsJson, null);
         if (entity.SchemaVersion == value.SchemaVersion &&
-            string.Equals(entity.SettingsJson, settingsJson, StringComparison.Ordinal))
+            HostConfigurationJsonComparer.AreEquivalent(entity.SettingsJson, settingsJson))
         {
             return false;
         }
@@ -605,7 +607,7 @@ internal sealed class EfHostConfigEntityOperations
             entity.MaxConcurrentRequests != value.MaxConcurrentRequests ||
             entity.ConfigurationPollIntervalSeconds != configurationPollIntervalSeconds ||
             entity.RequestReadTimeoutMilliseconds != requestReadTimeoutMilliseconds ||
-            !string.Equals(entity.TrustedProxyCidrsJson, trustedProxyCidrsJson, StringComparison.Ordinal) ||
+            !HostConfigurationJsonComparer.AreEquivalent(entity.TrustedProxyCidrsJson, trustedProxyCidrsJson) ||
             entity.ConnectTimeoutMilliseconds != connectTimeoutMilliseconds ||
             entity.HttpActivityTimeoutMilliseconds != httpActivityTimeoutMilliseconds ||
             entity.HttpTotalTimeoutMilliseconds != httpTotalTimeoutMilliseconds ||

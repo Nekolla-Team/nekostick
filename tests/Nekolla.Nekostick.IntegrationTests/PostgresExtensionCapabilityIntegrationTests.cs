@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -57,6 +58,39 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
 
     private static readonly Guid MissingFullServiceId =
         Guid.Parse("018f0f00-0000-7000-8000-000000000110");
+
+    private const string InitialJsonbRegressionMetadata = """{"arbitrary":{"label":"host-route","ordered":["alpha","beta"],"optional":null,"largeNumber":9007199254740993.00,"scaledNumber":1.2300e2,"duplicate":"discarded","duplicate":"kept"}}""";
+
+    private const string EquivalentJsonbRegressionMetadata = """
+        {
+          "arbitrary": {
+            "scaledNumber": 123.000,
+            "duplicate": "discarded",
+            "ordered": ["alpha", "beta"],
+            "largeNumber": 900719925474099300e-2,
+            "optional": null,
+            "label": "host-route",
+            "duplicate": "kept"
+          }
+        }
+        """;
+
+    private const string InitialJsonbRegressionSettings = """{"enabled":true,"arbitrary":{"label":"owner-settings","ordered":["alpha","beta"],"optional":null,"largeNumber":9007199254740993.00,"scaledNumber":1.2300e2,"duplicate":"discarded","duplicate":"kept"}}""";
+
+    private const string EquivalentJsonbRegressionSettings = """
+        {
+          "arbitrary": {
+            "scaledNumber": 123.000,
+            "duplicate": "discarded",
+            "ordered": ["alpha", "beta"],
+            "largeNumber": 900719925474099300e-2,
+            "optional": null,
+            "label": "owner-settings",
+            "duplicate": "kept"
+          },
+          "enabled": true
+        }
+        """;
 
     [Fact]
     public async Task FullConfigurationReadsAllCollectionsAndOmittedRowsAreDeleted()
@@ -132,6 +166,237 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             ForeignExtensionId,
             afterOmission.Value.ExtensionSettings.Select(value => value.ExtensionId));
     }
+
+    [Fact]
+    public async Task FullConfigurationJsonbSemanticNoOpsPreserveVersionsAndAvoidServiceRestart()
+    {
+        await using var harness = await ExtensionCapabilityPostgresHarness.CreateAsync();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var owner = harness.CreateCapability(OwnerExtensionId, static _ => false);
+        var initialResult = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(initialResult.IsSuccess, initialResult.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(initialResult.Value);
+        var initial = initialResult.Value!;
+
+        var configured = await owner.FullConfiguration.ReplaceAsync(
+            initial.Version,
+            CreateJsonbRegressionSetup(initial),
+            cancellationToken);
+        var configuredVersion = RequireCommittedVersion(configured);
+        var configuredRead = await owner.FullConfiguration.ReadAsync(cancellationToken);
+        Assert.True(configuredRead.IsSuccess, configuredRead.Errors.FirstOrDefault()?.Message);
+        Assert.NotNull(configuredRead.Value);
+        var baseline = configuredRead.Value!;
+        Assert.Equal(configuredVersion, baseline.Version);
+
+        var baselineRoute = Assert.Single(baseline.Routes, value => value.Id == HostRouteId);
+        var baselineSettings = Assert.Single(
+            baseline.ExtensionSettings,
+            value => value.ExtensionId == OwnerExtensionId);
+        Assert.Contains("kept", baselineRoute.MetadataJson);
+        Assert.DoesNotContain("discarded", baselineRoute.MetadataJson);
+        Assert.Contains("kept", baselineSettings.SettingsJson);
+        Assert.DoesNotContain("discarded", baselineSettings.SettingsJson);
+        Assert.NotEqual(EquivalentJsonbRegressionMetadata, baselineRoute.MetadataJson);
+        Assert.NotEqual(EquivalentJsonbRegressionSettings, baselineSettings.SettingsJson);
+        Assert.Equal(["10.0.0.0/8", "192.168.0.0/16"], baseline.GlobalSettings.TrustedProxyCidrs);
+        Assert.Equal(["api.example.test", "admin.example.test"], baselineRoute.Matcher.HostPatterns);
+        Assert.Equal(["GET", "POST"], baselineRoute.Matcher.Methods);
+        Assert.Single(baselineRoute.RequestHeaderRewrites);
+        Assert.Single(baselineRoute.ResponseHeaderRewrites);
+        var baselineService = Assert.Single(baseline.Services, value => value.Id == HostServiceId);
+        Assert.Equal(["--host", "--integration"], baselineService.ArgumentList);
+        Assert.Equal("stable-value", baselineService.Environment["FULL_CONFIGURATION_KEEP"]);
+
+        await harness.PublishAndReconcileAsync(baseline, cancellationToken);
+        var processInstance = Assert.Single(harness.StartedProcessInstances);
+        Assert.Equal([HostServiceId], harness.StartedServiceIds);
+        var initialEndpoints = harness.EndpointPublisher.Current;
+        Assert.Equal([HostServiceId], initialEndpoints.Keys);
+        var endpoint = initialEndpoints[HostServiceId];
+        var lease = Assert.IsType<PortLease>(harness.GetCurrentLease(HostServiceId));
+        Assert.Equal(endpoint.Port, lease.Port);
+        AssertHostServiceLifecycleUnchanged(harness, processInstance, endpoint, lease);
+
+        await using var notificationListener = harness.CreateConnection();
+        await notificationListener.OpenAsync(cancellationToken);
+        await using (var listenCommand = new NpgsqlCommand(
+                         "LISTEN nekostick_config_changed;",
+                         notificationListener))
+        {
+            await listenCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var notifications = new ConcurrentQueue<NpgsqlNotificationEventArgs>();
+        void OnNotification(object? _, NpgsqlNotificationEventArgs args) => notifications.Enqueue(args);
+        notificationListener.Notification += OnNotification;
+        using var notificationTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        notificationTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+        try
+        {
+            var noOp = await owner.FullConfiguration.ReplaceAsync(
+                baseline.Version,
+                ReplaceJsonbValues(
+                    baseline,
+                    hostRouteMetadataJson: EquivalentJsonbRegressionMetadata,
+                    ownerSettingsJson: EquivalentJsonbRegressionSettings),
+                cancellationToken);
+            Assert.Equal(baseline.Version, RequireCommittedVersion(noOp));
+
+            var noOpRead = await owner.FullConfiguration.ReadAsync(cancellationToken);
+            Assert.True(noOpRead.IsSuccess, noOpRead.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(noOpRead.Value);
+            var afterNoOp = noOpRead.Value!;
+            AssertFullSnapshotSemanticNoOp(baseline, afterNoOp);
+            Assert.Equal(baselineRoute.MetadataJson, Assert.Single(
+                afterNoOp.Routes,
+                value => value.Id == HostRouteId).MetadataJson);
+            Assert.Equal(baselineSettings.SettingsJson, Assert.Single(
+                afterNoOp.ExtensionSettings,
+                value => value.ExtensionId == OwnerExtensionId).SettingsJson);
+            var noOpReadiness = await harness.LifecycleManager.EnsureReadyAsync(
+                afterNoOp,
+                HostServiceId,
+                cancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.Ready, noOpReadiness.Status);
+            AssertHostServiceLifecycleUnchanged(harness, processInstance, endpoint, lease);
+
+            var routeBefore = Assert.Single(afterNoOp.Routes, value => value.Id == HostRouteId);
+            var reorderedMetadata = ReorderJsonbRegressionArray(routeBefore.MetadataJson);
+            Assert.NotEqual(routeBefore.MetadataJson, reorderedMetadata);
+            var reorderedRouteWrite = await owner.FullConfiguration.ReplaceAsync(
+                afterNoOp.Version,
+                ReplaceJsonbValues(afterNoOp, hostRouteMetadataJson: reorderedMetadata),
+                cancellationToken);
+            Assert.Equal(checked(afterNoOp.Version + 1), RequireCommittedVersion(reorderedRouteWrite));
+            var reorderedRouteRead = await owner.FullConfiguration.ReadAsync(cancellationToken);
+            Assert.True(reorderedRouteRead.IsSuccess, reorderedRouteRead.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(reorderedRouteRead.Value);
+            var afterArrayReorder = reorderedRouteRead.Value!;
+            AssertOnlyHostRouteChanged(afterNoOp, afterArrayReorder, HostRouteId);
+            using (var metadata = JsonDocument.Parse(
+                       Assert.Single(afterArrayReorder.Routes, value => value.Id == HostRouteId).MetadataJson))
+            {
+                var arbitrary = metadata.RootElement.GetProperty("arbitrary");
+                Assert.Equal(
+                    ["beta", "alpha"],
+                    arbitrary.GetProperty("ordered").EnumerateArray()
+                        .Select(value => value.GetString()!)
+                        .ToArray());
+                Assert.Equal(JsonValueKind.Null, arbitrary.GetProperty("optional").ValueKind);
+            }
+            await AssertConfigurationNotificationAsync(
+                notificationListener,
+                notifications,
+                afterArrayReorder.Version,
+                notificationTimeout.Token);
+            await harness.PublishAndReconcileAsync(afterArrayReorder, cancellationToken);
+            AssertHostServiceLifecycleUnchanged(harness, processInstance, endpoint, lease);
+
+            var settingsBefore = Assert.Single(
+                afterArrayReorder.ExtensionSettings,
+                value => value.ExtensionId == OwnerExtensionId);
+            var settingsWithoutNull = RemoveJsonbRegressionOptionalProperty(settingsBefore.SettingsJson);
+            var missingNullWrite = await owner.FullConfiguration.ReplaceAsync(
+                afterArrayReorder.Version,
+                ReplaceJsonbValues(afterArrayReorder, ownerSettingsJson: settingsWithoutNull),
+                cancellationToken);
+            Assert.Equal(checked(afterArrayReorder.Version + 1), RequireCommittedVersion(missingNullWrite));
+            var missingNullRead = await owner.FullConfiguration.ReadAsync(cancellationToken);
+            Assert.True(missingNullRead.IsSuccess, missingNullRead.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(missingNullRead.Value);
+            var afterMissingNull = missingNullRead.Value!;
+            AssertOnlyOwnerSettingsChanged(afterArrayReorder, afterMissingNull, OwnerExtensionId);
+            using (var settings = JsonDocument.Parse(
+                       Assert.Single(afterMissingNull.ExtensionSettings,
+                           value => value.ExtensionId == OwnerExtensionId).SettingsJson))
+            {
+                Assert.False(settings.RootElement.GetProperty("arbitrary")
+                    .TryGetProperty("optional", out _));
+            }
+            await AssertConfigurationNotificationAsync(
+                notificationListener,
+                notifications,
+                afterMissingNull.Version,
+                notificationTimeout.Token);
+            await harness.PublishAndReconcileAsync(afterMissingNull, cancellationToken);
+            AssertHostServiceLifecycleUnchanged(harness, processInstance, endpoint, lease);
+
+            var settingsWithPreciseNumber = ReplaceJsonbRegressionLargeNumber(
+                Assert.Single(afterMissingNull.ExtensionSettings,
+                    value => value.ExtensionId == OwnerExtensionId).SettingsJson,
+                9007199254740992L);
+            var preciseNumberWrite = await owner.FullConfiguration.ReplaceAsync(
+                afterMissingNull.Version,
+                ReplaceJsonbValues(afterMissingNull, ownerSettingsJson: settingsWithPreciseNumber),
+                cancellationToken);
+            Assert.Equal(checked(afterMissingNull.Version + 1), RequireCommittedVersion(preciseNumberWrite));
+            var preciseNumberRead = await owner.FullConfiguration.ReadAsync(cancellationToken);
+            Assert.True(preciseNumberRead.IsSuccess, preciseNumberRead.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(preciseNumberRead.Value);
+            var afterPreciseNumberChange = preciseNumberRead.Value!;
+            AssertOnlyOwnerSettingsChanged(afterMissingNull, afterPreciseNumberChange, OwnerExtensionId);
+            using (var settings = JsonDocument.Parse(
+                       Assert.Single(afterPreciseNumberChange.ExtensionSettings,
+                           value => value.ExtensionId == OwnerExtensionId).SettingsJson))
+            {
+                Assert.Equal(
+                    9007199254740992L,
+                    settings.RootElement.GetProperty("arbitrary").GetProperty("largeNumber").GetInt64());
+            }
+            await AssertConfigurationNotificationAsync(
+                notificationListener,
+                notifications,
+                afterPreciseNumberChange.Version,
+                notificationTimeout.Token);
+            await harness.PublishAndReconcileAsync(afterPreciseNumberChange, cancellationToken);
+            AssertHostServiceLifecycleUnchanged(harness, processInstance, endpoint, lease);
+
+            var settingsWithFalseToken = SetJsonbRegressionEnabledToken(
+                Assert.Single(afterPreciseNumberChange.ExtensionSettings,
+                    value => value.ExtensionId == OwnerExtensionId).SettingsJson,
+                false);
+            var falseTokenWrite = await owner.FullConfiguration.ReplaceAsync(
+                afterPreciseNumberChange.Version,
+                ReplaceJsonbValues(afterPreciseNumberChange, ownerSettingsJson: settingsWithFalseToken),
+                cancellationToken);
+            Assert.Equal(
+                checked(afterPreciseNumberChange.Version + 1),
+                RequireCommittedVersion(falseTokenWrite));
+            var falseTokenRead = await owner.FullConfiguration.ReadAsync(cancellationToken);
+            Assert.True(falseTokenRead.IsSuccess, falseTokenRead.Errors.FirstOrDefault()?.Message);
+            Assert.NotNull(falseTokenRead.Value);
+            var afterFalseTokenChange = falseTokenRead.Value!;
+            AssertOnlyOwnerSettingsChanged(afterPreciseNumberChange, afterFalseTokenChange, OwnerExtensionId);
+            using (var settings = JsonDocument.Parse(
+                       Assert.Single(afterFalseTokenChange.ExtensionSettings,
+                           value => value.ExtensionId == OwnerExtensionId).SettingsJson))
+            {
+                Assert.False(settings.RootElement.GetProperty("enabled").GetBoolean());
+            }
+            await AssertConfigurationNotificationAsync(
+                notificationListener,
+                notifications,
+                afterFalseTokenChange.Version,
+                notificationTimeout.Token);
+            await harness.PublishAndReconcileAsync(afterFalseTokenChange, cancellationToken);
+            AssertHostServiceLifecycleUnchanged(harness, processInstance, endpoint, lease);
+
+            using var noExtraNotificationTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            noExtraNotificationTimeout.CancelAfter(TimeSpan.FromSeconds(1));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+                await WaitForConfigurationNotificationAsync(
+                    notificationListener,
+                    notifications,
+                    noExtraNotificationTimeout.Token));
+            Assert.Empty(notifications);
+        }
+        finally
+        {
+            notificationListener.Notification -= OnNotification;
+        }
+    }
+
 
     [Fact]
     public async Task FullConfigurationRejectsStaleGlobalAndEntityVersionsWithoutPartialMutation()
@@ -894,6 +1159,368 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             updatedAt: DateTimeOffset.UtcNow,
             version: 0);
 
+    private static ConfigurationChangeSet CreateJsonbRegressionSetup(
+        HostConfigurationSnapshot snapshot)
+    {
+        var globalSettings = new GlobalSettingsConfiguration(
+            snapshot.GlobalSettings.Version,
+            snapshot.GlobalSettings.AutoPortRangeStart,
+            snapshot.GlobalSettings.AutoPortRangeEnd,
+            snapshot.GlobalSettings.MaxRequestBodyBytes,
+            snapshot.GlobalSettings.MaxConcurrentRequests,
+            snapshot.GlobalSettings.ConfigurationPollInterval,
+            ["10.0.0.0/8", "192.168.0.0/16"],
+            snapshot.GlobalSettings.ProxyTimeouts,
+            snapshot.GlobalSettings.MaxRequestHeaderBytes,
+            snapshot.GlobalSettings.RequestReadTimeout,
+            snapshot.GlobalSettings.ClientIpRatePolicy,
+            snapshot.GlobalSettings.ProxyRetries);
+        var routes = snapshot.Routes
+            .Select(value => value.Id == HostRouteId
+                ? CopyRoute(
+                    value,
+                    InitialJsonbRegressionMetadata,
+                    matcher: new RouteMatcherConfiguration(
+                        value.Matcher.Type,
+                        value.Matcher.Pattern,
+                        ["api.example.test", "admin.example.test"],
+                        ["GET", "POST"]),
+                    requestHeaderRewrites: ImmutableArray.Create(
+                        new HeaderRewriteConfiguration(
+                            HeaderRewriteOperation.Set,
+                            "X-Integration-Request",
+                            "preserved-request")),
+                    responseHeaderRewrites: ImmutableArray.Create(
+                        new HeaderRewriteConfiguration(
+                            HeaderRewriteOperation.Set,
+                            "X-Integration-Response",
+                            "preserved-response")))
+                : value)
+            .ToImmutableArray();
+        var services = snapshot.Services
+            .Select(value => value.Id == HostServiceId ? CreateLifecycleService(value) : value)
+            .ToImmutableArray();
+        var extensionSettings = snapshot.ExtensionSettings
+            .Select(value => value.ExtensionId == OwnerExtensionId
+                ? CopyExtensionSettings(value, InitialJsonbRegressionSettings)
+                : value)
+            .ToImmutableArray();
+        return new ConfigurationChangeSet(
+            globalSettings,
+            routes,
+            services,
+            snapshot.ExtensionRecords,
+            extensionSettings);
+    }
+
+    private static ConfigurationChangeSet ReplaceJsonbValues(
+        HostConfigurationSnapshot snapshot,
+        string? hostRouteMetadataJson = null,
+        string? ownerSettingsJson = null)
+    {
+        var routes = hostRouteMetadataJson is null
+            ? snapshot.Routes
+            : snapshot.Routes
+                .Select(value => value.Id == HostRouteId
+                    ? CopyRoute(value, hostRouteMetadataJson)
+                    : value)
+                .ToImmutableArray();
+        var extensionSettings = ownerSettingsJson is null
+            ? snapshot.ExtensionSettings
+            : snapshot.ExtensionSettings
+                .Select(value => value.ExtensionId == OwnerExtensionId
+                    ? CopyExtensionSettings(value, ownerSettingsJson)
+                    : value)
+                .ToImmutableArray();
+        return new ConfigurationChangeSet(
+            snapshot.GlobalSettings,
+            routes,
+            snapshot.Services,
+            snapshot.ExtensionRecords,
+            extensionSettings);
+    }
+
+    private static RouteConfiguration CopyRoute(
+        RouteConfiguration source,
+        string metadataJson,
+        RouteMatcherConfiguration? matcher = null,
+        ImmutableArray<HeaderRewriteConfiguration>? requestHeaderRewrites = null,
+        ImmutableArray<HeaderRewriteConfiguration>? responseHeaderRewrites = null) =>
+        new(
+            source.Id,
+            source.Enabled,
+            matcher ?? source.Matcher,
+            source.Target,
+            source.Priority,
+            source.Forwarding,
+            requestHeaderRewrites ?? source.RequestHeaderRewrites,
+            responseHeaderRewrites ?? source.ResponseHeaderRewrites,
+            metadataJson,
+            source.CreatedAt,
+            source.UpdatedAt,
+            source.Version,
+            source.ClientIpRatePolicy,
+            source.MaxRequestBodyBytes,
+            source.MaxRequestHeaderBytes,
+            source.MaxConcurrentRequests,
+            source.RequestReadTimeout,
+            source.ProxyRetries,
+            source.OwnerExtensionId);
+
+    private static ExtensionSettingsConfiguration CopyExtensionSettings(
+        ExtensionSettingsConfiguration source,
+        string settingsJson) =>
+        new(
+            source.ExtensionId,
+            source.SchemaVersion,
+            settingsJson,
+            source.Version);
+
+    private static ServiceConfiguration CreateLifecycleService(ServiceConfiguration source) =>
+        new(
+            source.Id,
+            source.Enabled,
+            fileName: "fixture-service",
+            argumentList: ["--host", "--integration"],
+            workingDirectory: source.WorkingDirectory,
+            environment: ImmutableDictionary<string, string>.Empty
+                .Add("FULL_CONFIGURATION_KEEP", "stable-value")
+                .Add("FULL_CONFIGURATION_SECOND", "another-stable-value"),
+            startMode: source.StartMode,
+            restartPolicy: source.RestartPolicy,
+            healthCheck: source.HealthCheck,
+            createdAt: source.CreatedAt,
+            updatedAt: source.UpdatedAt,
+            version: source.Version);
+
+    private static string ReorderJsonbRegressionArray(string json)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        root["arbitrary"]!.AsObject()["ordered"] = new JsonArray(
+            JsonValue.Create("beta"),
+            JsonValue.Create("alpha"));
+        return root.ToJsonString();
+    }
+
+    private static string RemoveJsonbRegressionOptionalProperty(string json)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        Assert.True(root["arbitrary"]!.AsObject().Remove("optional"));
+        return root.ToJsonString();
+    }
+
+    private static string ReplaceJsonbRegressionLargeNumber(string json, long value)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        root["arbitrary"]!.AsObject()["largeNumber"] = JsonValue.Create(value);
+        return root.ToJsonString();
+    }
+
+    private static string SetJsonbRegressionEnabledToken(string json, bool enabled)
+    {
+        var root = JsonNode.Parse(json)!.AsObject();
+        root["enabled"] = JsonValue.Create(enabled);
+        return root.ToJsonString();
+    }
+
+    private static void AssertFullSnapshotSemanticNoOp(
+        HostConfigurationSnapshot before,
+        HostConfigurationSnapshot after)
+    {
+        AssertSnapshotCollectionsUnchanged(before, after);
+        Assert.Equal(
+            JsonSerializer.Serialize(before.GlobalSettings),
+            JsonSerializer.Serialize(after.GlobalSettings));
+        Assert.Equal(
+            before.Routes
+                .Select(value => (value.Id, value.CreatedAt, value.UpdatedAt))
+                .OrderBy(value => value.Id),
+            after.Routes
+                .Select(value => (value.Id, value.CreatedAt, value.UpdatedAt))
+                .OrderBy(value => value.Id));
+        Assert.Equal(
+            before.Services
+                .Select(value => (value.Id, value.CreatedAt, value.UpdatedAt))
+                .OrderBy(value => value.Id),
+            after.Services
+                .Select(value => (value.Id, value.CreatedAt, value.UpdatedAt))
+                .OrderBy(value => value.Id));
+        Assert.Equal(
+            before.ExtensionRecords
+                .Select(value => (value.ExtensionId, value.CreatedAt, value.UpdatedAt))
+                .OrderBy(value => value.ExtensionId),
+            after.ExtensionRecords
+                .Select(value => (value.ExtensionId, value.CreatedAt, value.UpdatedAt))
+                .OrderBy(value => value.ExtensionId));
+        AssertServicesUnchanged(before.Services, after.Services);
+    }
+
+    private static void AssertOnlyHostRouteChanged(
+        HostConfigurationSnapshot before,
+        HostConfigurationSnapshot after,
+        Guid routeId)
+    {
+        Assert.Equal(checked(before.Version + 1), after.Version);
+        AssertGlobalSettingsUnchanged(before.GlobalSettings, after.GlobalSettings);
+        Assert.Equal(before.Routes.Length, after.Routes.Length);
+        foreach (var expected in before.Routes)
+        {
+            var actual = Assert.Single(after.Routes, value => value.Id == expected.Id);
+            if (expected.Id == routeId)
+            {
+                Assert.Equal(checked(expected.Version + 1), actual.Version);
+                Assert.Equal(expected.CreatedAt, actual.CreatedAt);
+                Assert.NotEqual(expected.MetadataJson, actual.MetadataJson);
+            }
+            else
+            {
+                Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(actual));
+            }
+        }
+
+        AssertServicesUnchanged(before.Services, after.Services);
+        AssertExtensionRecordsUnchanged(before.ExtensionRecords, after.ExtensionRecords);
+        AssertExtensionSettingsUnchanged(before.ExtensionSettings, after.ExtensionSettings);
+    }
+
+    private static void AssertOnlyOwnerSettingsChanged(
+        HostConfigurationSnapshot before,
+        HostConfigurationSnapshot after,
+        string extensionId)
+    {
+        Assert.Equal(checked(before.Version + 1), after.Version);
+        AssertGlobalSettingsUnchanged(before.GlobalSettings, after.GlobalSettings);
+        Assert.Equal(before.Routes.Length, after.Routes.Length);
+        foreach (var expected in before.Routes)
+        {
+            var actual = Assert.Single(after.Routes, value => value.Id == expected.Id);
+            Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(actual));
+        }
+
+        AssertServicesUnchanged(before.Services, after.Services);
+        AssertExtensionRecordsUnchanged(before.ExtensionRecords, after.ExtensionRecords);
+        Assert.Equal(before.ExtensionSettings.Length, after.ExtensionSettings.Length);
+        foreach (var expected in before.ExtensionSettings)
+        {
+            var actual = Assert.Single(
+                after.ExtensionSettings,
+                value => value.ExtensionId == expected.ExtensionId);
+            if (expected.ExtensionId == extensionId)
+            {
+                Assert.Equal(checked(expected.Version + 1), actual.Version);
+                Assert.Equal(expected.SchemaVersion, actual.SchemaVersion);
+                Assert.NotEqual(expected.SettingsJson, actual.SettingsJson);
+            }
+            else
+            {
+                Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(actual));
+            }
+        }
+    }
+
+    private static void AssertGlobalSettingsUnchanged(
+        GlobalSettingsConfiguration expected,
+        GlobalSettingsConfiguration actual) =>
+        Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(actual));
+
+    private static void AssertServicesUnchanged(
+        ImmutableArray<ServiceConfiguration> expectedServices,
+        ImmutableArray<ServiceConfiguration> actualServices)
+    {
+        Assert.Equal(expectedServices.Length, actualServices.Length);
+        foreach (var expected in expectedServices)
+        {
+            var actual = Assert.Single(actualServices, value => value.Id == expected.Id);
+            Assert.Equal(expected.Enabled, actual.Enabled);
+            Assert.Equal(expected.FileName, actual.FileName);
+            Assert.Equal(expected.ArgumentList.ToArray(), actual.ArgumentList.ToArray());
+            Assert.Equal(expected.WorkingDirectory, actual.WorkingDirectory);
+            Assert.Equal(
+                expected.Environment.OrderBy(value => value.Key).ToArray(),
+                actual.Environment.OrderBy(value => value.Key).ToArray());
+            Assert.Equal(expected.StartMode, actual.StartMode);
+            Assert.Equal(expected.RestartPolicy, actual.RestartPolicy);
+            Assert.Equal(expected.HealthCheck, actual.HealthCheck);
+            Assert.Equal(expected.CreatedAt, actual.CreatedAt);
+            Assert.Equal(expected.UpdatedAt, actual.UpdatedAt);
+            Assert.Equal(expected.Version, actual.Version);
+        }
+    }
+
+    private static void AssertExtensionRecordsUnchanged(
+        ImmutableArray<ExtensionRecordConfiguration> expectedRecords,
+        ImmutableArray<ExtensionRecordConfiguration> actualRecords)
+    {
+        Assert.Equal(expectedRecords.Length, actualRecords.Length);
+        foreach (var expected in expectedRecords)
+        {
+            var actual = Assert.Single(
+                actualRecords,
+                value => value.ExtensionId == expected.ExtensionId);
+            Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(actual));
+        }
+    }
+
+    private static void AssertExtensionSettingsUnchanged(
+        ImmutableArray<ExtensionSettingsConfiguration> expectedSettings,
+        ImmutableArray<ExtensionSettingsConfiguration> actualSettings)
+    {
+        Assert.Equal(expectedSettings.Length, actualSettings.Length);
+        foreach (var expected in expectedSettings)
+        {
+            var actual = Assert.Single(
+                actualSettings,
+                value => value.ExtensionId == expected.ExtensionId);
+            Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(actual));
+        }
+    }
+
+    private static void AssertHostServiceLifecycleUnchanged(
+        ExtensionCapabilityPostgresHarness harness,
+        ProcessInstanceId expectedProcessInstance,
+        HostServiceEndpointLease expectedEndpoint,
+        PortLease expectedLease)
+    {
+        Assert.Equal([HostServiceId], harness.StartedServiceIds);
+        Assert.Equal([expectedProcessInstance], harness.StartedProcessInstances);
+        Assert.Empty(harness.StoppedServiceIds);
+        Assert.Equal([HostServiceId], harness.AcquiredLeaseServiceIds);
+        Assert.Empty(harness.ReleasedLeaseServiceIds);
+        Assert.Equal(expectedLease, harness.GetCurrentLease(HostServiceId));
+        Assert.Equal([HostServiceId], harness.EndpointPublisher.Current.Keys);
+        Assert.Equal(expectedEndpoint, harness.EndpointPublisher.Current[HostServiceId]);
+    }
+
+    private static async Task AssertConfigurationNotificationAsync(
+        NpgsqlConnection listener,
+        ConcurrentQueue<NpgsqlNotificationEventArgs> notifications,
+        long expectedVersion,
+        CancellationToken cancellationToken)
+    {
+        var notification = await WaitForConfigurationNotificationAsync(
+            listener,
+            notifications,
+            cancellationToken);
+        Assert.Equal("nekostick_config_changed", notification.Channel);
+        Assert.Equal(
+            expectedVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            notification.Payload);
+    }
+
+    private static async Task<NpgsqlNotificationEventArgs> WaitForConfigurationNotificationAsync(
+        NpgsqlConnection listener,
+        ConcurrentQueue<NpgsqlNotificationEventArgs> notifications,
+        CancellationToken cancellationToken)
+    {
+        NpgsqlNotificationEventArgs? notification;
+        while (!notifications.TryDequeue(out notification))
+        {
+            await listener.WaitAsync(cancellationToken);
+        }
+
+        return notification!;
+    }
+
     private static void AssertSnapshotCollectionsUnchanged(
         HostConfigurationSnapshot before,
         HostConfigurationSnapshot after)
@@ -984,6 +1611,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         private readonly ServiceProvider services;
         private readonly HostConfigurationRefreshService refreshService;
         private readonly HostServiceLifecycleManager lifecycleManager;
+        private readonly HostConfigurationPublisher publisher;
+        private readonly TestProcessExecutor processExecutor;
+        private readonly TestPortLeaseStore leaseStore;
         private int disposed;
 
         private ExtensionCapabilityPostgresHarness(
@@ -991,6 +1621,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             ServiceProvider services,
             HostConfigurationRefreshService refreshService,
             HostServiceLifecycleManager lifecycleManager,
+            HostConfigurationPublisher publisher,
+            TestProcessExecutor processExecutor,
+            TestPortLeaseStore leaseStore,
             HostConfigurationSnapshotHolder snapshotHolder,
             HostRuntimeState runtimeState,
             HostServiceEndpointSnapshotPublisher endpointPublisher,
@@ -1001,6 +1634,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             this.services = services;
             this.refreshService = refreshService;
             this.lifecycleManager = lifecycleManager;
+            this.publisher = publisher;
+            this.processExecutor = processExecutor;
+            this.leaseStore = leaseStore;
             SnapshotHolder = snapshotHolder;
             RuntimeState = runtimeState;
             EndpointPublisher = endpointPublisher;
@@ -1014,6 +1650,27 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         internal string DataDirectory { get; }
         internal HostServiceEndpointSnapshotPublisher EndpointPublisher { get; }
         internal IExtensionCapabilityFactory CapabilityFactory { get; }
+        internal HostServiceLifecycleManager LifecycleManager => lifecycleManager;
+        internal ImmutableArray<Guid> StartedServiceIds => processExecutor.StartedServiceIds;
+        internal ImmutableArray<ProcessInstanceId> StartedProcessInstances => processExecutor.StartedProcessInstances;
+        internal ImmutableArray<Guid> StoppedServiceIds => processExecutor.StoppedServiceIds;
+        internal ImmutableArray<Guid> AcquiredLeaseServiceIds => leaseStore.AcquiredServiceIds;
+        internal ImmutableArray<Guid> ReleasedLeaseServiceIds => leaseStore.ReleasedServiceIds;
+
+        internal PortLease? GetCurrentLease(Guid serviceId) => leaseStore.GetCurrentLease(serviceId);
+
+        internal NpgsqlConnection CreateConnection() => scope.CreateConnection();
+
+        internal async Task PublishAndReconcileAsync(
+            HostConfigurationSnapshot snapshot,
+            CancellationToken cancellationToken)
+        {
+            var outcome = await publisher.PublishAsync(snapshot, cancellationToken: cancellationToken);
+            Assert.Equal(PublishOutcome.Published, outcome);
+            await lifecycleManager.ReconcileAsync(snapshot, cancellationToken);
+            var readiness = await lifecycleManager.EnsureReadyAsync(snapshot, HostServiceId, cancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
+        }
 
         internal static async Task<ExtensionCapabilityPostgresHarness> CreateAsync()
         {
@@ -1109,6 +1766,7 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                         NullLogger<HostConfigurationPublisher>.Instance));
 
                 var services = serviceCollection.BuildServiceProvider();
+                var publisher = services.GetRequiredService<HostConfigurationPublisher>();
                 var signal = new InitialRefreshSignal();
                 var refreshService = new HostConfigurationRefreshService(
                     snapshotHolder,
@@ -1117,7 +1775,7 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                     runtimeState,
                     services.GetRequiredService<IServiceScopeFactory>(),
                     runtimeOptions,
-                    services.GetRequiredService<HostConfigurationPublisher>(),
+                    publisher,
                     NullLogger<HostConfigurationRefreshService>.Instance);
                 await refreshService.StartAsync(cancellationToken);
                 await signal.FirstHintObserved.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
@@ -1130,6 +1788,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                     services,
                     refreshService,
                     lifecycleManager,
+                    publisher,
+                    processExecutor,
+                    leaseStore,
                     snapshotHolder,
                     runtimeState,
                     endpointPublisher,
@@ -1288,23 +1949,41 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
 
     private sealed class TestProcessExecutor : IProcessExecutor
     {
+        private readonly ConcurrentQueue<Guid> startedServiceIds = new();
+        private readonly ConcurrentQueue<ProcessInstanceId> startedProcessInstances = new();
+        private readonly ConcurrentQueue<Guid> stoppedServiceIds = new();
+
+        internal ImmutableArray<Guid> StartedServiceIds => startedServiceIds.ToImmutableArray();
+        internal ImmutableArray<ProcessInstanceId> StartedProcessInstances => startedProcessInstances.ToImmutableArray();
+        internal ImmutableArray<Guid> StoppedServiceIds => stoppedServiceIds.ToImmutableArray();
+
         public ValueTask<ProcessOperationResult> StartAsync(
             ProcessLaunchSpecification specification,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var instanceId = new ProcessInstanceId(Guid.CreateVersion7());
+            startedServiceIds.Enqueue(specification.ServiceId);
+            startedProcessInstances.Enqueue(instanceId);
+            return ValueTask.FromResult(
                 new ProcessOperationResult(
                     ProcessOperationStatus.Accepted,
                     ServiceStateReasonCode.StartAccepted,
-                    new ProcessInstanceId(Guid.CreateVersion7())));
+                    instanceId));
+        }
 
         public ValueTask<ProcessOperationResult> StopAsync(
             Guid serviceId,
             TimeSpan gracePeriod,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            stoppedServiceIds.Enqueue(serviceId);
+            return ValueTask.FromResult(
                 new ProcessOperationResult(
                     ProcessOperationStatus.Completed,
                     ServiceStateReasonCode.StopCompleted));
+        }
     }
 
     private sealed class TestHealthProbe : IServiceHealthProbe
@@ -1324,6 +2003,14 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
     private sealed class TestPortLeaseStore : IPortLeaseStore
     {
         private readonly ConcurrentDictionary<Guid, PortLease> leases = new();
+        private readonly ConcurrentQueue<Guid> acquiredServiceIds = new();
+        private readonly ConcurrentQueue<Guid> releasedServiceIds = new();
+
+        internal ImmutableArray<Guid> AcquiredServiceIds => acquiredServiceIds.ToImmutableArray();
+        internal ImmutableArray<Guid> ReleasedServiceIds => releasedServiceIds.ToImmutableArray();
+
+        internal PortLease? GetCurrentLease(Guid serviceId) =>
+            leases.TryGetValue(serviceId, out var lease) ? lease : null;
 
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
@@ -1334,6 +2021,7 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             {
                 case PortLeaseIntentKind.Acquire when intent.Request is { } request:
                 {
+                    acquiredServiceIds.Enqueue(request.ServiceId);
                     var now = DateTimeOffset.UtcNow;
                     var port = request.AutomaticPortRangeStart ?? 21000;
                     var lease = new PortLease(
@@ -1370,6 +2058,7 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                         lease));
                 }
                 case PortLeaseIntentKind.Release when intent.Release is { } release:
+                    releasedServiceIds.Enqueue(release.ServiceId);
                     if (!leases.TryRemove(release.ServiceId, out var released))
                     {
                         return ValueTask.FromResult(new PortLeaseOperationResult(
@@ -1385,6 +2074,7 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
             }
         }
     }
+
 
     private static void AssertEndpointNotFound(ExtensionEndpointResolutionResult result)
     {
