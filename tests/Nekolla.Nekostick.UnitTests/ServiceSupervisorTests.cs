@@ -29,6 +29,99 @@ public sealed class ServiceSupervisorTests
     }
 
     [Fact]
+    public async Task RetryableAcquireSchedulesWaitingRetry()
+    {
+        var events = new List<string>();
+        var lease = Lease();
+        var store = new RecordingLeaseStore(
+            events,
+            lease,
+            acquireResult: attempt => attempt == 1
+                ? new PortLeaseOperationResult(PortLeaseOperationStatus.RetryableTransient)
+                : new PortLeaseOperationResult(PortLeaseOperationStatus.Applied, lease));
+        var supervisor = Create(new RecordingExecutor(events), store);
+
+        var first = await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.RetryableTransient, first.Status);
+        Assert.Equal(ServiceStateReasonCode.PortLeaseUnavailable, first.Reason);
+        Assert.Equal(ServiceLifecycleState.Waiting, first.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceDeadlineKind.WaitingBackoff, first.Snapshot.Deadline?.Kind);
+        Assert.Null(supervisor.Lease);
+
+        var retryAt = first.Snapshot.Deadline!.Value.At;
+        var retried = await supervisor.StartAsync(retryAt, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.Applied, retried.Status);
+        Assert.Same(lease, supervisor.Lease);
+        Assert.Equal(["acquire", "acquire", "start"], events);
+    }
+
+    [Fact]
+    public async Task PolicyRejectedAcquireKeepsWaitingSnapshotForWaitingGeneration()
+    {
+        var events = new List<string>();
+        var lease = Lease();
+        var attempt = 0;
+        var store = new RecordingLeaseStore(
+            events,
+            lease,
+            acquireResult: _ =>
+            {
+                attempt++;
+                return attempt switch
+                {
+                    1 => new PortLeaseOperationResult(PortLeaseOperationStatus.RetryableTransient),
+                    2 => new PortLeaseOperationResult(PortLeaseOperationStatus.PolicyRejected),
+                    _ => new PortLeaseOperationResult(PortLeaseOperationStatus.Applied, lease)
+                };
+            });
+        var supervisor = Create(new RecordingExecutor(events), store);
+
+        var first = await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        Assert.Equal(SupervisorOperationStatus.RetryableTransient, first.Status);
+        Assert.Equal(ServiceLifecycleState.Waiting, first.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceDeadlineKind.WaitingBackoff, first.Snapshot.Deadline?.Kind);
+        Assert.Null(supervisor.Lease);
+
+        var second = await supervisor.StartAsync(
+            first.Snapshot.Deadline!.Value.At,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(SupervisorOperationStatus.PolicyRejected, second.Status);
+        Assert.Equal(ServiceStateReasonCode.PortLeaseUnavailable, second.Reason);
+        Assert.Equal(ServiceLifecycleState.Waiting, second.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceDeadlineKind.WaitingBackoff, second.Snapshot.Deadline?.Kind);
+        Assert.Null(supervisor.Lease);
+        Assert.Equal(["acquire", "acquire"], events);
+
+        var third = await supervisor.StartAsync(second.Snapshot.Deadline!.Value.At, TestContext.Current.CancellationToken);
+        Assert.Equal(SupervisorOperationStatus.Applied, third.Status);
+        Assert.Same(lease, supervisor.Lease);
+        Assert.Equal(["acquire", "acquire", "acquire", "start"], events);
+    }
+
+    [Fact]
+    public async Task PolicyRejectedAcquireMarksFreshStartAsFailed()
+    {
+        var events = new List<string>();
+        var supervisor = Create(
+            new RecordingExecutor(events),
+            new RecordingLeaseStore(
+                events,
+                Lease(),
+                acquireResult: _ => new PortLeaseOperationResult(PortLeaseOperationStatus.PolicyRejected)));
+
+        var result = await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.PolicyRejected, result.Status);
+        Assert.Equal(ServiceStateReasonCode.PortLeaseUnavailable, result.Reason);
+        Assert.Equal(ServiceLifecycleState.Failed, result.Snapshot.ObservedLifecycle);
+        Assert.Equal(ServiceStateReasonCode.StartRejected, result.Snapshot.Reason);
+        Assert.Null(supervisor.Lease);
+        Assert.Equal(["acquire"], events);
+    }
+
+    [Fact]
     public async Task RejectedStartReleasesLease()
     {
         var events = new List<string>();
@@ -56,11 +149,65 @@ public sealed class ServiceSupervisorTests
         Assert.Null(supervisor.Lease);
     }
 
+    [Fact]
+    public async Task RetryableRenewalRetainsCurrentLease()
+    {
+        var events = new List<string>();
+        var lease = Lease();
+        var store = new RecordingLeaseStore(
+            events,
+            lease,
+            renewResult: () => new PortLeaseOperationResult(PortLeaseOperationStatus.RetryableTransient));
+        var supervisor = Create(new RecordingExecutor(events), store);
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        events.Clear();
+
+        var result = await supervisor.RenewLeaseAsync(
+            Now.AddSeconds(55),
+            new PortLeasePolicy(TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(10)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.RetryableTransient, result.Status);
+        Assert.Equal(ServiceStateReasonCode.PortLeaseUnavailable, result.Reason);
+        Assert.False(result.LeaseOwnershipLost);
+        Assert.Same(lease, result.Lease);
+        Assert.Same(lease, supervisor.Lease);
+        Assert.Equal(Now.AddMinutes(1), supervisor.Lease!.ExpiresAt);
+        Assert.Equal(["renew"], events);
+    }
+
+    [Fact]
+    public async Task ConflictRenewalConfirmsOwnershipLoss()
+    {
+        var events = new List<string>();
+        var lease = Lease();
+        var store = new RecordingLeaseStore(
+            events,
+            lease,
+            renewResult: () => new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+        var supervisor = Create(new RecordingExecutor(events), store);
+        await supervisor.StartAsync(Now, TestContext.Current.CancellationToken);
+        events.Clear();
+
+        var result = await supervisor.RenewLeaseAsync(
+            Now.AddSeconds(55),
+            new PortLeasePolicy(TimeSpan.FromMinutes(1), TimeSpan.FromSeconds(10)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(SupervisorOperationStatus.Conflict, result.Status);
+        Assert.True(result.LeaseOwnershipLost);
+        Assert.Null(result.Lease);
+        Assert.Null(supervisor.Lease);
+        Assert.Equal(["renew"], events);
+    }
+
     [Theory]
     [InlineData(PortLeaseOperationStatus.Conflict, SupervisorOperationStatus.Conflict, ServiceStateReasonCode.PortLeaseConflict)]
     [InlineData(PortLeaseOperationStatus.DatabaseUnavailable, SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.DatabaseUnavailable)]
     [InlineData(PortLeaseOperationStatus.Cancelled, SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled)]
     [InlineData(PortLeaseOperationStatus.Rejected, SupervisorOperationStatus.Rejected, ServiceStateReasonCode.PortLeaseUnavailable)]
+    [InlineData(PortLeaseOperationStatus.RetryableTransient, SupervisorOperationStatus.RetryableTransient, ServiceStateReasonCode.PortLeaseUnavailable)]
+    [InlineData(PortLeaseOperationStatus.PolicyRejected, SupervisorOperationStatus.PolicyRejected, ServiceStateReasonCode.PortLeaseUnavailable)]
     public async Task FailedReleaseRetainsLeaseWhileReportingStoppedProcess(
         PortLeaseOperationStatus releaseStatus,
         SupervisorOperationStatus expectedStatus,
@@ -595,8 +742,10 @@ public sealed class ServiceSupervisorTests
     {
         private readonly List<string> _events;
         private readonly PortLease _lease;
+        private readonly Func<int, PortLeaseOperationResult>? _acquireResult;
         private readonly Func<int, PortLease>? _acquireLease;
         private readonly Func<PortLeaseOperationResult>? _releaseResult;
+        private readonly Func<PortLeaseOperationResult>? _renewResult;
         private int _acquireCount;
         public List<PortLeaseRequest> AcquireRequests { get; } = [];
         public List<PortLeaseRelease> ReleaseRequests { get; } = [];
@@ -605,12 +754,16 @@ public sealed class ServiceSupervisorTests
             List<string> events,
             PortLease lease,
             Func<int, PortLease>? acquireLease = null,
-            Func<PortLeaseOperationResult>? releaseResult = null)
+            Func<PortLeaseOperationResult>? releaseResult = null,
+            Func<int, PortLeaseOperationResult>? acquireResult = null,
+            Func<PortLeaseOperationResult>? renewResult = null)
         {
             _events = events;
             _lease = lease;
             _acquireLease = acquireLease;
             _releaseResult = releaseResult;
+            _acquireResult = acquireResult;
+            _renewResult = renewResult;
         }
 
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
@@ -621,11 +774,25 @@ public sealed class ServiceSupervisorTests
             {
                 _events.Add("acquire");
                 AcquireRequests.Add(intent.Request!);
-                var lease = _acquireLease?.Invoke(Interlocked.Increment(ref _acquireCount)) ?? _lease;
+                var attempt = Interlocked.Increment(ref _acquireCount);
+                if (_acquireResult is not null)
+                {
+                    return ValueTask.FromResult(_acquireResult(attempt));
+                }
+
+                var lease = _acquireLease?.Invoke(attempt) ?? _lease;
                 return ValueTask.FromResult(new PortLeaseOperationResult(
                     PortLeaseOperationStatus.Applied,
                     lease));
             }
+            if (intent.Kind == PortLeaseIntentKind.Renew)
+            {
+                _events.Add("renew");
+                return ValueTask.FromResult(_renewResult?.Invoke() ?? new PortLeaseOperationResult(
+                    PortLeaseOperationStatus.Applied,
+                    _lease));
+            }
+
 
             _events.Add("release");
             ReleaseRequests.Add(intent.Release!);

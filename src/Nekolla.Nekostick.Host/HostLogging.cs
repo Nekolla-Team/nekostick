@@ -25,6 +25,33 @@ internal static class HostEventIds
     internal static readonly EventId HostNodeActivityLost = new(1017, "HostNodeActivityLost");
     internal static readonly EventId ServiceLaunchMissingHostEnvironment = new(1018, "ServiceLaunchMissingHostEnvironment");
     internal static readonly EventId ServiceDependencyUnsatisfied = new(1075, "ServiceDependencyUnsatisfied");
+    internal static readonly EventId GenericServiceUnavailable = new(1112, "GenericServiceUnavailable");
+    internal static readonly EventId RuntimeStateTransition = new(1113, "RuntimeStateTransition");
+}
+
+internal enum HostGenericUnavailableReason
+{
+    SnapshotLeaseUnavailable,
+    GlobalAdmissionException,
+    GlobalAdmissionLeaseMissing,
+    RouteMatchException,
+    UnknownRouteMatchStatus,
+    MatchedRouteMissingMatch,
+    RouteAdmissionException,
+    RequestPreparationException,
+    RequestBodyDrainException,
+    FallbackPreparationException,
+    UnclassifiedAdmissionFailure,
+    TargetDeferred,
+    TargetUnavailable,
+    TargetSafeFailure,
+    UnknownTargetExecutionResult
+}
+
+internal enum HostRuntimeStateTransitionReason
+{
+    DatabaseUnavailable,
+    SnapshotAccepted
 }
 
 internal static class HostLoggerCategory
@@ -146,6 +173,32 @@ internal static partial class HostLogMessages
         int? retryAfterSeconds,
         Guid? routeId,
         RouteTargetType? targetType);
+
+    [LoggerMessage(
+        EventId = 1112,
+        Level = LogLevel.Warning,
+        Message = "Generic service unavailable response produced. Reason: {Reason}. StatusCode: {StatusCode}. TraceIdentifier: {TraceIdentifier}. ActivityTraceId: {ActivityTraceId}. ConfigurationVersion: {ConfigurationVersion}. PublicationGenerationId: {PublicationGenerationId}. RouteId: {RouteId}. TargetType: {TargetType}. OwnerExtensionId: {OwnerExtensionId}.")]
+    internal static partial void GenericServiceUnavailable(
+        ILogger logger,
+        HostGenericUnavailableReason reason,
+        int statusCode,
+        string traceIdentifier,
+        string? activityTraceId,
+        long? configurationVersion,
+        long? publicationGenerationId,
+        Guid? routeId,
+        RouteTargetType? targetType,
+        string? ownerExtensionId);
+
+    [LoggerMessage(
+        EventId = 1113,
+        Message = "Host runtime state changed. Reason: {Reason}. Caller: {Caller}. ConfigurationVersion: {ConfigurationVersion}.")]
+    internal static partial void RuntimeStateTransition(
+        ILogger logger,
+        LogLevel level,
+        HostRuntimeStateTransitionReason reason,
+        string caller,
+        long? configurationVersion);
 
     [LoggerMessage(
         EventId = 1011,

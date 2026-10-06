@@ -202,6 +202,7 @@ public sealed partial class HostServiceLifecycleManager
             var startupGate = _runtimeState.ObserveNewServiceGate();
             if (!startupGate.NewServicesAllowed)
             {
+                var databaseUnavailable = startupGate.DatabaseUnavailableGateObserved;
                 PublishRuntimeFailure(
                     slot,
                     snapshot,
@@ -210,12 +211,16 @@ public sealed partial class HostServiceLifecycleManager
                     null,
                     ExtensionServiceLifecycleState.Waiting,
                     ExtensionServiceFailureStage.Spawn,
-                    ExtensionServiceFailureCode.RuntimeUnavailable);
+                    databaseUnavailable
+                        ? ExtensionServiceFailureCode.RuntimeUnavailable
+                        : ExtensionServiceFailureCode.PortLeaseUnavailable);
                 return new(
                     service.Id,
                     snapshot.Version,
-                    HostServiceReadinessStatus.DatabaseUnavailable,
-                    databaseUnavailableProvenance: startupGate.DatabaseUnavailableGateObserved);
+                    databaseUnavailable
+                        ? HostServiceReadinessStatus.DatabaseUnavailable
+                        : HostServiceReadinessStatus.Unavailable,
+                    databaseUnavailableProvenance: databaseUnavailable);
             }
             PublishConfiguredRuntimeTransition(slot, snapshot, service, ExtensionServiceLifecycleState.Starting);
             await Task.Yield();
@@ -408,15 +413,17 @@ public sealed partial class HostServiceLifecycleManager
                     return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
                 }
 
-                var unavailableStatus = _runtimeState.NewServicesAllowed
-                    ? HostServiceReadinessStatus.Unavailable
-                    : HostServiceReadinessStatus.DatabaseUnavailable;
+                var unavailableStatus = generationResult.DatabaseUnavailableProvenance
+                    ? HostServiceReadinessStatus.DatabaseUnavailable
+                    : HostServiceReadinessStatus.Unavailable;
                 return new(
                     service.Id,
                     snapshot.Version,
                     unavailableStatus,
                     databaseUnavailableProvenance:
-                        generationResult.DatabaseUnavailableProvenance);
+                        generationResult.DatabaseUnavailableProvenance,
+                    retryableTransientProvenance:
+                        generationResult.RetryableTransientProvenance);
             }
 
             ServiceGeneration? old = null;
@@ -507,7 +514,9 @@ public sealed partial class HostServiceLifecycleManager
                     HostServiceReadinessStatus.Unavailable,
                     candidate.Supervisor.Snapshot,
                     databaseUnavailableProvenance:
-                        generationResult.DatabaseUnavailableProvenance);
+                        generationResult.DatabaseUnavailableProvenance,
+                    retryableTransientProvenance:
+                        generationResult.RetryableTransientProvenance);
             }
 
             await PublishReadyEndpointsAsync().ConfigureAwait(false);
@@ -552,7 +561,7 @@ public sealed partial class HostServiceLifecycleManager
         }
     }
 
-    private async Task<(ServiceGeneration? Generation, bool DatabaseUnavailableProvenance)> StartGenerationAsync(
+    private async Task<(ServiceGeneration? Generation, bool DatabaseUnavailableProvenance, bool RetryableTransientProvenance)> StartGenerationAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
@@ -595,7 +604,10 @@ public sealed partial class HostServiceLifecycleManager
                             : ExtensionServiceFailureCode.PortLeaseUnavailable);
                 }
 
-                return (null, status == PortLeaseOperationStatus.DatabaseUnavailable);
+                return (
+                    null,
+                    status == PortLeaseOperationStatus.DatabaseUnavailable,
+                    status == PortLeaseOperationStatus.RetryableTransient);
             }
 
             return await StartGenerationWithLeaseGateAsync(
@@ -613,7 +625,7 @@ public sealed partial class HostServiceLifecycleManager
             leaseGate.Release();
         }
     }
-    private async Task<(ServiceGeneration? Generation, bool DatabaseUnavailableProvenance)> StartGenerationWithLeaseGateAsync(
+    private async Task<(ServiceGeneration? Generation, bool DatabaseUnavailableProvenance, bool RetryableTransientProvenance)> StartGenerationWithLeaseGateAsync(
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
@@ -641,7 +653,7 @@ public sealed partial class HostServiceLifecycleManager
                     ExtensionServiceLifecycleState.Failed,
                     ExtensionServiceFailureStage.Spawn,
                     ExtensionServiceFailureCode.InvalidLaunchSpecification);
-                return (null, false);
+                return (null, false, false);
             }
 
             var request = PortLeaseRequest.Automatic(
@@ -676,12 +688,13 @@ public sealed partial class HostServiceLifecycleManager
                         ExtensionServiceFailureCode.RuntimeUnavailable);
 
                 }
-                return (null, true);
+                return (null, true, false);
             }
 
             var acquired = leaseResult.Lease;
             if (leaseResult.Status != PortLeaseOperationStatus.Applied || acquired is null)
             {
+                var gateDatabaseUnavailable = false;
                 if (leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable)
                 {
                     _runtimeState.MarkDatabaseUnavailable();
@@ -689,7 +702,12 @@ public sealed partial class HostServiceLifecycleManager
 
                 if (leaseResult.Status != PortLeaseOperationStatus.Cancelled || !cancellationToken.IsCancellationRequested)
                 {
-                    var failureCode = leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable
+                    if (leaseResult.Status == PortLeaseOperationStatus.PolicyRejected)
+                    {
+                        gateDatabaseUnavailable = _runtimeState.ObserveNewServiceGate().DatabaseUnavailableGateObserved;
+                    }
+
+                    var failureCode = leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable || gateDatabaseUnavailable
                         ? ExtensionServiceFailureCode.RuntimeUnavailable
                         : ExtensionServiceFailureCode.PortLeaseUnavailable;
                     PublishRuntimeFailure(
@@ -703,7 +721,10 @@ public sealed partial class HostServiceLifecycleManager
                         failureCode);
 
                 }
-                return (null, leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable);
+                return (
+                    null,
+                    leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable || gateDatabaseUnavailable,
+                    leaseResult.Status == PortLeaseOperationStatus.RetryableTransient);
             }
 
             if (IsStopping ||
@@ -728,7 +749,7 @@ public sealed partial class HostServiceLifecycleManager
                         ExtensionServiceFailureCode.PortLeaseUnavailable);
                 }
 
-                return (null, false);
+                return (null, false, false);
             }
 
             Task<SupervisorOperationResult>? startTask = null;
@@ -803,7 +824,7 @@ public sealed partial class HostServiceLifecycleManager
             if (supervisor is null)
             {
                 _ = await ReleaseAutomaticLeaseAsync(request, acquired, CancellationToken.None).ConfigureAwait(false);
-                return (null, false);
+                return (null, false, false);
             }
 
             if (candidate is not null)
@@ -846,7 +867,7 @@ public sealed partial class HostServiceLifecycleManager
                 if (candidateSuperseded || IsStopping)
                 {
                     await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-                    return (null, false);
+                    return (null, false, false);
                 }
 
                 var failureCode = dependencyBindingUnavailable
@@ -894,7 +915,7 @@ public sealed partial class HostServiceLifecycleManager
                         updatedAt: DateTimeOffset.UtcNow);
                 }
 
-                return (null, false);
+                return (null, false, false);
             }
 
             SupervisorOperationResult started;
@@ -934,7 +955,7 @@ public sealed partial class HostServiceLifecycleManager
                         updatedAt: DateTimeOffset.UtcNow);
                 }
 
-                return (null, false);
+                return (null, false, false);
             }
 
             if (started.Reason == ServiceStateReasonCode.MissingHostEnvironment &&
@@ -950,8 +971,10 @@ public sealed partial class HostServiceLifecycleManager
             if (candidate is null)
             {
                 await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-                return (null, false);
+                return (null, false, false);
             }
+            candidate.RetryableTransientProvenance =
+                started.Status == SupervisorOperationStatus.RetryableTransient;
 
             if (started.Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
             {
@@ -971,7 +994,10 @@ public sealed partial class HostServiceLifecycleManager
                         : failureCode,
                     retryAt: started.Snapshot.Deadline?.At);
                 keepStartingCandidate = true;
-                return (candidate, started.Reason == ServiceStateReasonCode.DatabaseUnavailable);
+                return (
+                    candidate,
+                    started.Reason == ServiceStateReasonCode.DatabaseUnavailable,
+                    started.Status == SupervisorOperationStatus.RetryableTransient);
             }
 
             if (started.Status != SupervisorOperationStatus.Applied || supervisor.Lease is null)
@@ -1000,7 +1026,10 @@ public sealed partial class HostServiceLifecycleManager
                     failureLifecycle,
                     ExtensionServiceFailureStage.Spawn,
                     failureCode);
-                return (null, started.Reason == ServiceStateReasonCode.DatabaseUnavailable);
+                return (
+                    null,
+                    started.Reason == ServiceStateReasonCode.DatabaseUnavailable,
+                    started.Status == SupervisorOperationStatus.RetryableTransient);
             }
             if (!_serviceLogBufferRegistry.HasOutputTap &&
                 started.Status == SupervisorOperationStatus.Applied &&
@@ -1016,7 +1045,7 @@ public sealed partial class HostServiceLifecycleManager
             if (IsStopping)
             {
                 await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-                return (null, false);
+                return (null, false, false);
             }
 
             var healthy = await WaitForHealthyAsync(slot, snapshot, candidate, cancellationToken).ConfigureAwait(false);
@@ -1025,7 +1054,7 @@ public sealed partial class HostServiceLifecycleManager
                 if (IsStopping || cancellationToken.IsCancellationRequested)
                 {
                     await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
-                    return (null, false);
+                    return (null, false, false);
                 }
 
                 var failedState = supervisor.Snapshot;
@@ -1102,14 +1131,14 @@ public sealed partial class HostServiceLifecycleManager
                     failureCode,
                     processExitCode: processExitCode,
                     updatedAt: DateTimeOffset.UtcNow);
-                return (null, stopResult.Reason == ServiceStateReasonCode.DatabaseUnavailable);
+                return (null, stopResult.Reason == ServiceStateReasonCode.DatabaseUnavailable, false);
             }
 
             candidate.Lease = ready.Lease;
             candidate.HealthRetryState = ready.Retry;
             candidate.Ready = true;
             keepStartingCandidate = true;
-            return (candidate, false);
+            return (candidate, false, false);
         }
         finally
         {

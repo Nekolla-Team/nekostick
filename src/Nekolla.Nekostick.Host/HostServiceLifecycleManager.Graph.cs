@@ -15,13 +15,15 @@ public sealed partial class HostServiceLifecycleManager
     private readonly Dictionary<CancellationTokenSource, long> _graphPreparationTokens = [];
     private long _failedGraphConfigurationVersion = -1;
     private bool _failedGraphDatabaseUnavailable;
+    private bool _failedGraphRetryableTransient;
 
     private readonly record struct GraphRefreshOutcome(
         bool Required,
         bool Committed,
         bool DatabaseUnavailable,
         bool Superseded,
-        ImmutableHashSet<Guid> AffectedServiceIds)
+        ImmutableHashSet<Guid> AffectedServiceIds,
+        bool RetryableTransientProvenance = false)
     {
         internal static GraphRefreshOutcome None { get; } = new(
             false,
@@ -62,7 +64,9 @@ public sealed partial class HostServiceLifecycleManager
                 latest.Version,
                 outcome.DatabaseUnavailable
                     ? HostServiceReadinessStatus.DatabaseUnavailable
-                    : HostServiceReadinessStatus.Unavailable);
+                    : HostServiceReadinessStatus.Unavailable,
+                databaseUnavailableProvenance: outcome.DatabaseUnavailable,
+                retryableTransientProvenance: outcome.RetryableTransientProvenance);
         }
 
         return await EnsureReadyAsync(
@@ -203,19 +207,21 @@ public sealed partial class HostServiceLifecycleManager
 
             if (!forceRetry && _failedGraphConfigurationVersion == latest.Version)
             {
-                return new(true, false, _failedGraphDatabaseUnavailable, false, plan.ServiceIds);
+                return new(true, false, _failedGraphDatabaseUnavailable, false, plan.ServiceIds, _failedGraphRetryableTransient);
             }
 
             if (!plan.IsValid)
             {
                 _failedGraphConfigurationVersion = latest.Version;
                 _failedGraphDatabaseUnavailable = false;
+                _failedGraphRetryableTransient = false;
                 return new(true, false, false, false, plan.ServiceIds);
             }
 
             var candidates = new Dictionary<Guid, ServiceGeneration>();
             var projectedBindings = new Dictionary<Guid, ImmutableDictionary<Guid, ServiceDependencyBinding>>();
             var databaseUnavailable = false;
+            var retryableTransient = false;
             try
             {
                 foreach (var serviceId in plan.PreparationOrder)
@@ -283,6 +289,7 @@ public sealed partial class HostServiceLifecycleManager
                         cancellationToken,
                         graphPreparation: true).ConfigureAwait(false);
                     databaseUnavailable |= started.DatabaseUnavailableProvenance;
+                    retryableTransient |= started.RetryableTransientProvenance;
                     if (started.Generation is { } candidate)
                     {
                         candidates[serviceId] = candidate;
@@ -297,8 +304,22 @@ public sealed partial class HostServiceLifecycleManager
                             return new(true, false, false, true, plan.ServiceIds);
                         }
 
-                        MarkGraphFailure(latest.Version, databaseUnavailable);
-                        return new(true, false, databaseUnavailable, false, plan.ServiceIds);
+                        if (!retryableTransient)
+                        {
+                            MarkGraphFailure(latest.Version, databaseUnavailable);
+                        }
+                        else
+                        {
+                            MarkGraphFailure(latest.Version, databaseUnavailable, retryableTransient);
+                        }
+
+                        return new(
+                            true,
+                            false,
+                            databaseUnavailable,
+                            false,
+                            plan.ServiceIds,
+                            retryableTransient);
                     }
 
                     projectedBindings[serviceId] = readyCandidate.DependencyBindings;
@@ -317,6 +338,7 @@ public sealed partial class HostServiceLifecycleManager
                     if (!superseded)
                     {
                         MarkGraphFailure(latest.Version, false);
+                        _failedGraphRetryableTransient = false;
                     }
 
                     return new(true, false, false, superseded, plan.ServiceIds);
@@ -324,6 +346,7 @@ public sealed partial class HostServiceLifecycleManager
 
                 _failedGraphConfigurationVersion = -1;
                 _failedGraphDatabaseUnavailable = false;
+                _failedGraphRetryableTransient = false;
                 foreach (var serviceId in plan.PreparationOrder)
                 {
                     if (candidates.TryGetValue(serviceId, out var candidate))
@@ -345,8 +368,22 @@ public sealed partial class HostServiceLifecycleManager
             {
                 HostLogMessages.FailureDetails(_logger, exception, nameof(RefreshChangedActiveGraphCoreAsync));
                 await RollbackGraphCandidatesAsync(plan, candidates).ConfigureAwait(false);
-                MarkGraphFailure(latest.Version, databaseUnavailable);
-                return new(true, false, databaseUnavailable, false, plan.ServiceIds);
+                if (!retryableTransient)
+                {
+                    MarkGraphFailure(latest.Version, databaseUnavailable);
+                }
+                else
+                {
+                    MarkGraphFailure(latest.Version, databaseUnavailable, retryableTransient);
+                }
+
+                return new(
+                    true,
+                    false,
+                    databaseUnavailable,
+                    false,
+                    plan.ServiceIds,
+                    retryableTransient);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -359,10 +396,38 @@ public sealed partial class HostServiceLifecycleManager
         }
     }
 
-    private void MarkGraphFailure(long configurationVersion, bool databaseUnavailable)
+    private void MarkGraphFailure(long configurationVersion, bool databaseUnavailable, bool retryableTransient = false)
     {
         _failedGraphConfigurationVersion = configurationVersion;
         _failedGraphDatabaseUnavailable = databaseUnavailable;
+        _failedGraphRetryableTransient = retryableTransient;
+    }
+
+    /// <summary>Computes the graph refresh redrive entry for one lifecycle tick.</summary>
+    /// <param name="snapshotVersion">The configuration version observed by the tick.</param>
+    /// <returns><c>true</c> when the current version failed with a retryable transient outcome.</returns>
+    internal bool HasFailedGraphTransientRetry(long snapshotVersion) =>
+        Volatile.Read(ref _failedGraphConfigurationVersion) == snapshotVersion &&
+        Volatile.Read(ref _failedGraphRetryableTransient);
+
+    /// <summary>Re-drives the failed graph refresh once per lifecycle tick for a retryable transient outcome.</summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    internal async Task RetryFailedGraphTransientAsync(CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var snapshot = _snapshotHolder.Current;
+        if (snapshot is null ||
+            !HasFailedGraphTransientRetry(snapshot.Version) ||
+            !_runtimeState.NewServicesAllowed)
+        {
+            return;
+        }
+
+        await RefreshChangedActiveGraphAsync(snapshot, cancellationToken, forceRetry: true).ConfigureAwait(false);
     }
 
     private ActiveGraphPlan? CreateActiveGraphPlan(HostConfigurationSnapshot snapshot)

@@ -19,7 +19,11 @@ public enum SupervisorOperationStatus
     /// <summary>The operation was cancelled before completion.</summary>
     Cancelled,
     /// <summary>The operation failed while communicating with an adapter.</summary>
-    Failed
+    Failed,
+    /// <summary>The lease operation exhausted bounded retries for a retryable transient failure.</summary>
+    RetryableTransient,
+    /// <summary>The lease operation was rejected by current host policy.</summary>
+    PolicyRejected
 }
 
 /// <summary>Contains the fixed outcome and resulting state of one supervisor operation.</summary>
@@ -245,6 +249,62 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         Interlocked.Increment(ref lifecycleEpoch);
         return Exchange(ServiceStateTransition.SetDesiredState(Snapshot, desired, now));
     }
+
+    internal async ValueTask<SupervisorOperationResult> DeferStartForRetryableLeaseFailureAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            SupervisionLogMessages.OperationCancelled(_logger, "Start", launchSpecification.ServiceId);
+            return Result(SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled, Snapshot);
+        }
+
+        try
+        {
+            Interlocked.Increment(ref lifecycleEpoch);
+            return RecordRetryableLeaseFailureCore(now);
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
+    }
+
+    private SupervisorOperationResult RecordRetryableLeaseFailureCore(DateTimeOffset now)
+    {
+        var waiting = Exchange(ServiceStateTransition.RecordRetryableLeaseFailure(
+            Snapshot,
+            NextWaitingRetryAt(now),
+            now));
+        return Result(
+            SupervisorOperationStatus.RetryableTransient,
+            ServiceStateReasonCode.PortLeaseUnavailable,
+            waiting,
+            Lease);
+    }
+
+    private DateTimeOffset NextWaitingRetryAt(DateTimeOffset now)
+    {
+        waitingAttempts = waitingAttempts == int.MaxValue
+            ? int.MaxValue
+            : checked(waitingAttempts + 1);
+        var baseDelay = WaitingBackoffPolicy.GetBaseDelay(waitingAttempts);
+        var jitter = waitingJitter.GetJitter(WaitingBackoffPolicy.MaximumJitter, waitingAttempts);
+        if (jitter < TimeSpan.Zero || jitter > WaitingBackoffPolicy.MaximumJitter)
+        {
+            jitter = TimeSpan.Zero;
+        }
+
+        var delayTicks = Math.Min(
+            WaitingBackoffPolicy.MaximumDelay.Ticks,
+            checked(baseDelay.Ticks + jitter.Ticks));
+        return now.ToUniversalTime().Add(TimeSpan.FromTicks(delayTicks));
+    }
     /// <summary>Serializes process start with other lifecycle operations.</summary>
     /// <param name="now">The operation timestamp.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -312,6 +372,11 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         {
             var cancelled = releaseFailure.Status == SupervisorOperationStatus.Cancelled ||
                 cancellationToken.IsCancellationRequested;
+
+            if (!cancelled && releaseFailure.Status == SupervisorOperationStatus.RetryableTransient)
+            {
+                return RecordRetryableLeaseFailureCore(now);
+            }
             var failedSnapshot = cancelled
                 ? Exchange(ServiceStateTransition.RecordStartCancelled(Snapshot, now))
                 : Exchange(ServiceStateTransition.RecordStartResult(Snapshot, false, now));
@@ -368,6 +433,11 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 {
                     if (!heldLease.IsExpired(now))
                     {
+
+                        if (release.Status == SupervisorOperationStatus.RetryableTransient)
+                        {
+                            return RecordRetryableLeaseFailureCore(now);
+                        }
                         return Result(
                             release.Status,
                             release.Reason,
@@ -411,6 +481,8 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 PortLeaseOperationStatus.Conflict => ServiceStateReasonCode.PortLeaseConflict,
                 PortLeaseOperationStatus.Cancelled => ServiceStateReasonCode.Cancelled,
                 PortLeaseOperationStatus.DatabaseUnavailable => ServiceStateReasonCode.DatabaseUnavailable,
+                PortLeaseOperationStatus.RetryableTransient => ServiceStateReasonCode.PortLeaseUnavailable,
+                PortLeaseOperationStatus.PolicyRejected => ServiceStateReasonCode.PortLeaseUnavailable,
                 _ => ServiceStateReasonCode.PortLeaseUnavailable
             };
             var status = leaseResult.Status switch
@@ -418,12 +490,25 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
                 PortLeaseOperationStatus.Conflict => SupervisorOperationStatus.Conflict,
                 PortLeaseOperationStatus.Cancelled => SupervisorOperationStatus.Cancelled,
                 PortLeaseOperationStatus.Rejected => SupervisorOperationStatus.Rejected,
+                PortLeaseOperationStatus.RetryableTransient => SupervisorOperationStatus.RetryableTransient,
+                PortLeaseOperationStatus.PolicyRejected => SupervisorOperationStatus.PolicyRejected,
                 _ => SupervisorOperationStatus.Unavailable
             };
             if (leaseResult.Status == PortLeaseOperationStatus.DatabaseUnavailable &&
                 Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
             {
                 return Result(SupervisorOperationStatus.Unavailable, reason, Snapshot);
+            }
+
+            if (leaseResult.Status == PortLeaseOperationStatus.PolicyRejected &&
+                Snapshot.ObservedLifecycle == ServiceLifecycleState.Waiting)
+            {
+                return Result(SupervisorOperationStatus.PolicyRejected, reason, Snapshot);
+            }
+
+            if (leaseResult.Status == PortLeaseOperationStatus.RetryableTransient)
+            {
+                return RecordRetryableLeaseFailureCore(now);
             }
             return Result(
                 status,
@@ -480,20 +565,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         initialLeasePending = false;
         _ = await ReleaseLeaseCoreAsync(CancellationToken.None).ConfigureAwait(false);
 
-        waitingAttempts = waitingAttempts == int.MaxValue
-            ? int.MaxValue
-            : checked(waitingAttempts + 1);
-        var baseDelay = WaitingBackoffPolicy.GetBaseDelay(waitingAttempts);
-        var jitter = waitingJitter.GetJitter(WaitingBackoffPolicy.MaximumJitter, waitingAttempts);
-        if (jitter < TimeSpan.Zero || jitter > WaitingBackoffPolicy.MaximumJitter)
-        {
-            jitter = TimeSpan.Zero;
-        }
-
-        var delayTicks = Math.Min(
-            WaitingBackoffPolicy.MaximumDelay.Ticks,
-            checked(baseDelay.Ticks + jitter.Ticks));
-        var retryAt = now.ToUniversalTime().Add(TimeSpan.FromTicks(delayTicks));
+        var retryAt = NextWaitingRetryAt(now);
         var waiting = Exchange(ServiceStateTransition.RecordExecutableMissing(Snapshot, retryAt, now));
         return Result(SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.ExecutableMissing, waiting);
     }

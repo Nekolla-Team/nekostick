@@ -38,16 +38,19 @@ public sealed record HostServiceReadinessResult
         long configurationVersion,
         HostServiceReadinessStatus status,
         ServiceRuntimeSnapshot? snapshot = null,
-        bool databaseUnavailableProvenance = false)
+        bool databaseUnavailableProvenance = false,
+        bool retryableTransientProvenance = false)
     {
         ServiceId = serviceId;
         ConfigurationVersion = configurationVersion;
         Status = status;
         Snapshot = snapshot;
         DatabaseUnavailableProvenance = databaseUnavailableProvenance;
+        RetryableTransientProvenance = retryableTransientProvenance;
     }
 
     internal bool DatabaseUnavailableProvenance { get; }
+    internal bool RetryableTransientProvenance { get; }
 
     /// <summary>Gets the requested service identifier.</summary>
     public Guid ServiceId { get; }
@@ -455,15 +458,20 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                         HostServiceReadinessStatus.Unavailable,
                         waitingState,
                         databaseUnavailableProvenance:
-                            waitingState.Reason == ServiceStateReasonCode.DatabaseUnavailable);
+                            waitingState.Reason == ServiceStateReasonCode.DatabaseUnavailable,
+                        retryableTransientProvenance: waiting.RetryableTransientProvenance);
                 }
                 else if (!startupGate.NewServicesAllowed)
                 {
+                    var databaseUnavailable = _snapshotHolder.Current is null ||
+                        startupGate.DatabaseUnavailableGateObserved;
                     immediateResult = new(
                         serviceId,
                         snapshot.Version,
-                        HostServiceReadinessStatus.DatabaseUnavailable,
-                        databaseUnavailableProvenance: startupGate.DatabaseUnavailableGateObserved);
+                        databaseUnavailable
+                            ? HostServiceReadinessStatus.DatabaseUnavailable
+                            : HostServiceReadinessStatus.Unavailable,
+                        databaseUnavailableProvenance: databaseUnavailable);
                 }
                 else
                 {
@@ -541,6 +549,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 await ReconcileAsync(snapshot, stoppingToken).ConfigureAwait(false);
             }
 
+            await RetryFailedGraphTransientAsync(stoppingToken).ConfigureAwait(false);
             await RetryWaitingServicesAsync(DateTimeOffset.UtcNow, stoppingToken).ConfigureAwait(false);
             await RenewLeasesAsync(stoppingToken).ConfigureAwait(false);
             await ObserveReadyHealthAsync(stoppingToken).ConfigureAwait(false);
@@ -804,7 +813,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             return;
         }
 
-        if (!result.DatabaseUnavailableProvenance)
+        if (!result.DatabaseUnavailableProvenance && !result.RetryableTransientProvenance)
         {
             ClearEagerStartupRetry(slot, service.Id, snapshot.Version, service.Version, operationId);
             return;
@@ -828,7 +837,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             runtimeSnapshot.ConfigurationVersion == snapshot.Version &&
             runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.None &&
             runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.RuntimeUnavailable &&
-            runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.DependencyUnavailable)
+            runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.DependencyUnavailable &&
+            runtimeSnapshot.FailureCode != ExtensionServiceFailureCode.PortLeaseUnavailable)
         {
             ClearEagerStartupRetry(slot, service.Id, snapshot.Version, service.Version, operationId);
             return;
@@ -1220,6 +1230,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
             throw new OperationCanceledException(cancellationToken);
         }
+        generation.RetryableTransientProvenance =
+            started.Status == SupervisorOperationStatus.RetryableTransient;
         if (started.Reason == ServiceStateReasonCode.DatabaseUnavailable)
         {
             _runtimeState.MarkDatabaseUnavailable();
@@ -1256,7 +1268,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 generation.Configuration.Id,
                 snapshot.Version,
                 HostServiceReadinessStatus.Unavailable,
-                started.Snapshot);
+                started.Snapshot,
+                retryableTransientProvenance: generation.RetryableTransientProvenance);
         }
 
         if (started.Status != SupervisorOperationStatus.Applied || generation.Supervisor.Lease is null)
@@ -1598,6 +1611,14 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             else if (result.Reason == ServiceStateReasonCode.DatabaseUnavailable)
             {
                 _runtimeState.MarkDatabaseUnavailable();
+            }
+
+            else if (result.Status is SupervisorOperationStatus.RetryableTransient or SupervisorOperationStatus.PolicyRejected)
+            {
+                if (result.Lease is { } retainedLease)
+                {
+                    generation.Lease = retainedLease;
+                }
             }
             else if (result.Status != SupervisorOperationStatus.Applied || result.Lease is null)
             {

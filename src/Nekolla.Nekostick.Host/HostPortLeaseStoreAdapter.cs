@@ -92,7 +92,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
         if (!_runtimeState.NewLeasesAllowed)
         {
             HostLogMessages.PortLeaseNewLeasesRejected(_logger, request.ServiceId, request.Port);
-            return new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable);
+            return new PortLeaseOperationResult(PortLeaseOperationStatus.PolicyRejected);
         }
 
         var result = await store.AcquireAsync(
@@ -118,7 +118,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
         if (!_runtimeState.NewLeasesAllowed)
         {
             HostLogMessages.PortLeaseNewLeasesRejected(_logger, request.ServiceId, request.Port);
-            return new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable);
+            return new PortLeaseOperationResult(PortLeaseOperationStatus.PolicyRejected);
         }
 
         var result = await store.RenewAsync(
@@ -170,6 +170,8 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
             PersistencePortLeaseOperationStatus.NotFound => PortLeaseOperationStatus.NotFound,
             PersistencePortLeaseOperationStatus.DatabaseUnavailable => PortLeaseOperationStatus.DatabaseUnavailable,
             PersistencePortLeaseOperationStatus.Cancelled => PortLeaseOperationStatus.Cancelled,
+            PersistencePortLeaseOperationStatus.Rejected => PortLeaseOperationStatus.Rejected,
+            PersistencePortLeaseOperationStatus.RetryableTransient => PortLeaseOperationStatus.RetryableTransient,
             _ => PortLeaseOperationStatus.Rejected
         };
         if (result.Lease is null)

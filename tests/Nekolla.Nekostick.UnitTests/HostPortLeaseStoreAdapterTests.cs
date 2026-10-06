@@ -113,6 +113,33 @@ public sealed class HostPortLeaseStoreAdapterTests
     }
 
     [Fact]
+    public async Task RetryableTransientResultDoesNotFailClosedRuntime()
+    {
+        var store = new RecordingStore
+        {
+            AcquireResult = new PersistencePortLeaseOperationResult(
+                PersistencePortLeaseOperationStatus.RetryableTransient)
+        };
+        var runtime = CreateRuntimeState(accepted: true);
+        var adapter = new HostPortLeaseStoreAdapter(store, runtime);
+        var request = new PortLeaseRequest(
+            new NodeIdentifier("node"),
+            ServiceId,
+            GenerationId,
+            23456,
+            TimeSpan.FromMinutes(1));
+
+        var result = await adapter.ApplyAsync(
+            PortLeaseIntent.Acquire(request),
+            CancellationToken.None);
+
+        Assert.Equal(PortLeaseOperationStatus.RetryableTransient, result.Status);
+        Assert.Null(result.Lease);
+        Assert.True(runtime.Status.DatabaseAvailable);
+        Assert.True(runtime.NewLeasesAllowed);
+    }
+
+    [Fact]
     public async Task PersistenceErrorMapsToUnavailableAndMarksRuntimeUnavailable()
     {
         var store = new RecordingStore
@@ -166,13 +193,14 @@ public sealed class HostPortLeaseStoreAdapterTests
     }
 
     [Fact]
-    public async Task UnavailableRuntimeRejectsAcquireWithoutCallingPersistence()
+    public async Task PolicyGateRejectsAcquireWithoutCallingPersistence()
     {
         var store = new RecordingStore
         {
             AcquireResult = AppliedPersistenceLease(port: 23456, version: 1)
         };
-        var runtime = CreateRuntimeState(accepted: false);
+        var runtime = CreateRuntimeState(accepted: true);
+        runtime.MarkSnapshotRejected();
         var adapter = new HostPortLeaseStoreAdapter(store, runtime);
         var request = new PortLeaseRequest(
             new NodeIdentifier("node"),
@@ -185,20 +213,21 @@ public sealed class HostPortLeaseStoreAdapterTests
             PortLeaseIntent.Acquire(request),
             CancellationToken.None);
 
-        Assert.Equal(PortLeaseOperationStatus.DatabaseUnavailable, result.Status);
+        Assert.Equal(PortLeaseOperationStatus.PolicyRejected, result.Status);
         Assert.Null(store.AcquireRequest);
-        Assert.False(runtime.Status.DatabaseAvailable);
+        Assert.True(runtime.Status.DatabaseAvailable);
         Assert.False(runtime.NewLeasesAllowed);
     }
 
     [Fact]
-    public async Task UnavailableRuntimeRejectsRenewWithoutCallingPersistence()
+    public async Task PolicyGateRejectsRenewWithoutCallingPersistence()
     {
         var store = new RecordingStore
         {
             RenewResult = AppliedPersistenceLease(port: 23456, version: 2)
         };
-        var runtime = CreateRuntimeState(accepted: false);
+        var runtime = CreateRuntimeState(accepted: true);
+        runtime.MarkSnapshotRejected();
         var adapter = new HostPortLeaseStoreAdapter(store, runtime);
         var renewal = new PortLeaseRenewal(
             new NodeIdentifier("node"),
@@ -212,9 +241,10 @@ public sealed class HostPortLeaseStoreAdapterTests
             PortLeaseIntent.Renew(renewal),
             CancellationToken.None);
 
-        Assert.Equal(PortLeaseOperationStatus.DatabaseUnavailable, result.Status);
+        Assert.Equal(PortLeaseOperationStatus.PolicyRejected, result.Status);
         Assert.Null(result.Lease);
         Assert.Null(store.RenewRequest);
+        Assert.True(runtime.Status.DatabaseAvailable);
         Assert.False(runtime.NewLeasesAllowed);
     }
 

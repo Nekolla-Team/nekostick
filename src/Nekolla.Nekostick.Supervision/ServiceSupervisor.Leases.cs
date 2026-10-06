@@ -92,7 +92,11 @@ public sealed partial class ServiceSupervisor
         if (!usable)
         {
             var ownershipLost = operation.Status is PortLeaseOperationStatus.Conflict or PortLeaseOperationStatus.NotFound;
-            if (operation.Status != PortLeaseOperationStatus.DatabaseUnavailable)
+            var retainedLease = operation.Status is
+                PortLeaseOperationStatus.DatabaseUnavailable or
+                PortLeaseOperationStatus.RetryableTransient or
+                PortLeaseOperationStatus.PolicyRejected;
+            if (!retainedLease)
             {
                 Interlocked.CompareExchange(ref lease, null, current);
             }
@@ -102,6 +106,8 @@ public sealed partial class ServiceSupervisor
                 PortLeaseOperationStatus.Conflict => ServiceStateReasonCode.PortLeaseConflict,
                 PortLeaseOperationStatus.Cancelled => ServiceStateReasonCode.Cancelled,
                 PortLeaseOperationStatus.DatabaseUnavailable => ServiceStateReasonCode.DatabaseUnavailable,
+                PortLeaseOperationStatus.RetryableTransient => ServiceStateReasonCode.PortLeaseUnavailable,
+                PortLeaseOperationStatus.PolicyRejected => ServiceStateReasonCode.PortLeaseUnavailable,
                 PortLeaseOperationStatus.NotFound => ServiceStateReasonCode.PortLeaseExpired,
                 _ => ServiceStateReasonCode.PortLeaseUnavailable
             };
@@ -110,13 +116,15 @@ public sealed partial class ServiceSupervisor
                 PortLeaseOperationStatus.Conflict => SupervisorOperationStatus.Conflict,
                 PortLeaseOperationStatus.Cancelled => SupervisorOperationStatus.Cancelled,
                 PortLeaseOperationStatus.Rejected => SupervisorOperationStatus.Rejected,
+                PortLeaseOperationStatus.RetryableTransient => SupervisorOperationStatus.RetryableTransient,
+                PortLeaseOperationStatus.PolicyRejected => SupervisorOperationStatus.PolicyRejected,
                 _ => SupervisorOperationStatus.Unavailable
             };
             return Result(
                 status,
                 reason,
                 Snapshot,
-                operation.Status == PortLeaseOperationStatus.DatabaseUnavailable ? current : null,
+                retainedLease ? current : null,
                 leaseOwnershipLost: ownershipLost);
         }
 

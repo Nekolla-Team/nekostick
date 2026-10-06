@@ -14,6 +14,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
 {
     private const int MinimumPort = 1;
     private const int MaximumPort = 65535;
+    private const int MaximumTransientAttempts = 3;
     private readonly NekostickDbContext _db;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
@@ -45,115 +46,15 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             return new(PersistencePortLeaseOperationStatus.Rejected);
         }
 
-        var entered = false;
-        try
-        {
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            entered = true;
-            await using var transaction = await _db.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable,
-                cancellationToken).ConfigureAwait(false);
-            var now = _time.GetUtcNow().ToUniversalTime();
-            var persistedNow = TruncateToMicrosecond(now);
-            if (!await HasUsableOwnerAsync(
-                    request.NodeId,
-                    request.ServiceId,
-                    requireEnabledService: true,
-                    cancellationToken: cancellationToken).ConfigureAwait(false))
-            {
-                return new(PersistencePortLeaseOperationStatus.Rejected);
-            }
-
-            var existingForGeneration = await _db.PortLeases
-                .SingleOrDefaultAsync(
-                    value => value.NodeId == request.NodeId &&
-                        value.ServiceId == request.ServiceId &&
-                        value.GenerationId == request.GenerationId,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (existingForGeneration is not null && existingForGeneration.LeaseExpiresAt > now)
-            {
-                return new(PersistencePortLeaseOperationStatus.Conflict);
-            }
-
-            if (existingForGeneration is not null && request.ExpectedVersion is not null &&
-                existingForGeneration.Version != request.ExpectedVersion.Value)
-            {
-                return new(PersistencePortLeaseOperationStatus.Conflict);
-            }
-
-            if (existingForGeneration is null && request.ExpectedVersion is not null)
-            {
-                return new(PersistencePortLeaseOperationStatus.Conflict);
-            }
-
-            if (await ReclaimExpiredAsync(request.NodeId, now, cancellationToken).ConfigureAwait(false))
-            {
-                await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            var port = await SelectPortAsync(request, request.NodeId, cancellationToken).ConfigureAwait(false);
-            if (port is null)
-            {
-                return new(PersistencePortLeaseOperationStatus.Conflict);
-            }
-
-            var leaseExpiresAt = TryGetExpiry(now, request.TimeToLive);
-            if (leaseExpiresAt is null)
-            {
-                return new(PersistencePortLeaseOperationStatus.Rejected);
-            }
-
-            var entity = new PortLease
-            {
-                Id = Guid.CreateVersion7(),
-                NodeId = request.NodeId,
-                Port = port.Value,
-                ServiceId = request.ServiceId,
-                GenerationId = request.GenerationId,
-                LeaseExpiresAt = leaseExpiresAt.Value,
-                RenewedAt = persistedNow,
-                Version = 1,
-                CreatedAt = persistedNow,
-                UpdatedAt = persistedNow
-            };
-            _db.PortLeases.Add(entity);
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return Applied(ToSnapshot(entity));
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            PersistenceLogMessages.PortLeaseCancelled(
-                _logger,
-                "Acquire",
-                request.NodeId,
-                request.ServiceId,
-                request.Port);
-            return PersistencePortLeaseOperationResult.Cancelled();
-        }
-        catch (DbUpdateConcurrencyException exception)
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Acquire", request.NodeId, request.ServiceId, request.Port);
-            return new(PersistencePortLeaseOperationStatus.Conflict);
-        }
-        catch (DbUpdateException exception) when (IsLeaseConflict(exception))
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Acquire", request.NodeId, request.ServiceId, request.Port);
-            return new(PersistencePortLeaseOperationStatus.Conflict);
-        }
-        catch (Exception exception)
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Acquire", request.NodeId, request.ServiceId, request.Port);
-            return PersistencePortLeaseOperationResult.Unavailable();
-        }
-        finally
-        {
-            if (entered)
-            {
-                _gate.Release();
-            }
-        }
+        return await ExecuteWithRetryAsync(
+            "Acquire",
+            request.NodeId,
+            request.ServiceId,
+            request.Port,
+            request,
+            static (store, value, token) => store.AcquireAttemptAsync(value, token),
+            MutationFailureResult,
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -166,92 +67,15 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             return new(PersistencePortLeaseOperationStatus.Rejected);
         }
 
-        var entered = false;
-        try
-        {
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            entered = true;
-            await using var transaction = await _db.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable,
-                cancellationToken).ConfigureAwait(false);
-            var now = _time.GetUtcNow().ToUniversalTime();
-            var persistedNow = TruncateToMicrosecond(now);
-            if (!await HasUsableOwnerAsync(
-                    request.NodeId,
-                    request.ServiceId,
-                    requireEnabledService: true,
-                    cancellationToken: cancellationToken).ConfigureAwait(false))
-            {
-                return new(PersistencePortLeaseOperationStatus.Rejected);
-            }
-
-            if (await ReclaimExpiredAsync(request.NodeId, now, cancellationToken).ConfigureAwait(false))
-            {
-                await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            var entity = await _db.PortLeases.SingleOrDefaultAsync(
-                value => value.NodeId == request.NodeId &&
-                    value.ServiceId == request.ServiceId &&
-                    value.GenerationId == request.GenerationId &&
-                    value.Port == request.Port,
-                cancellationToken).ConfigureAwait(false);
-            if (entity is null)
-            {
-                return new(PersistencePortLeaseOperationStatus.NotFound);
-            }
-
-            if (entity.Version != request.LeaseVersion)
-            {
-                return new(PersistencePortLeaseOperationStatus.Conflict);
-            }
-
-            var leaseExpiresAt = TryGetExpiry(now, request.TimeToLive);
-            if (leaseExpiresAt is null || entity.Version == long.MaxValue)
-            {
-                return new(PersistencePortLeaseOperationStatus.Rejected);
-            }
-
-            entity.LeaseExpiresAt = leaseExpiresAt.Value;
-            entity.RenewedAt = persistedNow;
-            entity.Version++;
-            entity.UpdatedAt = persistedNow;
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return Applied(ToSnapshot(entity));
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            PersistenceLogMessages.PortLeaseCancelled(
-                _logger,
-                "Renew",
-                request.NodeId,
-                request.ServiceId,
-                request.Port);
-            return PersistencePortLeaseOperationResult.Cancelled();
-        }
-        catch (DbUpdateConcurrencyException exception)
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Renew", request.NodeId, request.ServiceId, request.Port);
-            return new(PersistencePortLeaseOperationStatus.Conflict);
-        }
-        catch (DbUpdateException exception) when (IsLeaseConflict(exception))
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Renew", request.NodeId, request.ServiceId, request.Port);
-            return new(PersistencePortLeaseOperationStatus.Conflict);
-        }
-        catch (Exception exception)
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Renew", request.NodeId, request.ServiceId, request.Port);
-            return PersistencePortLeaseOperationResult.Unavailable();
-        }
-        finally
-        {
-            if (entered)
-            {
-                _gate.Release();
-            }
-        }
+        return await ExecuteWithRetryAsync(
+            "Renew",
+            request.NodeId,
+            request.ServiceId,
+            request.Port,
+            request,
+            static (store, value, token) => store.RenewAttemptAsync(value, token),
+            MutationFailureResult,
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -264,83 +88,15 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             return new(PersistencePortLeaseOperationStatus.Rejected);
         }
 
-        var entered = false;
-        try
-        {
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            entered = true;
-            await using var transaction = await _db.Database.BeginTransactionAsync(
-                IsolationLevel.Serializable,
-                cancellationToken).ConfigureAwait(false);
-            var now = _time.GetUtcNow().ToUniversalTime();
-            if (!await HasUsableOwnerAsync(
-                    request.NodeId,
-                    request.ServiceId,
-                    requireEnabledService: false,
-                    cancellationToken: cancellationToken).ConfigureAwait(false))
-            {
-                return new(PersistencePortLeaseOperationStatus.Rejected);
-            }
-
-            if (await ReclaimExpiredAsync(request.NodeId, now, cancellationToken).ConfigureAwait(false))
-            {
-                await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            var entity = await _db.PortLeases.SingleOrDefaultAsync(
-                value => value.NodeId == request.NodeId &&
-                    value.ServiceId == request.ServiceId &&
-                    value.GenerationId == request.GenerationId &&
-                    value.Port == request.Port,
-                cancellationToken).ConfigureAwait(false);
-            if (entity is null)
-            {
-                return new(PersistencePortLeaseOperationStatus.NotFound);
-            }
-
-            if (entity.Version != request.LeaseVersion)
-            {
-                return new(PersistencePortLeaseOperationStatus.Conflict);
-            }
-
-            var snapshot = ToSnapshot(entity);
-            _db.PortLeases.Remove(entity);
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return Applied(snapshot);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            PersistenceLogMessages.PortLeaseCancelled(
-                _logger,
-                "Release",
-                request.NodeId,
-                request.ServiceId,
-                request.Port);
-            return PersistencePortLeaseOperationResult.Cancelled();
-        }
-        catch (DbUpdateConcurrencyException exception)
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Release", request.NodeId, request.ServiceId, request.Port);
-            return new(PersistencePortLeaseOperationStatus.Conflict);
-        }
-        catch (DbUpdateException exception) when (IsLeaseConflict(exception))
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Release", request.NodeId, request.ServiceId, request.Port);
-            return new(PersistencePortLeaseOperationStatus.Conflict);
-        }
-        catch (Exception exception)
-        {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "Release", request.NodeId, request.ServiceId, request.Port);
-            return PersistencePortLeaseOperationResult.Unavailable();
-        }
-        finally
-        {
-            if (entered)
-            {
-                _gate.Release();
-            }
-        }
+        return await ExecuteWithRetryAsync(
+            "Release",
+            request.NodeId,
+            request.ServiceId,
+            request.Port,
+            request,
+            static (store, value, token) => store.ReleaseAttemptAsync(value, token),
+            MutationFailureResult,
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -353,48 +109,140 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             return new(PersistencePortLeaseSnapshotStatus.Rejected);
         }
 
+        return await ExecuteWithRetryAsync(
+            "ReadActive",
+            nodeId,
+            Guid.Empty,
+            0,
+            nodeId,
+            static (store, value, token) => store.ReadActiveAttemptAsync(value, token),
+            SnapshotFailureResult,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private enum LeaseOperationFailure
+    {
+        Conflict,
+        RetryableTransient,
+        Cancelled,
+        DatabaseUnavailable
+    }
+
+    private static readonly Func<LeaseOperationFailure, PersistencePortLeaseOperationResult> MutationFailureResult =
+        CreateMutationFailureResult;
+    private static readonly Func<LeaseOperationFailure, PersistencePortLeaseSnapshotResult> SnapshotFailureResult =
+        CreateSnapshotFailureResult;
+
+    private async ValueTask<TResult> ExecuteWithRetryAsync<TRequest, TResult>(
+        string operation,
+        string nodeId,
+        Guid serviceId,
+        int port,
+        TRequest request,
+        Func<EfPortLeaseStore, TRequest, CancellationToken, Task<TResult>> executeAttempt,
+        Func<LeaseOperationFailure, TResult> createFailureResult,
+        CancellationToken cancellationToken)
+    {
         var entered = false;
         try
         {
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             entered = true;
-            await using var transaction = await _db.Database.BeginTransactionAsync(
-                IsolationLevel.RepeatableRead,
-                cancellationToken).ConfigureAwait(false);
-            var nodeActive = await _db.Nodes.AsNoTracking().AnyAsync(
-                value => value.NodeId == nodeId && value.IsActive,
-                cancellationToken).ConfigureAwait(false);
-            if (!nodeActive)
+            for (var attempt = 1; ; attempt++)
             {
-                return new(PersistencePortLeaseSnapshotStatus.Rejected);
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                DetachTrackedPortLeases();
+                try
+                {
+                    return await executeAttempt(this, request, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception) when (IsRetryableTransient(exception))
+                {
+                    DetachTrackedPortLeases();
+                    cancellationToken.ThrowIfCancellationRequested();
 
-            var now = _time.GetUtcNow().ToUniversalTime();
-            var leases = await _db.PortLeases
-                .AsNoTracking()
-                .Where(value => value.NodeId == nodeId && value.LeaseExpiresAt > now)
-                .OrderBy(value => value.ServiceId).ThenBy(value => value.GenerationId).ThenBy(value => value.Port)
-                .Select(value => new PersistencePortLease(
-                    value.NodeId,
-                    value.ServiceId,
-                    value.GenerationId,
-                    value.Port,
-                    value.CreatedAt,
-                    value.LeaseExpiresAt,
-                    value.Version))
-                .ToListAsync(cancellationToken).ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new(PersistencePortLeaseSnapshotStatus.Available, leases.ToImmutableArray());
+                    if (attempt < MaximumTransientAttempts)
+                    {
+                        continue;
+                    }
+
+                    PersistenceLogMessages.PortLeaseFailed(
+                        _logger,
+                        exception,
+                        operation,
+                        nodeId,
+                        serviceId,
+                        port);
+                    return createFailureResult(LeaseOperationFailure.RetryableTransient);
+                }
+                catch (DbUpdateConcurrencyException exception)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    DetachTrackedPortLeases();
+                    PersistenceLogMessages.PortLeaseFailed(
+                        _logger,
+                        exception,
+                        operation,
+                        nodeId,
+                        serviceId,
+                        port);
+                    return createFailureResult(LeaseOperationFailure.Conflict);
+                }
+                catch (Exception exception) when (IsUniqueViolation(exception))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    DetachTrackedPortLeases();
+                    PersistenceLogMessages.PortLeaseFailed(
+                        _logger,
+                        exception,
+                        operation,
+                        nodeId,
+                        serviceId,
+                        port);
+                    return createFailureResult(LeaseOperationFailure.Conflict);
+                }
+                catch (Exception exception)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    DetachTrackedPortLeases();
+                    PersistenceLogMessages.PortLeaseFailed(
+                        _logger,
+                        exception,
+                        operation,
+                        nodeId,
+                        serviceId,
+                        port);
+                    return createFailureResult(LeaseOperationFailure.DatabaseUnavailable);
+                }
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            PersistenceLogMessages.PortLeaseCancelled(_logger, "ReadActive", nodeId, Guid.Empty, 0);
-            return new(PersistencePortLeaseSnapshotStatus.Cancelled);
+            if (entered)
+            {
+                DetachTrackedPortLeases();
+            }
+
+            PersistenceLogMessages.PortLeaseCancelled(_logger, operation, nodeId, serviceId, port);
+            return createFailureResult(LeaseOperationFailure.Cancelled);
         }
         catch (Exception exception)
         {
-            PersistenceLogMessages.PortLeaseFailed(_logger, exception, "ReadActive", nodeId, Guid.Empty, 0);
-            return new(PersistencePortLeaseSnapshotStatus.DatabaseUnavailable);
+            PersistenceLogMessages.PortLeaseFailed(
+                _logger,
+                exception,
+                operation,
+                nodeId,
+                serviceId,
+                port);
+            return createFailureResult(LeaseOperationFailure.DatabaseUnavailable);
         }
         finally
         {
@@ -403,6 +251,262 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 _gate.Release();
             }
         }
+    }
+
+    private async Task<PersistencePortLeaseOperationResult> AcquireAttemptAsync(
+        PersistencePortLeaseAcquireRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await _db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken).ConfigureAwait(false);
+        var now = _time.GetUtcNow().ToUniversalTime();
+        var persistedNow = TruncateToMicrosecond(now);
+        if (!await HasUsableOwnerAsync(
+                request.NodeId,
+                request.ServiceId,
+                requireEnabledService: true,
+                cancellationToken: cancellationToken).ConfigureAwait(false))
+        {
+            return new(PersistencePortLeaseOperationStatus.Rejected);
+        }
+
+        var existingForGeneration = await _db.PortLeases
+            .SingleOrDefaultAsync(
+                value => value.NodeId == request.NodeId &&
+                    value.ServiceId == request.ServiceId &&
+                    value.GenerationId == request.GenerationId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (existingForGeneration is not null && existingForGeneration.LeaseExpiresAt > now)
+        {
+            return new(PersistencePortLeaseOperationStatus.Conflict);
+        }
+
+        if (existingForGeneration is not null && request.ExpectedVersion is not null &&
+            existingForGeneration.Version != request.ExpectedVersion.Value)
+        {
+            return new(PersistencePortLeaseOperationStatus.Conflict);
+        }
+
+        if (existingForGeneration is null && request.ExpectedVersion is not null)
+        {
+            return new(PersistencePortLeaseOperationStatus.Conflict);
+        }
+
+        if (await ReclaimExpiredAsync(request.NodeId, now, cancellationToken).ConfigureAwait(false))
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var port = await SelectPortAsync(request, request.NodeId, cancellationToken).ConfigureAwait(false);
+        if (port is null)
+        {
+            return new(PersistencePortLeaseOperationStatus.Conflict);
+        }
+
+        var leaseExpiresAt = TryGetExpiry(now, request.TimeToLive);
+        if (leaseExpiresAt is null)
+        {
+            return new(PersistencePortLeaseOperationStatus.Rejected);
+        }
+
+        var entity = new PortLease
+        {
+            Id = Guid.CreateVersion7(),
+            NodeId = request.NodeId,
+            Port = port.Value,
+            ServiceId = request.ServiceId,
+            GenerationId = request.GenerationId,
+            LeaseExpiresAt = leaseExpiresAt.Value,
+            RenewedAt = persistedNow,
+            Version = 1,
+            CreatedAt = persistedNow,
+            UpdatedAt = persistedNow
+        };
+        _db.PortLeases.Add(entity);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return Applied(ToSnapshot(entity));
+    }
+
+    private async Task<PersistencePortLeaseOperationResult> RenewAttemptAsync(
+        PersistencePortLeaseRenewRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await _db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken).ConfigureAwait(false);
+        var now = _time.GetUtcNow().ToUniversalTime();
+        var persistedNow = TruncateToMicrosecond(now);
+        if (!await HasUsableOwnerAsync(
+                request.NodeId,
+                request.ServiceId,
+                requireEnabledService: true,
+                cancellationToken: cancellationToken).ConfigureAwait(false))
+        {
+            return new(PersistencePortLeaseOperationStatus.Rejected);
+        }
+
+        if (await ReclaimExpiredAsync(request.NodeId, now, cancellationToken).ConfigureAwait(false))
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var entity = await _db.PortLeases.SingleOrDefaultAsync(
+            value => value.NodeId == request.NodeId &&
+                value.ServiceId == request.ServiceId &&
+                value.GenerationId == request.GenerationId &&
+                value.Port == request.Port,
+            cancellationToken).ConfigureAwait(false);
+        if (entity is null)
+        {
+            return new(PersistencePortLeaseOperationStatus.NotFound);
+        }
+
+        if (entity.Version != request.LeaseVersion)
+        {
+            return new(PersistencePortLeaseOperationStatus.Conflict);
+        }
+
+        var leaseExpiresAt = TryGetExpiry(now, request.TimeToLive);
+        if (leaseExpiresAt is null || entity.Version == long.MaxValue)
+        {
+            return new(PersistencePortLeaseOperationStatus.Rejected);
+        }
+
+        entity.LeaseExpiresAt = leaseExpiresAt.Value;
+        entity.RenewedAt = persistedNow;
+        entity.Version++;
+        entity.UpdatedAt = persistedNow;
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return Applied(ToSnapshot(entity));
+    }
+
+    private async Task<PersistencePortLeaseOperationResult> ReleaseAttemptAsync(
+        PersistencePortLeaseReleaseRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await _db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken).ConfigureAwait(false);
+        var now = _time.GetUtcNow().ToUniversalTime();
+        if (!await HasUsableOwnerAsync(
+                request.NodeId,
+                request.ServiceId,
+                requireEnabledService: false,
+                cancellationToken: cancellationToken).ConfigureAwait(false))
+        {
+            return new(PersistencePortLeaseOperationStatus.Rejected);
+        }
+
+        if (await ReclaimExpiredAsync(request.NodeId, now, cancellationToken).ConfigureAwait(false))
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var entity = await _db.PortLeases.SingleOrDefaultAsync(
+            value => value.NodeId == request.NodeId &&
+                value.ServiceId == request.ServiceId &&
+                value.GenerationId == request.GenerationId &&
+                value.Port == request.Port,
+            cancellationToken).ConfigureAwait(false);
+        if (entity is null)
+        {
+            return new(PersistencePortLeaseOperationStatus.NotFound);
+        }
+
+        if (entity.Version != request.LeaseVersion)
+        {
+            return new(PersistencePortLeaseOperationStatus.Conflict);
+        }
+
+        var snapshot = ToSnapshot(entity);
+        _db.PortLeases.Remove(entity);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return Applied(snapshot);
+    }
+
+    private async Task<PersistencePortLeaseSnapshotResult> ReadActiveAttemptAsync(
+        string nodeId,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await _db.Database.BeginTransactionAsync(
+            IsolationLevel.RepeatableRead,
+            cancellationToken).ConfigureAwait(false);
+        var nodeActive = await _db.Nodes.AsNoTracking().AnyAsync(
+            value => value.NodeId == nodeId && value.IsActive,
+            cancellationToken).ConfigureAwait(false);
+        if (!nodeActive)
+        {
+            return new(PersistencePortLeaseSnapshotStatus.Rejected);
+        }
+
+        var now = _time.GetUtcNow().ToUniversalTime();
+        var leases = await _db.PortLeases
+            .AsNoTracking()
+            .Where(value => value.NodeId == nodeId && value.LeaseExpiresAt > now)
+            .OrderBy(value => value.ServiceId).ThenBy(value => value.GenerationId).ThenBy(value => value.Port)
+            .Select(value => new PersistencePortLease(
+                value.NodeId,
+                value.ServiceId,
+                value.GenerationId,
+                value.Port,
+                value.CreatedAt,
+                value.LeaseExpiresAt,
+                value.Version))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new(PersistencePortLeaseSnapshotStatus.Available, leases.ToImmutableArray());
+    }
+
+    private void DetachTrackedPortLeases()
+    {
+        foreach (var entry in _db.ChangeTracker.Entries<PortLease>().ToArray())
+        {
+            entry.State = EntityState.Detached;
+        }
+    }
+
+    private static PersistencePortLeaseOperationResult CreateMutationFailureResult(
+        LeaseOperationFailure failure) =>
+        failure switch
+        {
+            LeaseOperationFailure.Conflict => new(PersistencePortLeaseOperationStatus.Conflict),
+            LeaseOperationFailure.RetryableTransient => new(PersistencePortLeaseOperationStatus.RetryableTransient),
+            LeaseOperationFailure.Cancelled => PersistencePortLeaseOperationResult.Cancelled(),
+            _ => PersistencePortLeaseOperationResult.Unavailable()
+        };
+
+    private static PersistencePortLeaseSnapshotResult CreateSnapshotFailureResult(
+        LeaseOperationFailure failure) =>
+        new(failure switch
+        {
+            LeaseOperationFailure.Cancelled => PersistencePortLeaseSnapshotStatus.Cancelled,
+            LeaseOperationFailure.RetryableTransient => PersistencePortLeaseSnapshotStatus.RetryableTransient,
+            _ => PersistencePortLeaseSnapshotStatus.DatabaseUnavailable
+        });
+
+    private static bool IsRetryableTransient(Exception exception) =>
+        FindPostgresException(exception)?.SqlState is
+            PostgresErrorCodes.SerializationFailure or PostgresErrorCodes.DeadlockDetected;
+
+    private static bool IsUniqueViolation(Exception exception) =>
+        FindPostgresException(exception)?.SqlState == PostgresErrorCodes.UniqueViolation;
+
+    private static PostgresException? FindPostgresException(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgresException)
+            {
+                return postgresException;
+            }
+        }
+
+        return null;
     }
 
     private async Task<bool> HasUsableOwnerAsync(
@@ -569,9 +673,4 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         request.Port is >= MinimumPort and <= MaximumPort &&
         request.LeaseVersion >= 0;
 
-    private static bool IsLeaseConflict(DbUpdateException exception) =>
-        exception.InnerException is PostgresException postgresException &&
-        postgresException.SqlState is PostgresErrorCodes.UniqueViolation or
-            PostgresErrorCodes.SerializationFailure or
-            PostgresErrorCodes.DeadlockDetected;
 }

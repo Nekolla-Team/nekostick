@@ -148,6 +148,12 @@ Docker 和 systemd 都必须将 SIGTERM 传递给主进程。主进程收到停�
 
 租约创建、续约和到期时间在写入及返回前向下截断至 PostgreSQL `timestamptz` 的微秒精度，使应用结果中的时间与数据库持久化值一致。
 
+当租约操作遇到 PostgreSQL SQLSTATE `40001`（serialization failure）或 `40P01`（deadlock）时，Persistence 对完整操作执行最多三次总尝试；每次使用新事务重新执行操作，并清理失败 attempt 的跟踪状态。耗尽后返回内部 `RetryableTransient`，不标记数据库不可用；真实数据库可用性故障仍为 `DatabaseUnavailable` 并保持 fail-closed。实际 `23505` 唯一键冲突仍为 `Conflict`，不作为瞬时重试；`NewLeasesAllowed == false` 是独立的 `PolicyRejected`，不是数据库故障。此处理不改变 Contracts 1.4.0 ABI、应用配置或默认值、租约 TTL 或现有计时器。
+
+图刷新期间候选代次的租约申请遇到 `RetryableTransient` 时，Host 将该结果按配置版本缓存：受影响服务的后续就绪请求立即以相同 provenance 快速失败，不再重复租约申请与进程准备；现有 1 秒生命周期 tick 对当前版本重驱动一次图刷新（携带 forceRetry），直到提交成功、临时数据库不可用覆盖该结果或配置版本变更使缓存失效；重驱动仅在 `NewServicesAllowed` 时执行。若数据库不可用闸门恰在申请检查后关闭（竞争窗口），`PolicyRejected` 视为数据库闸门已观测：启动请求与候选项按 `DatabaseUnavailable` provenance 记账并保持 eager 重试与 Waiting 代次的现有恢复路径，不新增数据库不可用标记；Supervisor 对 Waiting 代次保留 Waiting 快照并以独立的 `PolicyRejected` 状态返回。
+
+通用 HTTP `503` 的状态码和响应文本保持不变；诊断日志用请求 `TraceIdentifier`、可用的 `ActivityTraceId`、已固定的配置版本/发布代次及已知 route/target 标识关联请求。仅凭发布后观察到的通用 `503` 不能断定由租约瞬时错误产生；根因须由请求相关日志和具体分支确认。
+
 **依赖图原子切换（API 1.4）：** 配置快照变更时，Host 按启动模板中实际引用的依赖解析活动服务消费者闭包，并按依赖拓扑顺序准备候选代次；运行中的 OnDemand/Never 服务也属于活动消费者，未运行的服务不会被启动。候选代次的租约、进程、健康状态、依赖绑定和解析环境在提交前不替换活动视图。所有候选就绪后，Host 暂停受影响服务的新 endpoint capture，等待已开始的 capture 完成，再以一个不可变提交视图同时切换 endpoints、依赖 bindings 与 runtime snapshots；随后恢复 admission，并按旧依赖图的逆拓扑顺序 drain/stop 旧代次。准备失败、取消或快照被取代时，候选代次按逆拓扑顺序清理，旧提交视图保持权威；已派发请求继续使用原 endpoint 排空，不重放。图刷新也在手动或自动 crash/health restart 后执行，即使配置版本未变。活动消费者是否需要新代次，依据自身服务配置/属主、直接依赖引用集及完全展开的 argv/environment 值判断；依赖边变化本身要求替换，即使展开值相同；依赖代次、租约或 endpoint 身份单独变化而展开输入不变时，仅原子更新提交图中的关系绑定，不重启消费者。候选启动输入使用已准备上游的投影输出重新展开；已运行代次继续保留原依赖绑定供精确代次校验。
 
 During commit, new HTTP requests for affected services wait at admission before endpoint capture and resolve against the current committed view after admission resumes. The existing operation timeout and cancellation token govern this wait; the Host does not buffer request bodies for it. Requests dispatched before the barrier keep their captured old endpoint and drain there without replay. Direct child-to-child sockets bypass the Host proxy, are not covered by Host request draining, and existing TCP connections cannot be migrated atomically. Old generations retire in reverse dependency order of the old graph, consumers before dependencies; the bounded drain grace covers only Host-tracked in-flight requests.

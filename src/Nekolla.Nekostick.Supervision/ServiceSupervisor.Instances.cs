@@ -410,6 +410,8 @@ public sealed partial class ServiceSupervisor
             PortLeaseOperationStatus.DatabaseUnavailable => (SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.DatabaseUnavailable),
             PortLeaseOperationStatus.Cancelled => (SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled),
             PortLeaseOperationStatus.Rejected => (SupervisorOperationStatus.Rejected, ServiceStateReasonCode.PortLeaseUnavailable),
+            PortLeaseOperationStatus.RetryableTransient => (SupervisorOperationStatus.RetryableTransient, ServiceStateReasonCode.PortLeaseUnavailable),
+            PortLeaseOperationStatus.PolicyRejected => (SupervisorOperationStatus.PolicyRejected, ServiceStateReasonCode.PortLeaseUnavailable),
             _ => (SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.PortLeaseUnavailable)
         };
         return Result(status, reason, Snapshot, processStopped: processStopped);

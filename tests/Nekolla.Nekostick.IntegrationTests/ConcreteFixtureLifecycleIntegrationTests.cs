@@ -1157,11 +1157,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
 
         private static void MarkSnapshotAccepted(HostRuntimeState state)
         {
-            var method = typeof(HostRuntimeState).GetMethod(
-                "MarkSnapshotAccepted",
-                BindingFlags.Instance | BindingFlags.NonPublic);
-            Assert.NotNull(method);
-            method!.Invoke(state, null);
+            state.MarkSnapshotAccepted();
         }
     }
 

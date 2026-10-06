@@ -240,6 +240,8 @@ public sealed partial class HostServiceLifecycleManager
             PortLeaseOperationStatus.DatabaseUnavailable => (SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.DatabaseUnavailable),
             PortLeaseOperationStatus.Cancelled => (SupervisorOperationStatus.Cancelled, ServiceStateReasonCode.Cancelled),
             PortLeaseOperationStatus.Rejected => (SupervisorOperationStatus.Rejected, ServiceStateReasonCode.PortLeaseUnavailable),
+            PortLeaseOperationStatus.RetryableTransient => (SupervisorOperationStatus.RetryableTransient, ServiceStateReasonCode.PortLeaseUnavailable),
+            PortLeaseOperationStatus.PolicyRejected => (SupervisorOperationStatus.PolicyRejected, ServiceStateReasonCode.PortLeaseUnavailable),
             _ => (SupervisorOperationStatus.Unavailable, ServiceStateReasonCode.PortLeaseUnavailable)
         };
     private static PortLeaseOperationStatus? GetLeaseReleaseFailureStatus(
@@ -251,6 +253,10 @@ public sealed partial class HostServiceLifecycleManager
                 PortLeaseOperationStatus.Cancelled,
             ServiceStateReasonCode.PortLeaseUnavailable when result.Status == SupervisorOperationStatus.Rejected =>
                 PortLeaseOperationStatus.Rejected,
+            ServiceStateReasonCode.PortLeaseUnavailable when result.Status == SupervisorOperationStatus.RetryableTransient =>
+                PortLeaseOperationStatus.RetryableTransient,
+            ServiceStateReasonCode.PortLeaseUnavailable when result.Status == SupervisorOperationStatus.PolicyRejected =>
+                PortLeaseOperationStatus.PolicyRejected,
             _ => null
         };
     private void LogPendingSupervisorReleaseFailure(
@@ -359,10 +365,23 @@ public sealed partial class HostServiceLifecycleManager
             cancellationToken.ThrowIfCancellationRequested();
             if (pendingFailure is { } status)
             {
+                if (status == PortLeaseOperationStatus.RetryableTransient)
+                {
+                    var deferred = await generation.Supervisor.DeferStartForRetryableLeaseFailureAsync(
+                        now,
+                        cancellationToken).ConfigureAwait(false);
+                    generation.RetryableTransientProvenance =
+                        deferred.Status == SupervisorOperationStatus.RetryableTransient;
+                    return deferred;
+                }
+
+                generation.RetryableTransientProvenance = false;
                 return LeaseReleaseFailureResult(generation.Supervisor, status);
             }
 
             var started = await generation.Supervisor.StartAsync(now, cancellationToken).ConfigureAwait(false);
+            generation.RetryableTransientProvenance =
+                started.Status == SupervisorOperationStatus.RetryableTransient;
             LogPendingSupervisorReleaseFailure(generation, started);
             ReconcilePendingLeaseRelease(generation.Supervisor, previousPendingLease);
             return started;
@@ -1206,6 +1225,7 @@ public sealed partial class HostServiceLifecycleManager
             get => _ready;
             set => _ready = value;
         }
+        internal bool RetryableTransientProvenance { get; set; }
         internal bool ProcessExitRecorded
         {
             get => _processExitRecorded;

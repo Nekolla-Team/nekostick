@@ -9,8 +9,10 @@ internal sealed partial class HostRouteDispatcher
     private async Task<bool> DrainRequestBodyAsync(
         HttpContext context,
         HostRequestAdmissionContext admissionContext,
+        HostRoutingSnapshot? snapshot = null,
         Guid? routeId = null,
-        RouteTargetType? targetType = null)
+        RouteTargetType? targetType = null,
+        string? ownerExtensionId = null)
     {
         try
         {
@@ -27,14 +29,23 @@ internal sealed partial class HostRouteDispatcher
             var failure = admissionContext.Failure ?? HostRequestAdmission.TryGetProtocolFailure(exception);
             if (failure is not null)
             {
-                await WriteAdmissionFailureAsync(context, failure.Value, routeId, targetType);
+                await WriteAdmissionFailureAsync(
+                    context,
+                    failure.Value,
+                    routeId,
+                    targetType,
+                    snapshot,
+                    ownerExtensionId);
             }
             else
             {
-                await WriteResponseAsync(
+                await WriteGenericServiceUnavailableAsync(
                     context,
-                    StatusCodes.Status503ServiceUnavailable,
-                    ServiceUnavailableMessage);
+                    HostGenericUnavailableReason.RequestBodyDrainException,
+                    snapshot,
+                    routeId,
+                    targetType,
+                    ownerExtensionId);
             }
 
             return false;
@@ -55,13 +66,19 @@ internal sealed partial class HostRouteDispatcher
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.FallbackPreparation");
-            await WriteResponseAsync(context, StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage);
+            await WriteGenericServiceUnavailableAsync(
+                context,
+                HostGenericUnavailableReason.FallbackPreparationException,
+                publicationLease.Snapshot);
             return;
         }
 
         if (preparation.Rejection is { } preparationRejection)
         {
-            await WriteAdmissionFailureAsync(context, preparationRejection);
+            await WriteAdmissionFailureAsync(
+                context,
+                preparationRejection,
+                snapshot: publicationLease.Snapshot);
             return;
         }
 
@@ -81,20 +98,29 @@ internal sealed partial class HostRouteDispatcher
 
             if (admissionContext.Failure is { } failure)
             {
-                await WriteAdmissionFailureAsync(context, failure);
+                await WriteAdmissionFailureAsync(
+                    context,
+                    failure,
+                    snapshot: publicationLease.Snapshot);
                 return;
             }
 
             if (!handled && !context.Response.HasStarted)
             {
-                if (!await DrainRequestBodyAsync(context, admissionContext).ConfigureAwait(false))
+                if (!await DrainRequestBodyAsync(
+                        context,
+                        admissionContext,
+                        publicationLease.Snapshot).ConfigureAwait(false))
                 {
                     return;
                 }
 
                 if (admissionContext.Failure is { } declinedFailure)
                 {
-                    await WriteAdmissionFailureAsync(context, declinedFailure);
+                    await WriteAdmissionFailureAsync(
+                        context,
+                        declinedFailure,
+                        snapshot: publicationLease.Snapshot);
                     return;
                 }
 

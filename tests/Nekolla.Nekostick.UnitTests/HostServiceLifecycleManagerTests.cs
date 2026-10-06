@@ -681,12 +681,19 @@ public sealed class HostServiceLifecycleManagerTests
             TestContext.Current.CancellationToken);
         Assert.True(manager.TryGet(service.Id, out var rejectedGate));
         Assert.Null(rejectedGate.RetryAt);
+        Assert.Equal(ExtensionHostSnapshotState.Rejected, runtime.LastSnapshotState);
+        Assert.True(runtime.Status.DatabaseAvailable);
+        Assert.False(runtime.Status.ConfigurationValid);
+        Assert.False(runtime.NewServicesAllowed);
         runtime.MarkSnapshotAccepted();
         await manager.RetryWaitingServicesAsync(
             DateTimeOffset.MaxValue,
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(HostServiceReadinessStatus.DatabaseUnavailable, initial.Status);
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, initial.Status);
+        Assert.True(runtime.Status.DatabaseAvailable);
+        Assert.True(runtime.Status.ConfigurationValid);
+        Assert.True(runtime.NewServicesAllowed);
         Assert.Empty(leaseStore.AcquireIntents);
         Assert.Empty(executor.StartedServices);
         await manager.StopAsync(CancellationToken.None);
@@ -1746,6 +1753,48 @@ public sealed class HostServiceLifecycleManagerTests
             TestContext.Current.CancellationToken);
         Assert.True(endpoint.IsAvailable);
     }
+
+    [Fact]
+    public async Task RetryableTransientRenewalKeepsEndpointAndRuntimeAvailable()
+    {
+        var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var leaseStore = new RecordingLeaseStore
+        {
+            AcquireLifetime = TimeSpan.FromSeconds(5),
+            RenewalStatus = PortLeaseOperationStatus.RetryableTransient
+        };
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(snapshot));
+        var runtime = CreateRuntimeState(snapshot, holder);
+        var manager = new HostServiceLifecycleManager(
+            new RecordingExecutor(),
+            new RecordingProbe(),
+            leaseStore,
+            holder,
+            publisher,
+            runtime,
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false));
+
+        var ready = await manager.EnsureReadyAsync(snapshot, service.Id, TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Ready, ready.Status);
+        var publishedEndpoint = publisher.Current[service.Id];
+
+        await manager.RenewLeasesAsync(CancellationToken.None);
+
+        Assert.Same(publishedEndpoint, publisher.Current[service.Id]);
+        Assert.True(runtime.Status.DatabaseAvailable);
+        Assert.True(runtime.NewServicesAllowed);
+        var endpoint = await new HostServiceEndpointResolver(publisher).ResolveAsync(
+            service.Id,
+            TestContext.Current.CancellationToken);
+        Assert.True(endpoint.IsAvailable);
+    }
+
     [Fact]
     public async Task StopAsyncQuiescesBlockedAutomaticStartupBeforeExecutorCleanup()
     {
@@ -2230,6 +2279,184 @@ public sealed class HostServiceLifecycleManagerTests
             activeServiceId == serviceId;
     }
 
+    [Fact]
+    public async Task TransientGraphFailureFastFailsRequestsAndIsRediscoveredByTick()
+    {
+        var dependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            ImmutableArray<string>.Empty,
+            ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "ready-dependency"));
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            ImmutableArray.Create("--value", remoteValue),
+            ImmutableDictionary<string, string>.Empty
+                .Add("REMOTE_PORT", string.Concat("${PORT@", dependency.Id, "}"))
+                .Add("REMOTE_VALUE", remoteValue));
+        var snapshotV1 = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshotV1,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out var holder,
+            out _);
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(snapshotV1, dependency.Id, TestContext.Current.CancellationToken)).Status);
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(snapshotV1, consumer.Id, TestContext.Current.CancellationToken)).Status);
+            var warmupAcquires = leaseStore.AcquireIntents.Count;
+            var warmupStarts = executor.StartedServices.Count;
+            var activeDependencyLease = Assert.Single(
+                leaseStore.HeldLeases,
+                value => value.ServiceId == dependency.Id);
+
+            var consumerV2 = CreateServiceWithLaunch(
+                ConsumerServiceId,
+                ServiceStartMode.Lazy,
+                enabled: true,
+                ImmutableArray.Create("--value", remoteValue),
+                ImmutableDictionary<string, string>.Empty
+                    .Add("REMOTE_PORT", string.Concat("${PORT@", dependency.Id, "}"))
+                    .Add("REMOTE_VALUE", remoteValue),
+                version: 2);
+            var snapshotV2 = CreateSnapshot(2, dependency, consumerV2);
+            Assert.True(holder.TryReplace(snapshotV2));
+
+            leaseStore.AcquireResults.Enqueue((PortLeaseOperationStatus.RetryableTransient, true));
+            var initial = await manager.EnsureReadyAsync(
+                snapshotV2,
+                consumer.Id,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.Unavailable, initial.Status);
+            Assert.False(initial.DatabaseUnavailableProvenance);
+            Assert.True(initial.RetryableTransientProvenance);
+            Assert.Equal(warmupAcquires + 1, leaseStore.AcquireIntents.Count);
+            Assert.Equal(warmupStarts, executor.StartedServices.Count);
+            Assert.True(manager.TryGet(consumer.Id, out var activeConsumer));
+            Assert.Equal(ExtensionServiceLifecycleState.Running, activeConsumer.LifecycleState);
+            Assert.Equal(ExtensionServiceFailureCode.None, activeConsumer.FailureCode);
+            Assert.True(manager.HasFailedGraphTransientRetry(snapshotV2.Version));
+
+            var repeat = await manager.EnsureReadyAsync(
+                snapshotV2,
+                consumer.Id,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.Unavailable, repeat.Status);
+            Assert.False(repeat.DatabaseUnavailableProvenance);
+            Assert.True(repeat.RetryableTransientProvenance);
+            Assert.Equal(warmupAcquires + 1, leaseStore.AcquireIntents.Count);
+            Assert.Equal(warmupStarts, executor.StartedServices.Count);
+
+            await manager.RetryFailedGraphTransientAsync(TestContext.Current.CancellationToken);
+            Assert.False(manager.HasFailedGraphTransientRetry(snapshotV2.Version));
+
+            var recovery = await manager.EnsureReadyAsync(
+                snapshotV2,
+                consumer.Id,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(HostServiceReadinessStatus.Ready, recovery.Status);
+            Assert.Equal(warmupAcquires + 2, leaseStore.AcquireIntents.Count);
+            Assert.Single(
+                executor.StartedServices.Skip(warmupStarts),
+                value => value == consumer.Id);
+            Assert.True(manager.TryGet(consumer.Id, out var readyConsumer));
+            Assert.Equal(ExtensionServiceLifecycleState.Running, readyConsumer.LifecycleState);
+            var heldConsumerLease = Assert.Single(
+                leaseStore.HeldLeases,
+                value => value.ServiceId == consumer.Id);
+            Assert.NotEqual(activeDependencyLease.GenerationId, heldConsumerLease.GenerationId);
+            Assert.Equal(
+                activeDependencyLease.GenerationId,
+                Assert.Single(
+                    leaseStore.HeldLeases,
+                    value => value.ServiceId == dependency.Id).GenerationId);
+        }
+        finally
+        {
+            await manager.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task PolicyRejectedAcquireDuringGateClosurePreservesEagerRetryProvenance()
+    {
+        var dependency = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            ImmutableArray.Create(string.Concat("${PORT@", EagerServiceId, "}")),
+            ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out _,
+            out var runtime);
+        var gateClosed = false;
+        leaseStore.OnAcquire = _ =>
+        {
+            if (!gateClosed)
+            {
+                gateClosed = true;
+                runtime.MarkDatabaseUnavailable();
+                return true;
+            }
+
+            return false;
+        };
+
+        var initial = await manager.EnsureReadyAsync(
+            snapshot,
+            consumer.Id,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, initial.Status);
+        Assert.True(initial.DatabaseUnavailableProvenance);
+        Assert.False(initial.RetryableTransientProvenance);
+        Assert.True(manager.TryGet(consumer.Id, out var blockedConsumer));
+        Assert.Equal(ExtensionServiceFailureCode.DependencyUnavailable, blockedConsumer.FailureCode);
+
+        var dependencyReadiness = await manager.EnsureReadyAsync(
+            snapshot,
+            dependency.Id,
+            TestContext.Current.CancellationToken);
+        Assert.NotEqual(HostServiceReadinessStatus.Ready, dependencyReadiness.Status);
+        Assert.True(dependencyReadiness.DatabaseUnavailableProvenance);
+        Assert.Single(leaseStore.AcquireIntents);
+
+        runtime.MarkDatabaseAvailable();
+        runtime.MarkSnapshotAccepted();
+        await manager.RetryWaitingServicesAsync(
+            DateTimeOffset.MaxValue,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { dependency.Id, consumer.Id }, executor.StartedServices);
+        Assert.True(manager.TryGet(dependency.Id, out var readyDependency));
+        Assert.Equal(ExtensionServiceLifecycleState.Running, readyDependency.LifecycleState);
+        Assert.True(manager.TryGet(consumer.Id, out var readyConsumer));
+        Assert.Equal(ExtensionServiceLifecycleState.Running, readyConsumer.LifecycleState);
+        Assert.Equal(3, leaseStore.AcquireIntents.Count);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
     private sealed class RecordingLeaseStore : IPortLeaseStore
     {
         private readonly ConcurrentDictionary<(Guid ServiceId, Guid GenerationId), PortLease> _heldLeases = new();
@@ -2238,8 +2465,10 @@ public sealed class HostServiceLifecycleManagerTests
 
         public TimeSpan AcquireLifetime { get; init; } = TimeSpan.FromMinutes(1);
         public bool FailRenewal { get; set; }
+        public PortLeaseOperationStatus? RenewalStatus { get; init; }
         public Func<PortLeaseRequest, PortLease>? ReturnedAcquireLeaseFactory { get; init; }
-        public IReadOnlyCollection<PortLease> HeldLeases => _heldLeases.Values.ToArray();
+        public Func<PortLeaseIntent, bool>? OnAcquire { get; set; }
+        public PortLease[] HeldLeases => [.. _heldLeases.Values];
         public ConcurrentQueue<PortLeaseIntent> ReleaseIntents { get; } = new();
         public ConcurrentQueue<(PortLeaseOperationStatus Status, bool ValidLease)> AcquireResults { get; } = new();
         public ConcurrentQueue<PortLeaseIntent> AcquireIntents { get; } = new();
@@ -2251,6 +2480,12 @@ public sealed class HostServiceLifecycleManagerTests
             if (intent.Kind == PortLeaseIntentKind.Acquire)
             {
                 AcquireIntents.Enqueue(intent);
+                if (OnAcquire is { } onAcquire && onAcquire(intent))
+                {
+                    return ValueTask.FromResult(
+                        new PortLeaseOperationResult(PortLeaseOperationStatus.PolicyRejected));
+                }
+
                 var outcome = AcquireResults.TryDequeue(out var queued)
                     ? queued
                     : (Status: PortLeaseOperationStatus.Applied, ValidLease: true);
@@ -2362,6 +2597,11 @@ public sealed class HostServiceLifecycleManagerTests
 
             if (intent.Kind == PortLeaseIntentKind.Renew)
             {
+                if (RenewalStatus is { } renewalStatus)
+                {
+                    return ValueTask.FromResult(new PortLeaseOperationResult(renewalStatus));
+                }
+
                 if (FailRenewal)
                 {
                     return ValueTask.FromResult(new PortLeaseOperationResult(

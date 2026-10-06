@@ -129,6 +129,34 @@ public sealed class HostServiceEndpointPublicationRaceTests
         Assert.Equal(generationId, publisher.Current[serviceId].GenerationId);
     }
 
+    [Fact]
+    public async Task PublicationTickPreservesSnapshotWhenLeaseReadIsRetryable()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
+        await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
+        var serviceId = Guid.CreateVersion7();
+        var generationId = Guid.CreateVersion7();
+        var lease = new HostServiceEndpointLease(
+            serviceId,
+            generationId,
+            31_952,
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        publisher.Publish([lease]);
+        var before = publisher.Current;
+
+        using var publicationService = new HostServiceEndpointPublicationService(
+            new TestDbContextFactory(database),
+            new FixedEndpointAuthority(publisher),
+            new HostRuntimeOptions(connectionString, "publication-race-retryable", readOnly: false),
+            static _ => new RetryableSnapshotStore());
+        await InvokePublicationTickAsync(publicationService, cancellationToken);
+
+        Assert.Same(before, publisher.Current);
+        Assert.Equal(lease, publisher.Current[serviceId]);
+    }
+
     private static async Task<(Guid ServiceId, Guid GenerationId, string NodeId, DateTimeOffset LeaseExpiresAt)> SeedLeaseAsync(
         PostgresTestDatabase database,
         int port,
@@ -228,6 +256,29 @@ public sealed class HostServiceEndpointPublicationRaceTests
         }
     }
 
+
+    private sealed class RetryableSnapshotStore : IPersistencePortLeaseStore
+    {
+        public ValueTask<PersistencePortLeaseOperationResult> AcquireAsync(
+            PersistencePortLeaseAcquireRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new PersistencePortLeaseOperationResult(PersistencePortLeaseOperationStatus.Rejected));
+
+        public ValueTask<PersistencePortLeaseOperationResult> RenewAsync(
+            PersistencePortLeaseRenewRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new PersistencePortLeaseOperationResult(PersistencePortLeaseOperationStatus.Rejected));
+
+        public ValueTask<PersistencePortLeaseOperationResult> ReleaseAsync(
+            PersistencePortLeaseReleaseRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new PersistencePortLeaseOperationResult(PersistencePortLeaseOperationStatus.Rejected));
+
+        public ValueTask<PersistencePortLeaseSnapshotResult> ReadActiveAsync(
+            string nodeId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new PersistencePortLeaseSnapshotResult(PersistencePortLeaseSnapshotStatus.RetryableTransient));
+    }
     private sealed class TestDbContextFactory : IDbContextFactory<NekostickDbContext>
     {
         private readonly PostgresTestDatabase _database;

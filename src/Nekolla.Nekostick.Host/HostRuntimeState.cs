@@ -1,3 +1,6 @@
+using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Host;
@@ -67,6 +70,7 @@ public sealed class HostRuntimeState
     private readonly HostConfigurationSnapshotHolder _snapshotHolder;
     private readonly HostNodeOptions _nodeOptions;
     private readonly bool _readOnly;
+    private readonly ILogger<HostRuntimeState> _logger;
     private readonly object _stateGate = new();
     private int _databaseAvailable;
     private int _databaseUnavailable;
@@ -77,12 +81,16 @@ public sealed class HostRuntimeState
         null);
 
     /// <summary>Creates fail-closed runtime state.</summary>
-    public HostRuntimeState(HostConfigurationSnapshotHolder snapshotHolder, HostNodeOptions nodeOptions)
+    public HostRuntimeState(
+        HostConfigurationSnapshotHolder snapshotHolder,
+        HostNodeOptions nodeOptions,
+        ILogger<HostRuntimeState>? logger = null)
     {
         _snapshotHolder = snapshotHolder ?? throw new ArgumentNullException(nameof(snapshotHolder));
         ArgumentNullException.ThrowIfNull(nodeOptions);
         _nodeOptions = nodeOptions;
         _readOnly = nodeOptions.ReadOnly;
+        _logger = logger ?? NullLogger<HostRuntimeState>.Instance;
     }
 
     /// <summary>Gets the invocation-local host safety switches.</summary>
@@ -160,15 +168,35 @@ public sealed class HostRuntimeState
         }
     }
 
-    internal void MarkSnapshotAccepted()
+    internal void MarkSnapshotAccepted([CallerMemberName] string caller = "")
     {
+        var changed = false;
+        long? configurationVersion;
         lock (_stateGate)
         {
+            var priorObservation = Volatile.Read(ref _lastSnapshotObservation);
+            changed = priorObservation.State != ExtensionHostSnapshotState.Accepted ||
+                Volatile.Read(ref _stagedConfigurationWritesAllowed) != 0 ||
+                Volatile.Read(ref _databaseUnavailable) != 0 ||
+                Volatile.Read(ref _databaseAvailable) != 1 ||
+                Volatile.Read(ref _configurationValid) != 1;
+
             Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
             Volatile.Write(ref _databaseUnavailable, 0);
             Volatile.Write(ref _databaseAvailable, 1);
             Volatile.Write(ref _configurationValid, 1);
             RecordSnapshotState(ExtensionHostSnapshotState.Accepted);
+            configurationVersion = _snapshotHolder.Current?.Version;
+        }
+
+        if (changed)
+        {
+            HostLogMessages.RuntimeStateTransition(
+                _logger,
+                LogLevel.Information,
+                HostRuntimeStateTransitionReason.SnapshotAccepted,
+                caller,
+                configurationVersion);
         }
     }
 
@@ -203,14 +231,32 @@ public sealed class HostRuntimeState
         }
     }
 
-    internal void MarkDatabaseUnavailable()
+    internal void MarkDatabaseUnavailable([CallerMemberName] string caller = "")
     {
+        var changed = false;
+        long? configurationVersion;
         lock (_stateGate)
         {
+            changed = Volatile.Read(ref _stagedConfigurationWritesAllowed) != 0 ||
+                Volatile.Read(ref _databaseUnavailable) != 1 ||
+                Volatile.Read(ref _databaseAvailable) != 0 ||
+                Volatile.Read(ref _configurationValid) != 0;
+
             Volatile.Write(ref _stagedConfigurationWritesAllowed, 0);
             Volatile.Write(ref _databaseUnavailable, 1);
             Volatile.Write(ref _databaseAvailable, 0);
             Volatile.Write(ref _configurationValid, 0);
+            configurationVersion = _snapshotHolder.Current?.Version;
+        }
+
+        if (changed)
+        {
+            HostLogMessages.RuntimeStateTransition(
+                _logger,
+                LogLevel.Warning,
+                HostRuntimeStateTransitionReason.DatabaseUnavailable,
+                caller,
+                configurationVersion);
         }
     }
     private void RecordSnapshotState(ExtensionHostSnapshotState state) =>

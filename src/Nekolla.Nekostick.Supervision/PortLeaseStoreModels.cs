@@ -19,7 +19,13 @@ public enum PortLeaseOperationStatus
     Cancelled,
 
     /// <summary>The intent was rejected by validation or concurrency.</summary>
-    Rejected
+    Rejected,
+
+    /// <summary>The persistence operation exhausted bounded retries for a retryable transient failure.</summary>
+    RetryableTransient,
+
+    /// <summary>The intent was rejected because current host policy does not allow the lease operation.</summary>
+    PolicyRejected
 }
 
 /// <summary>Contains a safe result from a future port lease store.</summary>

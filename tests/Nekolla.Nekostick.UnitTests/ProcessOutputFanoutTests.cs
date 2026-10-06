@@ -83,11 +83,11 @@ public sealed class ProcessOutputFanoutTests
         await WaitAsync(fanout.Completion);
         await WaitAsync(sink.Completed.Task);
 
-        var droppedIndex = sink.Events.FindIndex(static value => value.StartsWith("dropped:", StringComparison.Ordinal));
         var postGapIndex = sink.Events.FindIndex(static value => value == "chunk:238");
-        Assert.True(droppedIndex >= 0);
         Assert.True(postGapIndex >= 0);
-        Assert.Equal(postGapIndex - 1, droppedIndex);
+        Assert.StartsWith("dropped:", sink.Events[postGapIndex - 1], StringComparison.Ordinal);
+        Assert.True(sink.DroppedBytes > 0);
+        Assert.Equal(0, sink.DroppedBytes % ProcessOutputFanout.PumpBufferSize);
     }
 
     [Fact]

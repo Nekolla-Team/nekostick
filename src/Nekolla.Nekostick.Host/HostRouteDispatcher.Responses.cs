@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using System.Globalization;
 using Microsoft.AspNetCore.Http;
 using Nekolla.Nekostick.Contracts;
@@ -10,10 +12,62 @@ internal sealed partial class HostRouteDispatcher
         HttpContext context,
         HostRequestAdmissionFailure failure,
         Guid? routeId = null,
-        RouteTargetType? targetType = null)
+        RouteTargetType? targetType = null,
+        HostRoutingSnapshot? snapshot = null,
+        string? ownerExtensionId = null)
     {
+        if (failure.StatusCode == StatusCodes.Status503ServiceUnavailable)
+        {
+            await WriteGenericServiceUnavailableAsync(
+                context,
+                HostGenericUnavailableReason.UnclassifiedAdmissionFailure,
+                snapshot,
+                routeId,
+                targetType,
+                ownerExtensionId);
+            return;
+        }
+
         LogAdmissionRejection(failure, routeId, targetType);
         await WriteResponseAsync(context, failure.StatusCode, failure.Message, failure.RetryAfterSeconds);
+    }
+
+    private async Task<bool> WriteGenericServiceUnavailableAsync(
+        HttpContext context,
+        HostGenericUnavailableReason reason,
+        HostRoutingSnapshot? snapshot = null,
+        Guid? routeId = null,
+        RouteTargetType? targetType = null,
+        string? ownerExtensionId = null)
+    {
+        var wroteResponse = await WriteResponseAsync(
+            context,
+            StatusCodes.Status503ServiceUnavailable,
+            ServiceUnavailableMessage);
+        if (!wroteResponse)
+        {
+            return false;
+        }
+
+        if (_logger.IsEnabled(LogLevel.Warning))
+        {
+            var activityTraceId = Activity.Current is { IdFormat: ActivityIdFormat.W3C } activity
+                ? activity.TraceId.ToString()
+                : null;
+            HostLogMessages.GenericServiceUnavailable(
+                _logger,
+                reason,
+                StatusCodes.Status503ServiceUnavailable,
+                context.TraceIdentifier,
+                activityTraceId,
+                snapshot?.Configuration.Version,
+                snapshot?.DispatchGeneration?.GenerationId,
+                routeId,
+                targetType,
+                ownerExtensionId);
+        }
+
+        return true;
     }
 
     private async Task<bool> WriteResponseAsync(

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
@@ -64,7 +65,15 @@ internal sealed class PostgresTestDatabase : IAsyncDisposable
 
     /// <summary>Creates a real EF context routed to this test schema.</summary>
     /// <returns>A PostgreSQL-backed EF context.</returns>
-    internal NekostickDbContext CreateContext()
+    internal NekostickDbContext CreateContext(IInterceptor? interceptor = null)
+    {
+        return CreateContext(
+            interceptor is null ? [] : [interceptor]);
+    }
+
+    /// <summary>Creates a real EF context routed to this test schema with additional interceptors.</summary>
+    /// <returns>A PostgreSQL-backed EF context.</returns>
+    internal NekostickDbContext CreateContext(IInterceptor[] interceptors)
     {
         var optionsBuilder = new DbContextOptionsBuilder<NekostickDbContext>();
         optionsBuilder.UseNpgsql(
@@ -72,6 +81,11 @@ internal sealed class PostgresTestDatabase : IAsyncDisposable
             npgsql => npgsql.MigrationsHistoryTable(
                 PersistenceDatabaseDefaults.MigrationHistoryTable,
                 Schema));
+        if (interceptors.Length > 0)
+        {
+            optionsBuilder.AddInterceptors(interceptors);
+        }
+
         optionsBuilder.ReplaceService<ISqlGenerationHelper, TestSchemaSqlGenerationHelper>();
         optionsBuilder.ReplaceService<IMigrationsSqlGenerator, TestSchemaMigrationsSqlGenerator>();
         return new NekostickDbContext(optionsBuilder.Options);

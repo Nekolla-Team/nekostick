@@ -129,6 +129,30 @@ public static class ServiceStateTransition
             consecutiveHealthFailures: 0,
             restartAttempts: RestartAttemptState.Empty);
     }
+    /// <summary>Records a retryable lease failure and schedules a bounded waiting retry.</summary>
+    internal static ServiceRuntimeSnapshot RecordRetryableLeaseFailure(
+        ServiceRuntimeSnapshot current,
+        DateTimeOffset retryAt,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(current);
+
+        if (current.Desired != DesiredServiceState.Running)
+        {
+            return current;
+        }
+
+        return NewSnapshot(
+            current,
+            current.Desired,
+            ServiceLifecycleState.Waiting,
+            ServiceHealthState.Unknown,
+            ServiceStateReasonCode.PortLeaseUnavailable,
+            now,
+            new ServiceDeadline(ServiceDeadlineKind.WaitingBackoff, retryAt),
+            observation: null,
+            consecutiveHealthFailures: 0);
+    }
 
     /// <summary>Records cancellation of a start operation without mutating the prior snapshot.</summary>
     /// <param name="current">The current immutable snapshot.</param>

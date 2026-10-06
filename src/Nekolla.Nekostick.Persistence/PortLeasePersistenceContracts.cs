@@ -22,7 +22,10 @@ public enum PersistencePortLeaseOperationStatus
     Cancelled,
 
     /// <summary>The request was not valid for this boundary.</summary>
-    Rejected
+    Rejected,
+
+    /// <summary>Transient database failures exhausted the bounded retry attempts.</summary>
+    RetryableTransient
 }
 
 /// <summary>Contains the safe public state of one persisted port lease.</summary>
@@ -281,7 +284,10 @@ public enum PersistencePortLeaseSnapshotStatus
     Cancelled,
 
     /// <summary>The node identifier was rejected.</summary>
-    Rejected
+    Rejected,
+
+    /// <summary>Transient database failures exhausted the bounded retry attempts.</summary>
+    RetryableTransient
 }
 
 /// <summary>Contains a complete immutable active-lease snapshot result.</summary>

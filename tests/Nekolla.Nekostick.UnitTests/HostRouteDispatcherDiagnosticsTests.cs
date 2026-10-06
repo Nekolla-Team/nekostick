@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Logging;
@@ -122,7 +124,137 @@ public sealed class HostRouteDispatcherDiagnosticsTests
             entry => entry.EventId == HostEventIds.RouteRegexEvaluationTimedOut);
     }
 
-    private static RouteConfiguration CreateRoute(Guid id, string pattern, string target) =>
+    [Fact]
+    public async Task GenericServiceUnavailableWarningIsCorrelatedAndSanitized()
+    {
+        var routeId = RoutingTestData.Id(343);
+        const string requestPath = "/request-path-marker";
+        const string rawTarget = "/request-path-marker?query-secret-marker";
+        const string host = "sensitive-host-marker.example";
+        const string method = "SENSITIVE-METHOD";
+        const string targetRoot = "/sensitive-target-marker";
+        const string extensionId = "safe-extension-id-marker";
+        const string traceIdentifier = "request-trace-identifier-marker";
+        const string header = "sensitive-header-marker";
+        const string cookie = "sensitive-cookie-marker";
+        const string authorization = "sensitive-authorization-marker";
+        const string connection = "sensitive-connection-marker";
+
+        var route = CreateRoute(routeId, requestPath, targetRoot, extensionId);
+        var configuration = RoutingTestData.CreateSnapshot(17, ImmutableArray.Create(route));
+        var snapshot = new HostRoutingSnapshot(configuration, RoutingTestData.Build(new[] { route }));
+        var logger = new CapturingLogger();
+        var context = CreateContext(
+            requestPath,
+            rawTarget,
+            host,
+            method,
+            header,
+            cookie,
+            authorization,
+            connection);
+        context.TraceIdentifier = traceIdentifier;
+
+        using var activity = new Activity("generic-503-diagnostic")
+            .SetIdFormat(ActivityIdFormat.W3C)
+            .Start();
+
+        var statusCode = await DispatchAsync(snapshot, context, logger);
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
+        context.Response.Body.Position = 0;
+        using var reader = new StreamReader(
+            context.Response.Body,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true,
+            bufferSize: 1024,
+            leaveOpen: true);
+        Assert.Equal("Service unavailable.", await reader.ReadToEndAsync(TestContext.Current.CancellationToken));
+
+        var unavailableLog = Assert.Single(
+            logger.Entries,
+            entry => entry.EventId == HostEventIds.GenericServiceUnavailable);
+        Assert.Equal(LogLevel.Warning, unavailableLog.Level);
+        Assert.Equal(
+            HostGenericUnavailableReason.TargetDeferred,
+            Assert.IsType<HostGenericUnavailableReason>(unavailableLog.Fields["Reason"]));
+        Assert.Equal(
+            StatusCodes.Status503ServiceUnavailable,
+            Assert.IsType<int>(unavailableLog.Fields["StatusCode"]));
+        Assert.Equal(traceIdentifier, unavailableLog.Fields["TraceIdentifier"]);
+        Assert.Equal(activity.TraceId.ToString(), unavailableLog.Fields["ActivityTraceId"]);
+        Assert.Equal(17L, Assert.IsType<long>(unavailableLog.Fields["ConfigurationVersion"]));
+        Assert.Null(unavailableLog.Fields["PublicationGenerationId"]);
+        Assert.Equal(routeId, unavailableLog.Fields["RouteId"]);
+        Assert.Equal(RouteTargetType.StaticFile, Assert.IsType<RouteTargetType>(unavailableLog.Fields["TargetType"]));
+        Assert.Equal(extensionId, unavailableLog.Fields["OwnerExtensionId"]);
+
+        var recorded = BuildRecordedText(unavailableLog);
+        foreach (var sensitiveValue in new[]
+        {
+            requestPath,
+            rawTarget,
+            host,
+            method,
+            targetRoot,
+            header,
+            cookie,
+            authorization,
+            connection
+        })
+        {
+            Assert.DoesNotContain(sensitiveValue, recorded, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void RuntimeStateTransitionLogsOnlyChangesWithCallerAndCurrentVersion()
+    {
+        var holder = new HostConfigurationSnapshotHolder();
+        var snapshot = new HostConfigurationSnapshot(
+            1,
+            new GlobalSettingsConfiguration(version: 1),
+            default,
+            default,
+            default,
+            default);
+        Assert.True(holder.TryReplace(snapshot));
+        var logger = new CapturingLogger();
+        var state = new HostRuntimeState(
+            holder,
+            new HostNodeOptions(skipExtensions: false, disableSupervisor: false, readOnly: false),
+            logger);
+
+        state.MarkDatabaseUnavailable();
+        state.MarkDatabaseUnavailable();
+        state.MarkSnapshotAccepted();
+        state.MarkSnapshotAccepted();
+
+        var transitions = logger.Entries
+            .Where(entry => entry.EventId == HostEventIds.RuntimeStateTransition)
+            .ToArray();
+        Assert.Equal(2, transitions.Length);
+
+        var unavailable = Assert.Single(
+            transitions,
+            entry => entry.Fields["Reason"] is HostRuntimeStateTransitionReason.DatabaseUnavailable);
+        Assert.Equal(LogLevel.Warning, unavailable.Level);
+        Assert.Equal(nameof(RuntimeStateTransitionLogsOnlyChangesWithCallerAndCurrentVersion), unavailable.Fields["Caller"]);
+        Assert.Equal(1L, Assert.IsType<long>(unavailable.Fields["ConfigurationVersion"]));
+
+        var accepted = Assert.Single(
+            transitions,
+            entry => entry.Fields["Reason"] is HostRuntimeStateTransitionReason.SnapshotAccepted);
+        Assert.Equal(LogLevel.Information, accepted.Level);
+        Assert.Equal(nameof(RuntimeStateTransitionLogsOnlyChangesWithCallerAndCurrentVersion), accepted.Fields["Caller"]);
+        Assert.Equal(1L, Assert.IsType<long>(accepted.Fields["ConfigurationVersion"]));
+    }
+
+    private static RouteConfiguration CreateRoute(
+        Guid id,
+        string pattern,
+        string target,
+        string? ownerExtensionId = null) =>
         new(
             id,
             true,
@@ -135,7 +267,8 @@ public sealed class HostRouteDispatcherDiagnosticsTests
             "{}",
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
-            1);
+            1,
+            ownerExtensionId: ownerExtensionId);
 
     private static DefaultHttpContext CreateContext(
         string path,
@@ -192,7 +325,7 @@ public sealed class HostRouteDispatcherDiagnosticsTests
             ValueTask.FromResult(false);
     }
 
-    private sealed class CapturingLogger : ILogger
+    private sealed class CapturingLogger : ILogger<HostRuntimeState>
     {
         private readonly List<CapturedLog> _entries = new();
 
@@ -220,6 +353,7 @@ public sealed class HostRouteDispatcherDiagnosticsTests
             }
 
             _entries.Add(new CapturedLog(
+                logLevel,
                 eventId,
                 formatter(state, exception),
                 fields));
@@ -236,6 +370,7 @@ public sealed class HostRouteDispatcherDiagnosticsTests
     }
 
     private sealed record CapturedLog(
+        LogLevel Level,
         EventId EventId,
         string FormattedMessage,
         IReadOnlyDictionary<string, object?> Fields);

@@ -127,10 +127,9 @@ internal sealed partial class HostRouteDispatcher
         await using var publicationLease = TryAcquireSnapshotLease();
         if (publicationLease is null)
         {
-            await WriteResponseAsync(
+            await WriteGenericServiceUnavailableAsync(
                 context,
-                StatusCodes.Status503ServiceUnavailable,
-                ServiceUnavailableMessage);
+                HostGenericUnavailableReason.SnapshotLeaseUnavailable);
             return;
         }
 
@@ -148,10 +147,10 @@ internal sealed partial class HostRouteDispatcher
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.GlobalAdmission");
-            await WriteResponseAsync(
+            await WriteGenericServiceUnavailableAsync(
                 context,
-                StatusCodes.Status503ServiceUnavailable,
-                ServiceUnavailableMessage);
+                HostGenericUnavailableReason.GlobalAdmissionException,
+                snapshot);
             return;
         }
 
@@ -162,17 +161,17 @@ internal sealed partial class HostRouteDispatcher
 
         if (globalAdmission.Rejection is { } globalRejection)
         {
-            await WriteAdmissionFailureAsync(context, globalRejection);
+            await WriteAdmissionFailureAsync(context, globalRejection, snapshot: snapshot);
             return;
         }
 
         var concurrencyLease = globalAdmission.Lease;
         if (concurrencyLease is null)
         {
-            await WriteResponseAsync(
+            await WriteGenericServiceUnavailableAsync(
                 context,
-                StatusCodes.Status503ServiceUnavailable,
-                ServiceUnavailableMessage);
+                HostGenericUnavailableReason.GlobalAdmissionLeaseMissing,
+                snapshot);
             return;
         }
 
@@ -190,10 +189,10 @@ internal sealed partial class HostRouteDispatcher
             catch (Exception exception)
             {
                 HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.Match");
-                await WriteResponseAsync(
+                await WriteGenericServiceUnavailableAsync(
                     context,
-                    StatusCodes.Status503ServiceUnavailable,
-                    ServiceUnavailableMessage);
+                    HostGenericUnavailableReason.RouteMatchException,
+                    snapshot);
                 return;
             }
 
@@ -218,10 +217,10 @@ internal sealed partial class HostRouteDispatcher
                     return;
 
                 default:
-                    await WriteResponseAsync(
+                    await WriteGenericServiceUnavailableAsync(
                         context,
-                        StatusCodes.Status503ServiceUnavailable,
-                        ServiceUnavailableMessage);
+                        HostGenericUnavailableReason.UnknownRouteMatchStatus,
+                        snapshot);
                     return;
             }
         }
@@ -241,10 +240,10 @@ internal sealed partial class HostRouteDispatcher
     {
         if (match is null)
         {
-            await WriteResponseAsync(
+            await WriteGenericServiceUnavailableAsync(
                 context,
-                StatusCodes.Status503ServiceUnavailable,
-                ServiceUnavailableMessage);
+                HostGenericUnavailableReason.MatchedRouteMissingMatch,
+                snapshot);
             return;
         }
 
@@ -263,7 +262,13 @@ internal sealed partial class HostRouteDispatcher
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.RouteAdmission");
-            await WriteResponseAsync(context, StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage);
+            await WriteGenericServiceUnavailableAsync(
+                context,
+                HostGenericUnavailableReason.RouteAdmissionException,
+                snapshot,
+                match.RouteId,
+                routeConfiguration?.Target.Type ?? match.Target?.Type,
+                routeConfiguration?.OwnerExtensionId);
             return;
         }
 
@@ -278,7 +283,9 @@ internal sealed partial class HostRouteDispatcher
                 context,
                 routeRejection,
                 match.RouteId,
-                routeConfiguration?.Target.Type ?? match.Target?.Type);
+                routeConfiguration?.Target.Type ?? match.Target?.Type,
+                snapshot,
+                routeConfiguration?.OwnerExtensionId);
             return;
         }
 
@@ -295,7 +302,13 @@ internal sealed partial class HostRouteDispatcher
         catch (Exception exception)
         {
             HostLogMessages.FailureDetails(_logger, exception, "RouteDispatch.RequestPreparation");
-            await WriteResponseAsync(context, StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage);
+            await WriteGenericServiceUnavailableAsync(
+                context,
+                HostGenericUnavailableReason.RequestPreparationException,
+                snapshot,
+                match.RouteId,
+                routeConfiguration?.Target.Type ?? match.Target?.Type,
+                routeConfiguration?.OwnerExtensionId);
             return;
         }
 
@@ -305,7 +318,9 @@ internal sealed partial class HostRouteDispatcher
                 context,
                 preparationRejection,
                 match.RouteId,
-                routeConfiguration?.Target.Type ?? match.Target?.Type);
+                routeConfiguration?.Target.Type ?? match.Target?.Type,
+                snapshot,
+                routeConfiguration?.OwnerExtensionId);
             return;
         }
 
@@ -315,8 +330,10 @@ internal sealed partial class HostRouteDispatcher
                 !await DrainRequestBodyAsync(
                     context,
                     admissionContext,
+                    snapshot,
                     match.RouteId,
-                    routeConfiguration?.Target.Type ?? match.Target?.Type).ConfigureAwait(false))
+                    routeConfiguration?.Target.Type ?? match.Target?.Type,
+                    routeConfiguration?.OwnerExtensionId).ConfigureAwait(false))
             {
                 return;
             }
@@ -359,7 +376,9 @@ internal sealed partial class HostRouteDispatcher
                     context,
                     failure,
                     match.RouteId,
-                    routeConfiguration?.Target.Type ?? match.Target?.Type);
+                    routeConfiguration?.Target.Type ?? match.Target?.Type,
+                    snapshot,
+                    routeConfiguration?.OwnerExtensionId);
                 return;
             }
 
@@ -385,7 +404,9 @@ internal sealed partial class HostRouteDispatcher
                         context,
                         fallbackFailure,
                         match.RouteId,
-                        routeConfiguration?.Target.Type ?? match.Target?.Type);
+                        routeConfiguration?.Target.Type ?? match.Target?.Type,
+                        snapshot,
+                        routeConfiguration?.OwnerExtensionId);
                     return;
                 }
 
@@ -462,7 +483,15 @@ internal sealed partial class HostRouteDispatcher
                     (StatusCodes.Status500InternalServerError, "Internal server error."),
                 _ => (StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage)
             };
-            var wroteResponse = await WriteResponseAsync(context, statusCode, message);
+            var wroteResponse = statusCode == StatusCodes.Status503ServiceUnavailable
+                ? await WriteGenericServiceUnavailableAsync(
+                    context,
+                    GetTargetUnavailableReason(executionResult),
+                    snapshot,
+                    match.RouteId,
+                    routeConfiguration?.Target.Type ?? match.Target?.Type,
+                    routeConfiguration?.OwnerExtensionId)
+                : await WriteResponseAsync(context, statusCode, message);
             if (wroteResponse)
             {
                 LogMatchedTargetOutcome(
@@ -471,9 +500,20 @@ internal sealed partial class HostRouteDispatcher
                     executionResult,
                     context.Response.StatusCode);
             }
+
         }
     }
 
+
+    private static HostGenericUnavailableReason GetTargetUnavailableReason(
+        RouteTargetExecutionResult result) =>
+        result switch
+        {
+            RouteTargetExecutionResult.Deferred => HostGenericUnavailableReason.TargetDeferred,
+            RouteTargetExecutionResult.Unavailable => HostGenericUnavailableReason.TargetUnavailable,
+            RouteTargetExecutionResult.SafeFailure => HostGenericUnavailableReason.TargetSafeFailure,
+            _ => HostGenericUnavailableReason.UnknownTargetExecutionResult
+        };
 
     private void LogRegexTimeouts(RouteMatchResult result)
     {
