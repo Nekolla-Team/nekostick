@@ -146,9 +146,9 @@ public sealed class PostgresPortLeaseTests
             .SingleAsync(
                 value => value.NodeId == test.NodeId && value.Port == 25_250,
                 cancellationToken);
-        Assert.Equal(FixedNow, acquiredLease.CreatedAt);
+        Assert.Equal(FixedNow, acquiredEntity.CreatedAt);
         Assert.Equal(FixedNow.AddMinutes(5), acquiredLease.ExpiresAt);
-        Assert.Equal(acquiredLease.CreatedAt, acquiredEntity.CreatedAt);
+        Assert.Equal(acquiredLease.AcquiredAt, acquiredEntity.CreatedAt);
         Assert.Equal(acquiredLease.ExpiresAt, acquiredEntity.LeaseExpiresAt);
         Assert.Equal(acquiredEntity.CreatedAt, acquiredEntity.RenewedAt);
         Assert.Equal(acquiredEntity.CreatedAt, acquiredEntity.UpdatedAt);
@@ -175,7 +175,7 @@ public sealed class PostgresPortLeaseTests
                 cancellationToken);
         Assert.Equal(FixedNow.AddMinutes(1), renewedEntity.RenewedAt);
         Assert.Equal(FixedNow.AddMinutes(1), renewedEntity.UpdatedAt);
-        Assert.Equal(renewedLease.CreatedAt, renewedEntity.CreatedAt);
+        Assert.Equal(renewedLease.AcquiredAt, renewedEntity.CreatedAt);
         Assert.Equal(renewedLease.ExpiresAt, renewedEntity.LeaseExpiresAt);
         Assert.Equal(FixedNow.AddMinutes(11), renewedLease.ExpiresAt);
     }
