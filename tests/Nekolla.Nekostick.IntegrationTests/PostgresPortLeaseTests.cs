@@ -121,6 +121,65 @@ public sealed class PostgresPortLeaseTests
             TestContext.Current.CancellationToken));
     }
 
+    /// <summary>Verifies acquire and renewal snapshots match PostgreSQL microsecond timestamp precision.</summary>
+    [Fact]
+    public async Task AcquireAndRenewSnapshotsMatchPersistedTimestampPrecision()
+    {
+        var now = FixedNow.AddTicks(9);
+        await using var test = await LeaseTestScope.CreateAsync(now);
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var acquired = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                test.GenerationId,
+                25_250,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, acquired.Status);
+        Assert.NotNull(acquired.Lease);
+        var acquiredLease = acquired.Lease!;
+
+        await using var verificationContext = test.Database.CreateContext();
+        var acquiredEntity = await verificationContext.PortLeases.AsNoTracking()
+            .SingleAsync(
+                value => value.NodeId == test.NodeId && value.Port == 25_250,
+                cancellationToken);
+        Assert.Equal(FixedNow, acquiredLease.CreatedAt);
+        Assert.Equal(FixedNow.AddMinutes(5), acquiredLease.ExpiresAt);
+        Assert.Equal(acquiredLease.CreatedAt, acquiredEntity.CreatedAt);
+        Assert.Equal(acquiredLease.ExpiresAt, acquiredEntity.LeaseExpiresAt);
+        Assert.Equal(acquiredEntity.CreatedAt, acquiredEntity.RenewedAt);
+        Assert.Equal(acquiredEntity.CreatedAt, acquiredEntity.UpdatedAt);
+
+        var renewedAt = FixedNow.AddMinutes(1).AddTicks(9);
+        test.SetTime(renewedAt);
+
+        var renewed = await test.Store.RenewAsync(
+            new PersistencePortLeaseRenewRequest(
+                test.NodeId,
+                test.ServiceId,
+                test.GenerationId,
+                25_250,
+                acquiredLease.Version,
+                TimeSpan.FromMinutes(10)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, renewed.Status);
+        Assert.NotNull(renewed.Lease);
+        var renewedLease = renewed.Lease!;
+
+        var renewedEntity = await verificationContext.PortLeases.AsNoTracking()
+            .SingleAsync(
+                value => value.NodeId == test.NodeId && value.Port == 25_250,
+                cancellationToken);
+        Assert.Equal(FixedNow.AddMinutes(1), renewedEntity.RenewedAt);
+        Assert.Equal(FixedNow.AddMinutes(1), renewedEntity.UpdatedAt);
+        Assert.Equal(renewedLease.CreatedAt, renewedEntity.CreatedAt);
+        Assert.Equal(renewedLease.ExpiresAt, renewedEntity.LeaseExpiresAt);
+        Assert.Equal(FixedNow.AddMinutes(11), renewedLease.ExpiresAt);
+    }
+
     /// <summary>Verifies wrong and stale renewal versions cannot extend an otherwise valid lease.</summary>
     [Fact]
     public async Task WrongAndStaleRenewalFailWithoutExtendingLease()
@@ -610,10 +669,13 @@ public sealed class PostgresPortLeaseTests
 
     private sealed class LeaseTestScope : IAsyncDisposable
     {
+        private readonly FixedTimeProvider _timeProvider;
+
         private LeaseTestScope(
             PostgresTestDatabase database,
             NekostickDbContext context,
             EfPortLeaseStore store,
+            FixedTimeProvider timeProvider,
             string nodeId,
             Guid serviceId,
             Guid generationId)
@@ -621,6 +683,7 @@ public sealed class PostgresPortLeaseTests
             Database = database;
             Context = context;
             Store = store;
+            _timeProvider = timeProvider;
             GenerationId = generationId;
             NodeId = nodeId;
             ServiceId = serviceId;
@@ -632,6 +695,8 @@ public sealed class PostgresPortLeaseTests
         internal string NodeId { get; }
         internal Guid ServiceId { get; }
         internal Guid GenerationId { get; }
+
+        internal void SetTime(DateTimeOffset now) => _timeProvider.SetUtcNow(now);
 
         internal static async Task<LeaseTestScope> CreateAsync(DateTimeOffset now)
         {
@@ -663,8 +728,9 @@ public sealed class PostgresPortLeaseTests
                 });
                 context.Services.Add(CreateService(serviceId));
                 await context.SaveChangesAsync(TestContext.Current.CancellationToken);
-                store = new EfPortLeaseStore(context, new FixedTimeProvider(now));
-                return new LeaseTestScope(database, context, store, nodeId, serviceId, generationId);
+                var timeProvider = new FixedTimeProvider(now);
+                store = new EfPortLeaseStore(context, timeProvider);
+                return new LeaseTestScope(database, context, store, timeProvider, nodeId, serviceId, generationId);
             }
             catch
             {
@@ -693,9 +759,11 @@ public sealed class PostgresPortLeaseTests
 
     private sealed class FixedTimeProvider : TimeProvider
     {
-        private readonly DateTimeOffset now;
+        private DateTimeOffset now;
 
         internal FixedTimeProvider(DateTimeOffset now) => this.now = now;
+
+        internal void SetUtcNow(DateTimeOffset value) => now = value;
 
         public override DateTimeOffset GetUtcNow() => now;
     }

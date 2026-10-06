@@ -54,6 +54,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 IsolationLevel.Serializable,
                 cancellationToken).ConfigureAwait(false);
             var now = _time.GetUtcNow().ToUniversalTime();
+            var persistedNow = TruncateToMicrosecond(now);
             if (!await HasUsableOwnerAsync(
                     request.NodeId,
                     request.ServiceId,
@@ -111,10 +112,10 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 ServiceId = request.ServiceId,
                 GenerationId = request.GenerationId,
                 LeaseExpiresAt = leaseExpiresAt.Value,
-                RenewedAt = now,
+                RenewedAt = persistedNow,
                 Version = 1,
-                CreatedAt = now,
-                UpdatedAt = now
+                CreatedAt = persistedNow,
+                UpdatedAt = persistedNow
             };
             _db.PortLeases.Add(entity);
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -174,6 +175,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 IsolationLevel.Serializable,
                 cancellationToken).ConfigureAwait(false);
             var now = _time.GetUtcNow().ToUniversalTime();
+            var persistedNow = TruncateToMicrosecond(now);
             if (!await HasUsableOwnerAsync(
                     request.NodeId,
                     request.ServiceId,
@@ -211,9 +213,9 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             }
 
             entity.LeaseExpiresAt = leaseExpiresAt.Value;
-            entity.RenewedAt = now;
+            entity.RenewedAt = persistedNow;
             entity.Version++;
-            entity.UpdatedAt = now;
+            entity.UpdatedAt = persistedNow;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return Applied(ToSnapshot(entity));
@@ -517,11 +519,17 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
     private static PersistencePortLease ToSnapshot(PortLease value) =>
         new(value.NodeId, value.ServiceId, value.GenerationId, value.Port, value.CreatedAt, value.LeaseExpiresAt, value.Version);
 
+    private static DateTimeOffset TruncateToMicrosecond(DateTimeOffset value)
+    {
+        var utc = value.ToUniversalTime();
+        return utc.AddTicks(-(utc.Ticks % 10));
+    }
+
     private DateTimeOffset? TryGetExpiry(DateTimeOffset now, TimeSpan ttl)
     {
         try
         {
-            return now + ttl;
+            return TruncateToMicrosecond(now + ttl);
         }
         catch (ArgumentOutOfRangeException)
         {

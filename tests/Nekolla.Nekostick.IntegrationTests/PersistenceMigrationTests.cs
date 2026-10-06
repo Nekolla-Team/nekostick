@@ -341,6 +341,7 @@ public sealed class PersistenceMigrationTests
         var firstGenerationId = Guid.CreateVersion7();
         var secondGenerationId = Guid.CreateVersion7();
         var now = DateTimeOffset.UtcNow;
+        now = now.AddTicks(-(now.Ticks % 10));
         var createdAt = now.AddHours(-5);
         var renewedAt = now.AddHours(-4);
         var updatedAt = now.AddHours(-3);
