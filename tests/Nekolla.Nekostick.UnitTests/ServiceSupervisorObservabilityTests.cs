@@ -8,6 +8,7 @@ namespace Nekolla.Nekostick.UnitTests;
 public sealed class ServiceSupervisorObservabilityTests
 {
     private static readonly Guid ServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000074");
+    private static readonly Guid GenerationId = Guid.Parse("018f0000-0000-7000-8000-000000000174");
     private static readonly NodeIdentifier NodeId = new("node");
     private const int Port = 18432;
     private const string ExpectedTarget = "http://127.0.0.1:18432";
@@ -38,6 +39,7 @@ public sealed class ServiceSupervisorObservabilityTests
         var expiringLease = new PortLease(
             NodeId,
             ServiceId,
+            GenerationId,
             Port,
             now,
             now.AddSeconds(1),
@@ -112,7 +114,7 @@ public sealed class ServiceSupervisorObservabilityTests
             ServiceId,
             new HealthCheckDefinition(ServiceHealthCheckKind.Http, TimeSpan.FromSeconds(1), "/health"),
             new LoopbackEndpoint(LoopbackAddressKind.IPv4, Port));
-        var leaseRequest = new PortLeaseRequest(NodeId, ServiceId, Port, TimeSpan.FromMinutes(1));
+        var leaseRequest = new PortLeaseRequest(NodeId, ServiceId, GenerationId, Port, TimeSpan.FromMinutes(1));
         var policy = new HealthRetryPolicy(
             TimeSpan.FromSeconds(10),
             TimeSpan.FromMilliseconds(10),
@@ -132,7 +134,7 @@ public sealed class ServiceSupervisorObservabilityTests
     }
 
     private static PortLease CreateLease(DateTimeOffset now) =>
-        new(NodeId, ServiceId, Port, now, now.AddMinutes(1), 1);
+        new(NodeId, ServiceId, GenerationId, Port, now, now.AddMinutes(1), 1);
 
     private sealed class TestExecutor : IProcessExecutor
     {

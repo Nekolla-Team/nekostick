@@ -8,6 +8,7 @@ namespace Nekolla.Nekostick.UnitTests;
 public sealed class ServiceSupervisorTests
 {
     private static readonly Guid ServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000001");
+    private static readonly Guid GenerationId = Guid.Parse("018f0000-0000-7000-8000-000000000011");
     private static readonly DateTimeOffset Now = new(2026, 8, 17, 12, 0, 0, TimeSpan.Zero);
     private static readonly string[] AcquireThenStart = ["acquire", "start"];
     private static readonly string[] AcquireStartThenRelease = ["acquire", "start", "release"];
@@ -139,6 +140,15 @@ public sealed class ServiceSupervisorTests
         Assert.NotNull(supervisor.Lease);
         Assert.Null(supervisor.PendingLeaseRelease);
         Assert.Equal(["acquire", "start", "stop", "release", "release", "acquire", "start"], events);
+        Assert.Equal(2, store.AcquireRequests.Count);
+        Assert.All(store.AcquireRequests, request => Assert.Equal(GenerationId, request.GenerationId));
+        Assert.Equal(2, store.ReleaseRequests.Count);
+        Assert.All(store.ReleaseRequests, release =>
+        {
+            Assert.Equal(GenerationId, release.GenerationId);
+            Assert.Equal(lease.Port, release.Port);
+            Assert.Equal(lease.Version, release.LeaseVersion);
+        });
     }
 
     [Fact]
@@ -498,14 +508,14 @@ public sealed class ServiceSupervisorTests
     {
         var launch = new ProcessLaunchSpecification(ServiceId, "/bin/sh", "/tmp", ImmutableArray<string>.Empty, new ProcessEnvironment(new Dictionary<string, string>()));
         var request = new ServiceHealthProbeRequest(ServiceId, new HealthCheckDefinition(ServiceHealthCheckKind.Process, TimeSpan.FromSeconds(1)));
-        var leaseRequest = new PortLeaseRequest(new NodeIdentifier("node"), ServiceId, 23456, TimeSpan.FromMinutes(1));
+        var leaseRequest = new PortLeaseRequest(new NodeIdentifier("node"), ServiceId, GenerationId, 23456, TimeSpan.FromMinutes(1));
         return new ServiceSupervisor(executor, probe ?? new RecordingProbe(HealthObservationStatus.Healthy), store, launch, request, leaseRequest, healthPolicy, restartPolicy: restartPolicy, now: Now);
     }
 
     private static PortLease Lease() => Lease(Now, Now.AddMinutes(1), 1);
 
     private static PortLease Lease(DateTimeOffset acquiredAt, DateTimeOffset expiresAt, long version) =>
-        new(new NodeIdentifier("node"), ServiceId, 23456, acquiredAt, expiresAt, version);
+        new(new NodeIdentifier("node"), ServiceId, GenerationId, 23456, acquiredAt, expiresAt, version);
 
     private sealed class RecordingExecutor : IProcessExecutor
     {
@@ -588,6 +598,8 @@ public sealed class ServiceSupervisorTests
         private readonly Func<int, PortLease>? _acquireLease;
         private readonly Func<PortLeaseOperationResult>? _releaseResult;
         private int _acquireCount;
+        public List<PortLeaseRequest> AcquireRequests { get; } = [];
+        public List<PortLeaseRelease> ReleaseRequests { get; } = [];
 
         public RecordingLeaseStore(
             List<string> events,
@@ -608,6 +620,7 @@ public sealed class ServiceSupervisorTests
             if (intent.Kind == PortLeaseIntentKind.Acquire)
             {
                 _events.Add("acquire");
+                AcquireRequests.Add(intent.Request!);
                 var lease = _acquireLease?.Invoke(Interlocked.Increment(ref _acquireCount)) ?? _lease;
                 return ValueTask.FromResult(new PortLeaseOperationResult(
                     PortLeaseOperationStatus.Applied,
@@ -615,6 +628,7 @@ public sealed class ServiceSupervisorTests
             }
 
             _events.Add("release");
+            ReleaseRequests.Add(intent.Release!);
             return ValueTask.FromResult(_releaseResult?.Invoke() ?? new PortLeaseOperationResult(
                 PortLeaseOperationStatus.Applied,
                 _lease));

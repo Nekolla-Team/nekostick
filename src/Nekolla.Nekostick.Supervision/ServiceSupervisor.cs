@@ -175,6 +175,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         if (initialLease is not null &&
             (initialLease.NodeId != leaseRequest.NodeId ||
              initialLease.ServiceId != leaseRequest.ServiceId ||
+             initialLease.GenerationId != leaseRequest.GenerationId ||
              initialLease.Port != leaseRequest.Port ||
              initialLease.IsExpired(initialNow)))
         {
@@ -344,6 +345,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         if (heldLease is not null &&
             heldLease.NodeId == leaseRequest.NodeId &&
             heldLease.ServiceId == leaseRequest.ServiceId &&
+            heldLease.GenerationId == leaseRequest.GenerationId &&
             heldLease.Port == leaseRequest.Port &&
             !heldLease.IsExpired(now))
         {
@@ -398,6 +400,7 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
         var usableLease = leaseResult.Status == PortLeaseOperationStatus.Applied &&
             returnedLease is not null &&
             returnedLease.NodeId == leaseRequest.NodeId &&
+            returnedLease.GenerationId == leaseRequest.GenerationId &&
             returnedLease.ServiceId == leaseRequest.ServiceId &&
             returnedLease.Port == leaseRequest.Port &&
             !returnedLease.IsExpired(now);

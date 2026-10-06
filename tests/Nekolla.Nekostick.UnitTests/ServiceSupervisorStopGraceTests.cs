@@ -8,6 +8,7 @@ namespace Nekolla.Nekostick.UnitTests;
 public sealed class ServiceSupervisorStopGraceTests
 {
     private static readonly Guid ServiceId = Guid.Parse("018f0000-0000-7000-8000-000000000031");
+    private static readonly Guid GenerationId = Guid.Parse("018f0000-0000-7000-8000-000000000132");
     private static readonly DateTimeOffset Now = new(2026, 8, 20, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -43,7 +44,7 @@ public sealed class ServiceSupervisorStopGraceTests
             new ServiceHealthProbeRequest(
                 ServiceId,
                 new HealthCheckDefinition(ServiceHealthCheckKind.Process, TimeSpan.FromSeconds(1))),
-            new PortLeaseRequest(new NodeIdentifier("node"), ServiceId, 23456, TimeSpan.FromMinutes(1)),
+            new PortLeaseRequest(new NodeIdentifier("node"), ServiceId, GenerationId, 23456, TimeSpan.FromMinutes(1)),
             stopGracePeriod: stopGracePeriod,
             now: Now,
             initialLease: Lease());
@@ -56,7 +57,7 @@ public sealed class ServiceSupervisorStopGraceTests
     }
 
     private static PortLease Lease() =>
-        new(new NodeIdentifier("node"), ServiceId, 23456, Now, Now.AddMinutes(1), 1);
+        new(new NodeIdentifier("node"), ServiceId, GenerationId, 23456, Now, Now.AddMinutes(1), 1);
 
     private sealed class RecordingExecutor : IProcessExecutor
     {

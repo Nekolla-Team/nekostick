@@ -63,6 +63,7 @@ public sealed partial class ServiceSupervisor
             var renewal = new PortLeaseRenewal(
                 current.NodeId,
                 current.ServiceId,
+                current.GenerationId,
                 current.Port,
                 current.Version,
                 policy.TimeToLive);
@@ -85,6 +86,7 @@ public sealed partial class ServiceSupervisor
             renewed is not null &&
             renewed.NodeId == current.NodeId &&
             renewed.ServiceId == current.ServiceId &&
+            renewed.GenerationId == current.GenerationId &&
             renewed.Port == current.Port &&
             !renewed.IsExpired(now);
         if (!usable)

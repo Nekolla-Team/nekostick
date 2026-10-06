@@ -411,6 +411,7 @@ public sealed class HostDurableStoreOutageTests
                         new PortLease(
                             request.NodeId,
                             request.ServiceId,
+                            request.GenerationId,
                             request.Port == 0
                                 ? request.AutomaticPortRangeStart!.Value
                                 : request.Port,

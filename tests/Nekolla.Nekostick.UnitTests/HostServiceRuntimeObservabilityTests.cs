@@ -388,20 +388,28 @@ public sealed class HostServiceRuntimeObservabilityTests
                 TestContext.Current.CancellationToken).AsTask();
 
             await probe.CandidateRetryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-            var candidateObservation = await WaitForRuntimeSnapshotAsync(
+            Assert.False(replacementStartup.IsCompleted);
+            Assert.True(manager.TryGet(service.Id, out var duringCandidateProbe));
+            Assert.Equal(ExtensionServiceLifecycleState.Running, duringCandidateProbe.LifecycleState);
+            Assert.NotEqual(CandidateProgressProbe.CandidateFailureDetail, duringCandidateProbe.LastProbe?.ErrorMessage);
+            Assert.Equal(oldInstanceId, duringCandidateProbe.ProcessInstanceId);
+
+            await ObserveReadyHealthAsync(manager, TestContext.Current.CancellationToken);
+            Assert.False(replacementStartup.IsCompleted);
+            Assert.True(manager.TryGet(service.Id, out var refreshedOldGeneration));
+            Assert.Equal(ExtensionServiceLifecycleState.Running, refreshedOldGeneration.LifecycleState);
+            Assert.NotEqual(CandidateProgressProbe.CandidateFailureDetail, refreshedOldGeneration.LastProbe?.ErrorMessage);
+            Assert.Equal(oldInstanceId, refreshedOldGeneration.ProcessInstanceId);
+
+            probe.ReleaseCandidateRetry();
+            var committedCandidate = await WaitForRuntimeSnapshotAsync(
                 manager,
                 service.Id,
                 snapshot => snapshot.LifecycleState == ExtensionServiceLifecycleState.Running &&
-                    snapshot.LastProbe?.ErrorMessage == CandidateProgressProbe.CandidateFailureDetail,
+                    snapshot.ProcessInstanceId != oldInstanceId,
                 TestContext.Current.CancellationToken);
-            Assert.Equal(oldInstanceId, candidateObservation.ProcessInstanceId);
-            Assert.False(replacementStartup.IsCompleted);
-
-            await ObserveReadyHealthAsync(manager, TestContext.Current.CancellationToken);
-            Assert.True(manager.TryGet(service.Id, out var refreshed));
-            Assert.Equal(ExtensionServiceLifecycleState.Running, refreshed.LifecycleState);
-            Assert.Equal(oldInstanceId, refreshed.ProcessInstanceId);
-            Assert.Equal(CandidateProgressProbe.CandidateFailureDetail, refreshed.LastProbe?.ErrorMessage);
+            await replacementStartup.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.NotEqual(oldInstanceId, committedCandidate.ProcessInstanceId);
         }
         finally
         {
@@ -1097,6 +1105,7 @@ public sealed class HostServiceRuntimeObservabilityTests
                 new PortLease(
                     request.NodeId,
                     request.ServiceId,
+                    request.GenerationId,
                     port,
                     now,
                     now.AddMinutes(5),
@@ -1136,6 +1145,7 @@ public sealed class HostServiceRuntimeObservabilityTests
                 new PortLease(
                     request.NodeId,
                     request.ServiceId,
+                    request.GenerationId,
                     port,
                     now,
                     now.AddSeconds(10),

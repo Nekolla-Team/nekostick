@@ -7,13 +7,54 @@ using Nekolla.Nekostick.Persistence.Entities;
 namespace Nekolla.Nekostick.Persistence;
 
 /// <summary>Safe loopback endpoint published from an active, unexpired lease.</summary>
-public sealed record ServiceLeaseEndpoint(Guid ServiceId, string NodeId, LoopbackEndpoint Endpoint, DateTimeOffset ExpiresAt, long LeaseVersion);
+public sealed record ServiceLeaseEndpoint
+{
+    /// <summary>Creates an active service endpoint observation.</summary>
+    public ServiceLeaseEndpoint(
+        Guid serviceId,
+        Guid generationId,
+        string nodeId,
+        LoopbackEndpoint endpoint,
+        DateTimeOffset expiresAt,
+        long leaseVersion)
+    {
+        if (!UuidV7.IsVersion7(generationId))
+        {
+            throw new ArgumentException("A UUID v7 generation identifier is required.", nameof(generationId));
+        }
+
+        ServiceId = serviceId;
+        GenerationId = generationId;
+        NodeId = nodeId;
+        Endpoint = endpoint;
+        ExpiresAt = expiresAt;
+        LeaseVersion = leaseVersion;
+    }
+
+    /// <summary>Gets the service identifier.</summary>
+    public Guid ServiceId { get; init; }
+
+    /// <summary>Gets the service generation identifier.</summary>
+    public Guid GenerationId { get; init; }
+
+    /// <summary>Gets the owning node identifier.</summary>
+    public string NodeId { get; init; }
+
+    /// <summary>Gets the leased loopback endpoint.</summary>
+    public LoopbackEndpoint Endpoint { get; init; }
+
+    /// <summary>Gets the lease expiration timestamp.</summary>
+    public DateTimeOffset ExpiresAt { get; init; }
+
+    /// <summary>Gets the optimistic lease version.</summary>
+    public long LeaseVersion { get; init; }
+}
 
 /// <summary>Read-only endpoint publication boundary for Host startup snapshots.</summary>
 public interface IPersistencePortLeaseReader
 {
-    /// <summary>Reads an active endpoint for a service owned by the supplied node.</summary>
-    ValueTask<ServiceLeaseEndpoint?> ResolveAsync(Guid serviceId, string nodeId, CancellationToken cancellationToken = default);
+    /// <summary>Reads an active endpoint for one service generation owned by the supplied node.</summary>
+    ValueTask<ServiceLeaseEndpoint?> ResolveAsync(Guid serviceId, Guid generationId, string nodeId, CancellationToken cancellationToken = default);
 
     /// <summary>Reads a complete active endpoint snapshot for one node.</summary>
     ValueTask<IReadOnlyList<ServiceLeaseEndpoint>> ReadActiveEndpointsAsync(string nodeId, CancellationToken cancellationToken = default);
@@ -42,9 +83,13 @@ public sealed partial class EfServiceRuntimePersistence : IPersistencePortLeaseR
     }
 
     /// <inheritdoc />
-    public async ValueTask<ServiceLeaseEndpoint?> ResolveAsync(Guid serviceId, string nodeId, CancellationToken cancellationToken = default)
+    public async ValueTask<ServiceLeaseEndpoint?> ResolveAsync(
+        Guid serviceId,
+        Guid generationId,
+        string nodeId,
+        CancellationToken cancellationToken = default)
     {
-        if (serviceId == Guid.Empty || !IsSafeNodeId(nodeId)) return null;
+        if (serviceId == Guid.Empty || !UuidV7.IsVersion7(generationId) || !IsSafeNodeId(nodeId)) return null;
         try
         {
             var nodeActive = await _db.Nodes.AsNoTracking().AnyAsync(
@@ -53,9 +98,9 @@ public sealed partial class EfServiceRuntimePersistence : IPersistencePortLeaseR
             if (!nodeActive) return null;
             var now = _time.GetUtcNow();
             var lease = await _db.PortLeases.AsNoTracking().SingleOrDefaultAsync(
-                value => value.ServiceId == serviceId && value.NodeId == nodeId && value.LeaseExpiresAt > now,
+                value => value.ServiceId == serviceId && value.GenerationId == generationId && value.NodeId == nodeId && value.LeaseExpiresAt > now,
                 cancellationToken).ConfigureAwait(false);
-            return lease is null ? null : new ServiceLeaseEndpoint(serviceId, nodeId, new LoopbackEndpoint(LoopbackAddressKind.IPv4, lease.Port), lease.LeaseExpiresAt, lease.Version);
+            return lease is null ? null : new ServiceLeaseEndpoint(serviceId, lease.GenerationId, nodeId, new LoopbackEndpoint(LoopbackAddressKind.IPv4, lease.Port), lease.LeaseExpiresAt, lease.Version);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -88,6 +133,7 @@ public sealed partial class EfServiceRuntimePersistence : IPersistencePortLeaseR
                 .Where(value => value.Port is >= 1 and <= 65535 && value.ServiceId != Guid.Empty)
                 .Select(value => new ServiceLeaseEndpoint(
                     value.ServiceId,
+                    value.GenerationId,
                     value.NodeId,
                     new LoopbackEndpoint(LoopbackAddressKind.IPv4, value.Port),
                     value.LeaseExpiresAt,

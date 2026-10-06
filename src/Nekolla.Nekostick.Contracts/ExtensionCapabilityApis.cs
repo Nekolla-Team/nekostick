@@ -173,11 +173,13 @@ public sealed record ExtensionEndpointLease
 {
     /// <summary>Creates an endpoint lease DTO.</summary>
     /// <param name="serviceId">The caller-owned service identifier.</param>
+    /// <param name="generationId">The UUID v7 service generation identifier.</param>
     /// <param name="port">The loopback port assigned by the host.</param>
     /// <param name="expiresAt">The UTC lease expiration time.</param>
-    public ExtensionEndpointLease(Guid serviceId, int port, DateTimeOffset expiresAt)
+    public ExtensionEndpointLease(Guid serviceId, Guid generationId, int port, DateTimeOffset expiresAt)
     {
         ServiceId = IdentityValidation.RequireUuidV7(serviceId, nameof(serviceId));
+        GenerationId = IdentityValidation.RequireUuidV7(generationId, nameof(generationId));
         if (port is < 1 or > 65535)
         {
             throw new ArgumentOutOfRangeException(nameof(port));
@@ -189,6 +191,9 @@ public sealed record ExtensionEndpointLease
 
     /// <summary>Gets the caller-owned service identifier.</summary>
     public Guid ServiceId { get; }
+
+    /// <summary>Gets the UUID v7 service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the host-assigned loopback port.</summary>
     public int Port { get; }

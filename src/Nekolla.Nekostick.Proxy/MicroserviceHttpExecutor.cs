@@ -193,7 +193,7 @@ internal sealed class MicroserviceCancellationScope : IDisposable
 
 
 /// <summary>Executes one safe microservice request through YARP's forwarder.</summary>
-public sealed partial class MicroserviceHttpExecutor
+public sealed partial class MicroserviceHttpExecutor : IDisposable
 {
     private readonly IHttpForwarder _forwarder;
     private readonly IMicroserviceEndpointResolver _endpointResolver;
@@ -201,6 +201,8 @@ public sealed partial class MicroserviceHttpExecutor
     private readonly ILogger<MicroserviceHttpExecutor> _logger;
     private readonly IMicroserviceForwardingTelemetry _forwardingTelemetry;
     private readonly IMicroserviceDrainTracker _drainTracker;
+    private readonly IMicroserviceAdmissionCoordinator _admissionCoordinator;
+    private readonly bool _ownsAdmissionCoordinator;
 
     /// <summary>Creates an executor with shared YARP transport dependencies.</summary>
     /// <param name="forwarder">The YARP forwarder.</param>
@@ -216,13 +218,47 @@ public sealed partial class MicroserviceHttpExecutor
         IMicroserviceDrainTracker drainTracker,
         ILogger<MicroserviceHttpExecutor>? logger = null,
         IMicroserviceForwardingTelemetry? forwardingTelemetry = null)
+        : this(
+            forwarder,
+            endpointResolver,
+            invokerPool,
+            drainTracker,
+            new MicroserviceAdmissionCoordinator(),
+            logger,
+            forwardingTelemetry,
+            ownsAdmissionCoordinator: true)
+    {
+    }
+
+    internal MicroserviceHttpExecutor(
+        IHttpForwarder forwarder,
+        IMicroserviceEndpointResolver endpointResolver,
+        MicroserviceHttpInvokerPool invokerPool,
+        IMicroserviceDrainTracker drainTracker,
+        IMicroserviceAdmissionCoordinator admissionCoordinator,
+        ILogger<MicroserviceHttpExecutor>? logger = null,
+        IMicroserviceForwardingTelemetry? forwardingTelemetry = null,
+        bool ownsAdmissionCoordinator = false)
     {
         _forwarder = forwarder ?? throw new ArgumentNullException(nameof(forwarder));
         _endpointResolver = endpointResolver ?? throw new ArgumentNullException(nameof(endpointResolver));
         _invokerPool = invokerPool ?? throw new ArgumentNullException(nameof(invokerPool));
         _drainTracker = drainTracker ?? throw new ArgumentNullException(nameof(drainTracker));
+        _admissionCoordinator = admissionCoordinator ?? throw new ArgumentNullException(nameof(admissionCoordinator));
+        _ownsAdmissionCoordinator = ownsAdmissionCoordinator;
         _logger = logger ?? NullLogger<MicroserviceHttpExecutor>.Instance;
         _forwardingTelemetry = forwardingTelemetry ?? EmptyMicroserviceForwardingTelemetry.Instance;
+    }
+
+    /// <summary>Disposes an admission coordinator created by this executor.</summary>
+    public void Dispose()
+    {
+        if (_ownsAdmissionCoordinator && _admissionCoordinator is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>Resolves and forwards one request without exposing destination details.</summary>
@@ -253,18 +289,24 @@ public sealed partial class MicroserviceHttpExecutor
             _logger);
         var operationToken = cancellationScope.OperationToken;
         MicroserviceEndpointResolution? resolution;
+        IMicroserviceAdmissionLease? admissionLease = null;
         try
         {
+            admissionLease = await _admissionCoordinator
+                .EnterAsync(request.ServiceId, operationToken)
+                .ConfigureAwait(false);
             resolution = await _endpointResolver
                 .ResolveAsync(request.ServiceId, operationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
+            admissionLease?.Dispose();
             return ResultForCancellation(cancellationScope.FirstCause);
         }
         catch (Exception exception)
         {
+            admissionLease?.Dispose();
             MicroserviceProxyTelemetry.AttemptFailed(
                 _logger,
                 request.RouteId,
@@ -280,12 +322,23 @@ public sealed partial class MicroserviceHttpExecutor
             || !resolution.IsAvailable
             || resolution.Endpoint is null)
         {
+            admissionLease?.Dispose();
             return MicroserviceProxyExecutionResult.For(MicroserviceProxyExecutionDisposition.Unavailable);
         }
-        using var drainScope = _drainTracker.BeginTracking(
-            request.ServiceId,
-            resolution.Endpoint.BaseUri.Port);
 
+        IDisposable drainScope;
+        try
+        {
+            drainScope = _drainTracker.BeginTracking(
+                request.ServiceId,
+                resolution.Endpoint.BaseUri.Port);
+        }
+        finally
+        {
+            admissionLease!.Dispose();
+        }
+
+        using var trackedEndpoint = drainScope;
         var originalPath = httpContext.Request.Path;
         var originalPathBase = httpContext.Request.PathBase;
         var canReplay = retryPolicy.MaxRetries > 0 && CanReplayRequest(httpContext, isWebSocket);

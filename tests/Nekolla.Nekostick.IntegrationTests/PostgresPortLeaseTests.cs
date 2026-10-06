@@ -1,4 +1,6 @@
+using System.Collections.Immutable;
 using Microsoft.EntityFrameworkCore;
+using Nekolla.Nekostick.Contracts;
 using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence;
 using Nekolla.Nekostick.Persistence.Entities;
@@ -23,6 +25,7 @@ public sealed class PostgresPortLeaseTests
             PersistencePortLeaseAcquireRequest.Automatic(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 TimeSpan.FromMinutes(5),
                 rangeStart: 25_000,
                 rangeEnd: 25_002),
@@ -43,6 +46,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 TimeSpan.FromMinutes(5)),
             TestContext.Current.CancellationToken);
@@ -50,6 +54,7 @@ public sealed class PostgresPortLeaseTests
         Assert.NotNull(owner.Lease);
         var ownerLease = owner.Lease!;
         var secondServiceId = Guid.CreateVersion7();
+        var secondGenerationId = Guid.CreateVersion7();
         test.Context.Services.Add(CreateService(secondServiceId));
         await test.Context.SaveChangesAsync(TestContext.Current.CancellationToken);
 
@@ -57,6 +62,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 secondServiceId,
+                secondGenerationId,
                 port,
                 TimeSpan.FromMinutes(5)),
             TestContext.Current.CancellationToken);
@@ -86,6 +92,7 @@ public sealed class PostgresPortLeaseTests
             NodeId = test.NodeId,
             Port = port,
             ServiceId = test.ServiceId,
+            GenerationId = test.GenerationId,
             LeaseExpiresAt = FixedNow.AddSeconds(-1),
             RenewedAt = FixedNow.AddMinutes(-5),
             Version = 7,
@@ -98,6 +105,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 TimeSpan.FromMinutes(5)),
             TestContext.Current.CancellationToken);
@@ -123,6 +131,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 TimeSpan.FromMinutes(10)),
             TestContext.Current.CancellationToken);
@@ -133,6 +142,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseRenewRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 acquiredLease.Version + 1,
                 TimeSpan.FromHours(1)),
@@ -146,6 +156,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseRenewRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 acquiredLease.Version,
                 TimeSpan.FromMinutes(20)),
@@ -158,6 +169,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseRenewRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 acquiredLease.Version,
                 TimeSpan.FromHours(1)),
@@ -178,6 +190,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 TimeSpan.FromMinutes(5)),
             TestContext.Current.CancellationToken);
@@ -188,6 +201,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseReleaseRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 lease.Version),
             TestContext.Current.CancellationToken);
@@ -210,6 +224,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 TimeSpan.FromMinutes(5)),
             cancellationToken);
@@ -227,6 +242,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port + 1,
                 TimeSpan.FromMinutes(5)),
             cancellationToken);
@@ -236,6 +252,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseRenewRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 lease.Version,
                 TimeSpan.FromMinutes(5)),
@@ -246,6 +263,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseReleaseRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 lease.Version + 1),
             cancellationToken);
@@ -262,6 +280,7 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseReleaseRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 port,
                 lease.Version),
             cancellationToken);
@@ -284,12 +303,286 @@ public sealed class PostgresPortLeaseTests
             new PersistencePortLeaseAcquireRequest(
                 test.NodeId,
                 test.ServiceId,
+                test.GenerationId,
                 25_500,
                 TimeSpan.FromMinutes(5)),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(PersistencePortLeaseOperationStatus.DatabaseUnavailable, result.Status);
         Assert.Null(result.Lease);
+    }
+
+    /// <summary>Verifies a generation cannot reacquire live ownership and another generation gets a distinct port.</summary>
+    [Fact]
+    public async Task GenerationsAcquireDistinctPortsAndSameGenerationCannotReacquire()
+    {
+        await using var test = await LeaseTestScope.CreateAsync(FixedNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        const int firstPort = 25_700;
+        const int secondPort = 25_701;
+
+        var first = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                test.GenerationId,
+                firstPort,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, first.Status);
+        var firstLease = first.Lease!;
+
+        var sameGeneration = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                test.GenerationId,
+                secondPort,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Conflict, sameGeneration.Status);
+
+        var secondGenerationId = Guid.CreateVersion7();
+        var second = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                secondGenerationId,
+                secondPort,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, second.Status);
+        var secondLease = second.Lease!;
+
+        Assert.NotEqual(firstLease.GenerationId, secondLease.GenerationId);
+        Assert.NotEqual(firstLease.Port, secondLease.Port);
+        var persisted = await test.Context.PortLeases.AsNoTracking()
+            .Where(value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId)
+            .ToListAsync(cancellationToken);
+        Assert.Equal(2, persisted.Count);
+        Assert.Contains(persisted, value => value.GenerationId == firstLease.GenerationId && value.Port == firstPort);
+        Assert.Contains(persisted, value => value.GenerationId == secondGenerationId && value.Port == secondPort);
+    }
+
+    /// <summary>Verifies concurrent generations acquire separate ports from the same range.</summary>
+    [Fact]
+    public async Task ConcurrentGenerationAcquiresUseDistinctPorts()
+    {
+        await using var test = await LeaseTestScope.CreateAsync(FixedNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var firstGenerationId = Guid.CreateVersion7();
+        var secondGenerationId = Guid.CreateVersion7();
+
+        var firstTask = test.Store.AcquireAsync(
+            PersistencePortLeaseAcquireRequest.Automatic(
+                test.NodeId,
+                test.ServiceId,
+                firstGenerationId,
+                TimeSpan.FromMinutes(5),
+                rangeStart: 25_710,
+                rangeEnd: 25_711),
+            cancellationToken).AsTask();
+        var secondTask = test.Store.AcquireAsync(
+            PersistencePortLeaseAcquireRequest.Automatic(
+                test.NodeId,
+                test.ServiceId,
+                secondGenerationId,
+                TimeSpan.FromMinutes(5),
+                rangeStart: 25_710,
+                rangeEnd: 25_711),
+            cancellationToken).AsTask();
+
+        var results = await Task.WhenAll(firstTask, secondTask);
+        Assert.All(results, result => Assert.Equal(PersistencePortLeaseOperationStatus.Applied, result.Status));
+        Assert.NotNull(results[0].Lease);
+        Assert.NotNull(results[1].Lease);
+        var firstLease = results[0].Lease!;
+        var secondLease = results[1].Lease!;
+        Assert.Equal(firstGenerationId, firstLease.GenerationId);
+        Assert.Equal(secondGenerationId, secondLease.GenerationId);
+        Assert.NotEqual(firstLease.Port, secondLease.Port);
+    }
+
+    /// <summary>Verifies wrong-generation and stale lease keys cannot mutate another generation.</summary>
+    [Fact]
+    public async Task WrongGenerationAndStaleVersionCannotRenewOrReleaseOtherLeases()
+    {
+        await using var test = await LeaseTestScope.CreateAsync(FixedNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        const int firstPort = 25_800;
+        const int secondPort = 25_801;
+        var secondGenerationId = Guid.CreateVersion7();
+
+        var first = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                test.GenerationId,
+                firstPort,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, first.Status);
+        var firstLease = first.Lease!;
+
+        var second = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                secondGenerationId,
+                secondPort,
+                TimeSpan.FromMinutes(7)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, second.Status);
+        var secondLease = second.Lease!;
+
+        var wrongGeneration = secondGenerationId;
+        var wrongRenewal = await test.Store.RenewAsync(
+            new PersistencePortLeaseRenewRequest(
+                test.NodeId,
+                test.ServiceId,
+                wrongGeneration,
+                firstPort,
+                firstLease.Version,
+                TimeSpan.FromHours(1)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.NotFound, wrongRenewal.Status);
+
+        var wrongRelease = await test.Store.ReleaseAsync(
+            new PersistencePortLeaseReleaseRequest(
+                test.NodeId,
+                test.ServiceId,
+                wrongGeneration,
+                firstPort,
+                firstLease.Version),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.NotFound, wrongRelease.Status);
+
+        var staleRenewal = await test.Store.RenewAsync(
+            new PersistencePortLeaseRenewRequest(
+                test.NodeId,
+                test.ServiceId,
+                firstLease.GenerationId,
+                firstPort,
+                firstLease.Version + 1,
+                TimeSpan.FromHours(1)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Conflict, staleRenewal.Status);
+
+        var staleRelease = await test.Store.ReleaseAsync(
+            new PersistencePortLeaseReleaseRequest(
+                test.NodeId,
+                test.ServiceId,
+                firstLease.GenerationId,
+                firstPort,
+                firstLease.Version + 1),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Conflict, staleRelease.Status);
+
+        await using var verificationContext = test.Database.CreateContext();
+        var persistedFirst = await verificationContext.PortLeases.AsNoTracking().SingleAsync(
+            value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId && value.GenerationId == firstLease.GenerationId,
+            cancellationToken);
+        var persistedSecond = await verificationContext.PortLeases.AsNoTracking().SingleAsync(
+            value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId && value.GenerationId == secondGenerationId,
+            cancellationToken);
+        Assert.Equal(firstLease.Version, persistedFirst.Version);
+        Assert.Equal(firstLease.ExpiresAt, persistedFirst.LeaseExpiresAt);
+        Assert.Equal(secondLease.Version, persistedSecond.Version);
+        Assert.Equal(secondLease.ExpiresAt, persistedSecond.LeaseExpiresAt);
+        Assert.Equal(firstPort, persistedFirst.Port);
+        Assert.Equal(secondPort, persistedSecond.Port);
+        Assert.Equal(2, await verificationContext.PortLeases.CountAsync(
+            value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId,
+            cancellationToken));
+
+        var released = await test.Store.ReleaseAsync(
+            new PersistencePortLeaseReleaseRequest(
+                test.NodeId,
+                test.ServiceId,
+                firstLease.GenerationId,
+                firstPort,
+                firstLease.Version),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, released.Status);
+
+        var remaining = await verificationContext.PortLeases.AsNoTracking().ToListAsync(cancellationToken);
+        var preservedGeneration = Assert.Single(remaining);
+        Assert.Equal(secondGenerationId, preservedGeneration.GenerationId);
+        Assert.Equal(secondPort, preservedGeneration.Port);
+        Assert.Equal(secondLease.Version, preservedGeneration.Version);
+        Assert.Equal(secondLease.ExpiresAt, preservedGeneration.LeaseExpiresAt);
+    }
+
+    /// <summary>Verifies any live generation lease prevents its service from being removed.</summary>
+    [Fact]
+    public async Task LiveLeasesAcrossGenerationsBlockServiceRemoval()
+    {
+        await using var test = await LeaseTestScope.CreateAsync(FixedNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var first = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                test.GenerationId,
+                25_900,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, first.Status);
+
+        var secondGenerationId = Guid.CreateVersion7();
+        var second = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                secondGenerationId,
+                25_901,
+                TimeSpan.FromMinutes(5)),
+            cancellationToken);
+        Assert.Equal(PersistencePortLeaseOperationStatus.Applied, second.Status);
+
+        await using var api = new EfHostConfigApi(test.Context, new FixedTimeProvider(FixedNow));
+        var snapshotRead = await api.ReadSnapshotAsync(cancellationToken);
+        Assert.True(snapshotRead.IsSuccess, snapshotRead.Errors.FirstOrDefault()?.Message);
+        var snapshot = snapshotRead.Value!;
+        var changes = new ConfigurationChangeSet(
+            snapshot.GlobalSettings,
+            snapshot.Routes,
+            snapshot.Services.Where(value => value.Id != test.ServiceId).ToImmutableArray(),
+            snapshot.ExtensionRecords,
+            snapshot.ExtensionSettings);
+
+        var removal = await api.WriteSnapshotAsync(snapshot.Version, changes, cancellationToken);
+        Assert.False(removal.IsSuccess);
+        Assert.Equal(ConfigurationErrorCode.Validation, removal.Errors.Single().Code);
+
+        await using var verificationContext = test.Database.CreateContext();
+        var leases = await verificationContext.PortLeases.AsNoTracking()
+            .Where(value => value.NodeId == test.NodeId && value.ServiceId == test.ServiceId)
+            .ToListAsync(cancellationToken);
+        Assert.Equal(2, leases.Count);
+        Assert.Contains(leases, value => value.GenerationId == test.GenerationId);
+        Assert.Contains(leases, value => value.GenerationId == secondGenerationId);
+        Assert.True(await verificationContext.Services.AsNoTracking().AnyAsync(
+            value => value.Id == test.ServiceId,
+            cancellationToken));
+    }
+
+    /// <summary>Verifies non-UUIDv7 generation identifiers are rejected before persistence.</summary>
+    [Fact]
+    public async Task NonUuidV7GenerationIdentifierIsRejected()
+    {
+        await using var test = await LeaseTestScope.CreateAsync(FixedNow);
+        var result = await test.Store.AcquireAsync(
+            new PersistencePortLeaseAcquireRequest(
+                test.NodeId,
+                test.ServiceId,
+                Guid.NewGuid(),
+                25_950,
+                TimeSpan.FromMinutes(5)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(PersistencePortLeaseOperationStatus.Rejected, result.Status);
+        Assert.Empty(await test.Context.PortLeases.ToListAsync(TestContext.Current.CancellationToken));
     }
 
     private static async Task<PortLease> ReadLeaseAsync(LeaseTestScope test, int port) =>
@@ -307,7 +600,7 @@ public sealed class PostgresPortLeaseTests
             WorkingDirectory = "/tmp",
             EnvironmentJson = "{}",
             StartMode = ServiceStartPolicy.Eager,
-            RestartPolicy = ServiceRestartPolicy.Never,
+            RestartPolicy = Nekolla.Nekostick.Domain.ServiceRestartPolicy.Never,
             HealthCheckType = ServiceHealthCheckKind.Process,
             HealthCheckTimeoutMilliseconds = 1_000,
             CreatedAt = FixedNow,
@@ -322,11 +615,13 @@ public sealed class PostgresPortLeaseTests
             NekostickDbContext context,
             EfPortLeaseStore store,
             string nodeId,
-            Guid serviceId)
+            Guid serviceId,
+            Guid generationId)
         {
             Database = database;
             Context = context;
             Store = store;
+            GenerationId = generationId;
             NodeId = nodeId;
             ServiceId = serviceId;
         }
@@ -336,6 +631,7 @@ public sealed class PostgresPortLeaseTests
         internal EfPortLeaseStore Store { get; }
         internal string NodeId { get; }
         internal Guid ServiceId { get; }
+        internal Guid GenerationId { get; }
 
         internal static async Task<LeaseTestScope> CreateAsync(DateTimeOffset now)
         {
@@ -352,6 +648,7 @@ public sealed class PostgresPortLeaseTests
 
                 var nodeId = $"port-lease-{Guid.NewGuid():N}";
                 var serviceId = Guid.CreateVersion7();
+                var generationId = Guid.CreateVersion7();
                 context.Nodes.Add(new Node
                 {
                     Id = Guid.CreateVersion7(),
@@ -367,7 +664,7 @@ public sealed class PostgresPortLeaseTests
                 context.Services.Add(CreateService(serviceId));
                 await context.SaveChangesAsync(TestContext.Current.CancellationToken);
                 store = new EfPortLeaseStore(context, new FixedTimeProvider(now));
-                return new LeaseTestScope(database, context, store, nodeId, serviceId);
+                return new LeaseTestScope(database, context, store, nodeId, serviceId, generationId);
             }
             catch
             {

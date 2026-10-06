@@ -99,6 +99,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
             new PersistencePortLeaseAcquireRequest(
                 request.NodeId.Value,
                 request.ServiceId,
+                request.GenerationId,
                 request.Port,
                 request.TimeToLive,
                 request.ExpectedVersion,
@@ -124,6 +125,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
             new PersistencePortLeaseRenewRequest(
                 request.NodeId.Value,
                 request.ServiceId,
+                request.GenerationId,
                 request.Port,
                 request.LeaseVersion,
                 request.TimeToLive),
@@ -141,6 +143,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
             new PersistencePortLeaseReleaseRequest(
                 request.NodeId.Value,
                 request.ServiceId,
+                request.GenerationId,
                 request.Port,
                 request.LeaseVersion),
             cancellationToken).ConfigureAwait(false);
@@ -182,6 +185,7 @@ public sealed class HostPortLeaseStoreAdapter : IPortLeaseStore
                 new PortLease(
                     new NodeIdentifier(lease.NodeId),
                     lease.ServiceId,
+                    lease.GenerationId,
                     lease.Port,
                     lease.AcquiredAt,
                     lease.ExpiresAt,

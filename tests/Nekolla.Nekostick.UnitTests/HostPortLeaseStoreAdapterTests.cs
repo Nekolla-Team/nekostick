@@ -10,6 +10,8 @@ public sealed class HostPortLeaseStoreAdapterTests
 {
     private static readonly Guid ServiceId =
         Guid.Parse("018f0000-0000-7000-8000-000000000011");
+    private static readonly Guid GenerationId =
+        Guid.Parse("018f0000-0000-7000-8000-000000000012");
 
     private static readonly DateTimeOffset AcquiredAt =
         new(2026, 8, 17, 12, 0, 0, TimeSpan.Zero);
@@ -26,6 +28,7 @@ public sealed class HostPortLeaseStoreAdapterTests
         var request = new PortLeaseRequest(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             23456,
             TimeSpan.FromMinutes(1),
             expectedVersion: 3);
@@ -37,11 +40,13 @@ public sealed class HostPortLeaseStoreAdapterTests
         Assert.Equal(PortLeaseOperationStatus.Applied, result.Status);
         Assert.NotNull(result.Lease);
         Assert.Equal(ServiceId, result.Lease!.ServiceId);
+        Assert.Equal(GenerationId, result.Lease.GenerationId);
         Assert.Equal(23456, result.Lease.Port);
         Assert.Equal(4, result.Lease.Version);
         Assert.NotNull(store.AcquireRequest);
         Assert.Equal("node", store.AcquireRequest!.NodeId);
         Assert.Equal(ServiceId, store.AcquireRequest.ServiceId);
+        Assert.Equal(GenerationId, store.AcquireRequest.GenerationId);
         Assert.Equal(23456, store.AcquireRequest.Port);
         Assert.Equal(TimeSpan.FromMinutes(1), store.AcquireRequest.TimeToLive);
         Assert.Equal(3, store.AcquireRequest.ExpectedVersion);
@@ -62,17 +67,18 @@ public sealed class HostPortLeaseStoreAdapterTests
         var request = PortLeaseRequest.Automatic(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             TimeSpan.FromSeconds(45),
             rangeStart: 31000,
             rangeEnd: 31010,
             expectedVersion: 8);
-
         var result = await adapter.ApplyAsync(
             PortLeaseIntent.Acquire(request),
             CancellationToken.None);
 
         Assert.Equal(PortLeaseOperationStatus.Applied, result.Status);
         Assert.NotNull(store.AcquireRequest);
+        Assert.Equal(GenerationId, store.AcquireRequest.GenerationId);
         Assert.Equal(0, store.AcquireRequest!.Port);
         Assert.Equal(31000, store.AcquireRequest.AutomaticPortRangeStart);
         Assert.Equal(31010, store.AcquireRequest.AutomaticPortRangeEnd);
@@ -91,6 +97,7 @@ public sealed class HostPortLeaseStoreAdapterTests
         var request = new PortLeaseRequest(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             23456,
             TimeSpan.FromMinutes(1));
 
@@ -117,6 +124,7 @@ public sealed class HostPortLeaseStoreAdapterTests
         var request = new PortLeaseRequest(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             23456,
             TimeSpan.FromMinutes(1));
 
@@ -142,6 +150,7 @@ public sealed class HostPortLeaseStoreAdapterTests
         var request = new PortLeaseRequest(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             23456,
             TimeSpan.FromMinutes(1));
         using var cancellation = new CancellationTokenSource();
@@ -168,6 +177,7 @@ public sealed class HostPortLeaseStoreAdapterTests
         var request = new PortLeaseRequest(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             23456,
             TimeSpan.FromMinutes(1));
 
@@ -193,6 +203,7 @@ public sealed class HostPortLeaseStoreAdapterTests
         var renewal = new PortLeaseRenewal(
             new NodeIdentifier("node"),
             ServiceId,
+            GenerationId,
             23456,
             leaseVersion: 1,
             TimeSpan.FromMinutes(1));
@@ -234,6 +245,7 @@ public sealed class HostPortLeaseStoreAdapterTests
             new PersistencePortLease(
                 "node",
                 ServiceId,
+                GenerationId,
                 port,
                 AcquiredAt,
                 AcquiredAt.AddMinutes(1),

@@ -154,11 +154,13 @@ public sealed partial class PostgresConfigurationContractTests
         var persistedFirstLiveLease = remainingLeases.Single(value => value.Id == firstLiveLease.Id);
         Assert.Equal(firstLiveLease.NodeId, persistedFirstLiveLease.NodeId);
         Assert.Equal(firstLiveLease.ServiceId, persistedFirstLiveLease.ServiceId);
+        Assert.Equal(firstLiveLease.GenerationId, persistedFirstLiveLease.GenerationId);
         Assert.Equal(firstLiveLease.LeaseExpiresAt, persistedFirstLiveLease.LeaseExpiresAt);
         Assert.Equal(firstLiveLease.Version, persistedFirstLiveLease.Version);
         var persistedSecondLiveLease = remainingLeases.Single(value => value.Id == secondLiveLease.Id);
         Assert.Equal(secondLiveLease.NodeId, persistedSecondLiveLease.NodeId);
         Assert.Equal(secondLiveLease.ServiceId, persistedSecondLiveLease.ServiceId);
+        Assert.Equal(secondLiveLease.GenerationId, persistedSecondLiveLease.GenerationId);
         Assert.Equal(secondLiveLease.LeaseExpiresAt, persistedSecondLiveLease.LeaseExpiresAt);
         Assert.Equal(secondLiveLease.Version, persistedSecondLiveLease.Version);
         Assert.False(await verificationContext.Services.AsNoTracking().AnyAsync(
@@ -223,9 +225,11 @@ public sealed partial class PostgresConfigurationContractTests
             .ToListAsync(cancellationToken);
         Assert.Equal(2, persistedLeases.Count);
         var persistedExpiredLease = persistedLeases.Single(value => value.Id == expiredLease.Id);
+        Assert.Equal(expiredLease.GenerationId, persistedExpiredLease.GenerationId);
         Assert.Equal(expiredLease.LeaseExpiresAt, persistedExpiredLease.LeaseExpiresAt);
         Assert.Equal(expiredLease.Version, persistedExpiredLease.Version);
         var persistedLiveLease = persistedLeases.Single(value => value.Id == liveLease.Id);
+        Assert.Equal(liveLease.GenerationId, persistedLiveLease.GenerationId);
         Assert.Equal(liveLease.LeaseExpiresAt, persistedLiveLease.LeaseExpiresAt);
         Assert.Equal(liveLease.Version, persistedLiveLease.Version);
         Assert.True(await verificationContext.Services.AsNoTracking().AnyAsync(
@@ -280,6 +284,7 @@ public sealed partial class PostgresConfigurationContractTests
         var persistedLease = await verificationContext.PortLeases.AsNoTracking().SingleAsync(
             value => value.Id == expiredLease.Id,
             cancellationToken);
+        Assert.Equal(expiredLease.GenerationId, persistedLease.GenerationId);
         Assert.Equal(expiredLease.LeaseExpiresAt, persistedLease.LeaseExpiresAt);
         Assert.Equal(expiredLease.Version, persistedLease.Version);
         Assert.True(await verificationContext.Services.AsNoTracking().AnyAsync(
@@ -404,6 +409,7 @@ public sealed partial class PostgresConfigurationContractTests
             NodeId = nodeId,
             Port = port,
             ServiceId = serviceId,
+            GenerationId = Guid.CreateVersion7(),
             LeaseExpiresAt = expiresAt,
             RenewedAt = now.AddMinutes(-1),
             Version = version,

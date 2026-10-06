@@ -179,6 +179,8 @@ public sealed partial class HostServiceLifecycleManager
                 $"Service '{serviceId}' cannot be restarted because the host service-runtime gate disallows new service operations."));
         }
 
+        CancelGraphPreparationsForExplicitRestart(snapshot.Version);
+        await WaitForGraphTransactionAsync(cancellationToken).ConfigureAwait(false);
         Task<HostServiceReadinessResult>? existingStartup = null;
         if (_slots.TryGetValue(serviceId, out var slot))
         {
@@ -213,17 +215,11 @@ public sealed partial class HostServiceLifecycleManager
                 ConfigurationErrorCode.StorageUnavailable,
                 $"Service '{serviceId}' cannot be restarted because the host service lifecycle stopped during endpoint withdrawal."));
         }
-        if (withdrawal.LeaseReleaseFailure is { } releaseStatus)
-        {
-            var code = releaseStatus == PortLeaseOperationStatus.DatabaseUnavailable
-                ? ConfigurationErrorCode.StorageUnavailable
-                : ConfigurationErrorCode.Validation;
-            return ConfigurationWriteResult.Failure(new ConfigurationError(
-                code,
-                $"Service '{serviceId}' could not be restarted because port lease release remains unresolved (status '{releaseStatus}')."));
-        }
-
-        var readiness = await EnsureReadyAsync(snapshot, serviceId, cancellationToken).ConfigureAwait(false);
+        var readiness = await EnsureReadyAsync(
+            snapshot,
+            serviceId,
+            ImmutableHashSet<Guid>.Empty,
+            cancellationToken).ConfigureAwait(false);
         if (readiness.Status == HostServiceReadinessStatus.Cancelled && cancellationToken.IsCancellationRequested)
         {
             throw new OperationCanceledException(cancellationToken);
@@ -239,6 +235,29 @@ public sealed partial class HostServiceLifecycleManager
                 readiness.Status == HostServiceReadinessStatus.DatabaseUnavailable
                     ? $"Service '{serviceId}' could not be restarted because the database gate is unavailable."
                     : $"Service '{serviceId}' could not be restarted because it did not become ready (status '{readiness.Status}')."));
+        }
+        var graph = await RefreshChangedActiveGraphAsync(snapshot, cancellationToken, forceRetry: true)
+            .ConfigureAwait(false);
+        if (graph.Required && !graph.Committed)
+        {
+            var code = graph.DatabaseUnavailable
+                ? ConfigurationErrorCode.StorageUnavailable
+                : ConfigurationErrorCode.Validation;
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                code,
+                graph.DatabaseUnavailable
+                    ? $"Service '{serviceId}' restarted, but its active dependents could not be rebound because the database gate is unavailable."
+                    : $"Service '{serviceId}' restarted, but its active dependency graph did not become ready."));
+        }
+
+        if (withdrawal.LeaseReleaseFailure is { } releaseStatus)
+        {
+            var code = releaseStatus == PortLeaseOperationStatus.DatabaseUnavailable
+                ? ConfigurationErrorCode.StorageUnavailable
+                : ConfigurationErrorCode.Validation;
+            return ConfigurationWriteResult.Failure(new ConfigurationError(
+                code,
+                $"Service '{serviceId}' restarted successfully, but its previous generation's port lease release remains unresolved (status '{releaseStatus}')."));
         }
 
         return ConfigurationWriteResult.Success();
@@ -385,7 +404,11 @@ public sealed partial class HostServiceLifecycleManager
         if (snapshot is null ||
             configuredService is not { Enabled: true } ||
             configuredService.Version != generation.Configuration.Version ||
-            !IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id))
+            !IsServiceEnabledForSnapshot(snapshot, generation.Configuration.Id) ||
+            !string.Equals(
+                generation.OwnerExtensionId,
+                GetServiceOwner(generation.Configuration.Id),
+                StringComparison.Ordinal))
         {
             var removed = false;
             lock (slot.Gate)
@@ -434,6 +457,8 @@ public sealed partial class HostServiceLifecycleManager
 
         Task<HostServiceReadinessResult>? existingStartup = null;
         Task<SupervisorOperationResult>? startTask = null;
+        var dependencyBindingsUnavailable = false;
+        var configurationSuperseded = false;
         lock (_lifecycleGate)
         {
             if (IsStopping)
@@ -441,28 +466,68 @@ public sealed partial class HostServiceLifecycleManager
                 return;
             }
 
-            lock (slot.Gate)
+            var currentSnapshot = LatestSnapshot(snapshot);
+            var currentService = currentSnapshot.Services.FirstOrDefault(value =>
+                value.Id == generation.Configuration.Id);
+            if (!IsCurrentCrashRestartConfiguration(currentSnapshot, currentService, generation))
             {
-                if (IsStopping || !ReferenceEquals(slot.Active, generation))
+                snapshot = currentSnapshot;
+                configuredService = currentService;
+                configurationSuperseded = true;
+            }
+            else
+            {
+                snapshot = currentSnapshot;
+                configuredService = currentService!;
+                lock (slot.Gate)
                 {
-                    return;
-                }
+                    if (IsStopping || !ReferenceEquals(slot.Active, generation))
+                    {
+                        return;
+                    }
 
-                if (slot.Startup is { } startup)
-                {
-                    existingStartup = startup;
-                }
-                else
-                {
-                    generation.ProcessExitRecorded = false;
-                    generation.ProcessExitCode = null;
-                    PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
-                    startTask = StartSupervisorWithPendingLeaseCleanupAsync(
-                        generation,
-                        DateTimeOffset.UtcNow,
-                        _shutdownCts.Token);
+                    if (slot.Startup is { } startup)
+                    {
+                        existingStartup = startup;
+                    }
+                    else if (!HasCurrentCrashRestartLaunchInputs(snapshot, configuredService, generation))
+                    {
+                        dependencyBindingsUnavailable = true;
+                    }
+                    else
+                    {
+                        generation.ProcessExitRecorded = false;
+                        generation.ProcessExitCode = null;
+                        PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
+                        startTask = StartSupervisorWithPendingLeaseCleanupAsync(
+                            generation,
+                            DateTimeOffset.UtcNow,
+                            _shutdownCts.Token);
+                    }
                 }
             }
+        }
+
+        if (configurationSuperseded)
+        {
+            await RetireCrashRestartGenerationAsync(
+                slot,
+                generation,
+                snapshot,
+                configuredService,
+                dependenciesUnavailable: false).ConfigureAwait(false);
+            return;
+        }
+
+        if (dependencyBindingsUnavailable)
+        {
+            await RetireCrashRestartGenerationAsync(
+                slot,
+                generation,
+                snapshot,
+                configuredService,
+                dependenciesUnavailable: true).ConfigureAwait(false);
+            return;
         }
 
         if (existingStartup is not null)
@@ -490,24 +555,68 @@ public sealed partial class HostServiceLifecycleManager
                     return;
                 }
 
-                lock (slot.Gate)
+                var currentSnapshot = LatestSnapshot(snapshot);
+                var currentService = currentSnapshot.Services.FirstOrDefault(value =>
+                    value.Id == generation.Configuration.Id);
+                if (!IsCurrentCrashRestartConfiguration(currentSnapshot, currentService, generation))
                 {
-                    if (IsStopping ||
-                        !ReferenceEquals(slot.Active, generation) ||
-                        generation.Supervisor.ActiveProcessInstance is not null)
+                    snapshot = currentSnapshot;
+                    configuredService = currentService;
+                    configurationSuperseded = true;
+                }
+                else
+                {
+                    snapshot = currentSnapshot;
+                    configuredService = currentService!;
+                    lock (slot.Gate)
                     {
-                        return;
-                    }
+                        if (IsStopping ||
+                            !ReferenceEquals(slot.Active, generation) ||
+                            generation.Supervisor.ActiveProcessInstance is not null)
+                        {
+                            return;
+                        }
 
-                    generation.ProcessExitRecorded = false;
-                    generation.ProcessExitCode = null;
-                    PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
-                    startTask = StartSupervisorWithPendingLeaseCleanupAsync(
-                        generation,
-                        DateTimeOffset.UtcNow,
-                        _shutdownCts.Token);
+                        if (!HasCurrentCrashRestartLaunchInputs(snapshot, configuredService, generation))
+                        {
+                            dependencyBindingsUnavailable = true;
+                        }
+                        else
+                        {
+                            generation.ProcessExitRecorded = false;
+                            generation.ProcessExitCode = null;
+                            PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
+                            startTask = StartSupervisorWithPendingLeaseCleanupAsync(
+                                generation,
+                                DateTimeOffset.UtcNow,
+                                _shutdownCts.Token);
+                        }
+                    }
                 }
             }
+
+            if (configurationSuperseded)
+            {
+                await RetireCrashRestartGenerationAsync(
+                    slot,
+                    generation,
+                    snapshot,
+                    configuredService,
+                    dependenciesUnavailable: false).ConfigureAwait(false);
+                return;
+            }
+
+            if (dependencyBindingsUnavailable)
+            {
+                await RetireCrashRestartGenerationAsync(
+                    slot,
+                    generation,
+                    snapshot,
+                    configuredService,
+                    dependenciesUnavailable: true).ConfigureAwait(false);
+                return;
+            }
+
         }
 
         if (startTask is null)
@@ -668,6 +777,7 @@ public sealed partial class HostServiceLifecycleManager
 
         PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Running);
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        await RefreshChangedActiveGraphAsync(snapshot, CancellationToken.None, forceRetry: true).ConfigureAwait(false);
         HostLogMessages.ServiceReady(_logger, generation.Configuration.Id, generation.SnapshotVersion);
         PublishServiceState(
             generation.Configuration.Id,
@@ -675,6 +785,135 @@ public sealed partial class HostServiceLifecycleManager
             "ready");
     }
 
+
+    private bool IsCurrentCrashRestartConfiguration(
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration? service,
+        ServiceGeneration generation) =>
+        service is { Enabled: true } &&
+        service.Version == generation.Configuration.Version &&
+        IsServiceEnabledForSnapshot(snapshot, service.Id) &&
+        string.Equals(
+            generation.OwnerExtensionId,
+            GetServiceOwner(service.Id),
+            StringComparison.Ordinal);
+
+    private bool HasCurrentCrashRestartLaunchInputs(
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration service,
+        ServiceGeneration generation)
+    {
+        var dependencyIds = ServiceLaunchTemplate.ExtractDependencies(
+            service.ArgumentList.Cast<string?>().Concat(service.Environment.Values));
+        if (dependencyIds.Contains(service.Id) ||
+            !dependencyIds.SetEquals(generation.DependencyBindings.Keys))
+        {
+            return false;
+        }
+
+        var active = ImmutableDictionary.CreateBuilder<Guid, ServiceGeneration>();
+        foreach (var dependencyId in dependencyIds)
+        {
+            if (!_slots.TryGetValue(dependencyId, out var dependencySlot))
+            {
+                return false;
+            }
+
+            lock (dependencySlot.Gate)
+            {
+                if (dependencySlot.Active is not { Ready: true } dependencyGeneration)
+                {
+                    return false;
+                }
+
+                active[dependencyId] = dependencyGeneration;
+            }
+        }
+
+        var activeGenerations = active.ToImmutable();
+        foreach (var dependencyId in dependencyIds)
+        {
+            var configuredDependency = snapshot.Services.FirstOrDefault(value => value.Id == dependencyId);
+            if (configuredDependency is not { Enabled: true } ||
+                !IsServiceEnabledForSnapshot(snapshot, dependencyId) ||
+                !activeGenerations.TryGetValue(dependencyId, out var dependencyGeneration) ||
+                dependencyGeneration.Configuration.Version != configuredDependency.Version ||
+                !string.Equals(
+                    dependencyGeneration.OwnerExtensionId,
+                    GetServiceOwner(dependencyId),
+                    StringComparison.Ordinal) ||
+                dependencyGeneration.Supervisor.Snapshot.ObservedLifecycle != ServiceLifecycleState.Running ||
+                dependencyGeneration.Supervisor.ActiveProcessInstance is null)
+            {
+                return false;
+            }
+        }
+
+        return TryBuildActiveDependencyBindings(
+                snapshot,
+                dependencyIds,
+                activeGenerations,
+                out var dependencyBindings) &&
+            generation.Lease is { } lease &&
+            TryResolveLaunchInputs(service, lease.Port, dependencyBindings, out var launchInputs) &&
+            LaunchInputsEqual(generation, launchInputs);
+    }
+
+    private async Task RetireCrashRestartGenerationAsync(
+        ServiceSlot slot,
+        ServiceGeneration generation,
+        HostConfigurationSnapshot snapshot,
+        ServiceConfiguration? service,
+        bool dependenciesUnavailable)
+    {
+        var removed = false;
+        lock (slot.Gate)
+        {
+            if (ReferenceEquals(slot.Active, generation))
+            {
+                slot.Active = null;
+                generation.Ready = false;
+                removed = true;
+            }
+        }
+
+        if (!removed)
+        {
+            return;
+        }
+
+        if (dependenciesUnavailable)
+        {
+            PublishRuntimeFailure(
+                slot,
+                snapshot,
+                service ?? generation.Configuration,
+                generation,
+                generation.Supervisor.Snapshot,
+                ExtensionServiceLifecycleState.Waiting,
+                ExtensionServiceFailureStage.Spawn,
+                ExtensionServiceFailureCode.DependencyUnavailable);
+        }
+
+        await StopOrReleaseGenerationAfterExitAsync(slot, generation, CancellationToken.None).ConfigureAwait(false);
+        if (dependenciesUnavailable)
+        {
+            PublishServiceState(generation.Configuration.Id, snapshot.Version, "unavailable");
+        }
+        else
+        {
+            PublishRestartBailoutState(generation);
+        }
+
+        await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        if (dependenciesUnavailable)
+        {
+            await EnsureReadyAsync(
+                snapshot,
+                generation.Configuration.Id,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+    }
     private async Task RestartTerminalAfterAsync(
         ServiceSlot slot,
         ServiceGeneration generation,
@@ -827,6 +1066,7 @@ public sealed partial class HostServiceLifecycleManager
                 return;
             }
 
+            await RefreshChangedActiveGraphAsync(snapshot, CancellationToken.None, forceRetry: true).ConfigureAwait(false);
             await StopRetiringGenerationAsync(slot, generation).ConfigureAwait(false);
             return;
         }
@@ -947,7 +1187,6 @@ public sealed partial class HostServiceLifecycleManager
         ServiceGeneration generation,
         CancellationToken cancellationToken)
     {
-        RemoveRuntimeEnvironment(generation);
         if (generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null)
         {
             var acknowledged = await AcknowledgeProcessExitAndRetainLeaseAsync(generation).ConfigureAwait(false);
@@ -974,7 +1213,6 @@ public sealed partial class HostServiceLifecycleManager
 
         if (generation.ProcessExitRecorded && generation.Supervisor.ActiveProcessInstance is null)
         {
-            RemoveRuntimeEnvironment(generation);
             var acknowledged = await AcknowledgeProcessExitAndRetainLeaseAsync(generation).ConfigureAwait(false);
 
             generation.Lease = null;

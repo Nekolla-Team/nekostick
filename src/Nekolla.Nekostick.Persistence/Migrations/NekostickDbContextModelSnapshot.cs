@@ -511,6 +511,10 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .HasColumnType("timestamptz")
                         .HasColumnName("created_at");
 
+                    b.Property<Guid>("GenerationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("generation_id");
+
                     b.Property<DateTimeOffset>("LeaseExpiresAt")
                         .HasColumnType("timestamptz")
                         .HasColumnName("lease_expires_at");
@@ -554,9 +558,14 @@ namespace Nekolla.Nekostick.Persistence.Migrations
                         .IsUnique()
                         .HasDatabaseName("ux_port_leases_node_id_port");
 
+                    b.HasIndex("NodeId", "ServiceId", "GenerationId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_port_leases_node_id_service_id_generation_id");
+
                     b.ToTable("port_leases", "nekostick", t =>
                         {
                             t.HasCheckConstraint("ck_port_leases_id_uuid_v7", "substring(id::text, 15, 1) = '7' AND substring(id::text, 20, 1) IN ('8', '9', 'a', 'b')");
+                            t.HasCheckConstraint("ck_port_leases_generation_id_uuid_v7", "substring(generation_id::text, 15, 1) = '7' AND substring(generation_id::text, 20, 1) IN ('8', '9', 'a', 'b')");
 
                             t.HasCheckConstraint("ck_port_leases_port", "port BETWEEN 1 AND 65535");
                         });

@@ -10,7 +10,7 @@ public static class MicroserviceProxyServiceCollectionExtensions
 {
     /// <summary>
     /// Adds YARP forwarding, a bounded safe invoker pool, the unavailable resolver default,
-    /// and the singleton microservice executor.
+    /// and the singleton executor, drain tracker, and graph admission coordinator.
     /// </summary>
     /// <param name="services">The application service collection.</param>
     /// <returns>The same service collection.</returns>
@@ -27,7 +27,16 @@ public static class MicroserviceProxyServiceCollectionExtensions
         services.TryAddSingleton<IMicroserviceDrainTracker>(serviceProvider =>
             new MicroserviceDrainTracker(
                 serviceProvider.GetRequiredService<ILogger<MicroserviceDrainTracker>>()));
-        services.TryAddSingleton<MicroserviceHttpExecutor>();
+        services.TryAddSingleton<IMicroserviceAdmissionCoordinator, MicroserviceAdmissionCoordinator>();
+        services.TryAddSingleton<MicroserviceHttpExecutor>(serviceProvider =>
+            new MicroserviceHttpExecutor(
+                serviceProvider.GetRequiredService<IHttpForwarder>(),
+                serviceProvider.GetRequiredService<IMicroserviceEndpointResolver>(),
+                serviceProvider.GetRequiredService<MicroserviceHttpInvokerPool>(),
+                serviceProvider.GetRequiredService<IMicroserviceDrainTracker>(),
+                serviceProvider.GetRequiredService<IMicroserviceAdmissionCoordinator>(),
+                serviceProvider.GetRequiredService<ILogger<MicroserviceHttpExecutor>>(),
+                serviceProvider.GetRequiredService<IMicroserviceForwardingTelemetry>()));
         return services;
     }
 }

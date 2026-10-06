@@ -103,6 +103,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly HostRuntimeState _runtimeState;
     private readonly HostRuntimeOptions _options;
     private readonly IMicroserviceDrainTracker _drainTracker;
+    private readonly IMicroserviceAdmissionCoordinator _admissionCoordinator;
     private readonly ExtensionRuntimeManager? _runtimeManager;
     private readonly HostServiceRuntimeRegistry _runtimeRegistry;
     private readonly HostServiceLogBufferRegistry _serviceLogBufferRegistry;
@@ -110,7 +111,6 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly NodeIdentifier _nodeId;
     private readonly ConcurrentDictionary<ServiceGeneration, RetiringGenerationState> _retiringGenerations = new();
     private readonly ConcurrentDictionary<Guid, ServiceSlot> _slots = new();
-    private readonly ConcurrentDictionary<Guid, ServiceRuntimeEnvironmentEntry> _runtimeEnvironments = new();
     private readonly ConcurrentDictionary<Guid, Guid> _startupDependencyWaits = new();
     private readonly ConcurrentDictionary<PortLeaseReleaseKey, PortLease> _pendingLeaseReleases = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _leaseLifecycleGates = new();
@@ -120,37 +120,139 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     private readonly CancellationTokenSource _shutdownCts = new();
     private IDisposable? _processExitSubscription;
     private int _stopping;
-    private readonly record struct PortLeaseReleaseKey(string NodeId, Guid ServiceId, int Port, long Version);
+    private readonly record struct PortLeaseReleaseKey(string NodeId, Guid ServiceId, Guid GenerationId, int Port, long Version);
     internal HostServiceLogBufferRegistry ServiceLogBufferRegistry => _serviceLogBufferRegistry;
-    private sealed class ServiceRuntimeEnvironmentEntry
-    {
-        internal ServiceGeneration Generation;
-        internal ImmutableDictionary<string, string> Values;
 
-        internal ServiceRuntimeEnvironmentEntry(
-            ServiceGeneration generation,
-            ImmutableDictionary<string, string> values)
+    private sealed record ServiceDependencyBinding(
+        Guid ServiceId,
+        long ServiceVersion,
+        Guid GenerationId,
+        ImmutableDictionary<string, string> ResolvedEnvironment,
+        DependencyLeaseIdentity LeaseIdentity,
+        string? OwnerExtensionId);
+
+    private readonly record struct DependencyLeaseIdentity(
+        NodeIdentifier NodeId,
+        Guid ServiceId,
+        Guid GenerationId,
+        int Port);
+
+    private HostConfigurationSnapshot LatestSnapshot(HostConfigurationSnapshot snapshot) =>
+        _snapshotHolder.Current is { } latest && latest.Version >= snapshot.Version
+            ? latest
+            : snapshot;
+
+    private bool TryCaptureDependencyBinding(
+        HostConfigurationSnapshot snapshot,
+        Guid serviceId,
+        long expectedServiceVersion,
+        out ServiceDependencyBinding? binding)
+    {
+        lock (_lifecycleGate)
         {
-            Generation = generation;
-            Values = values;
+            var latest = LatestSnapshot(snapshot);
+            var configuredService = latest.Services.FirstOrDefault(value => value.Id == serviceId);
+            var view = _endpointPublisher.CommittedView;
+            if (configuredService is null ||
+                !configuredService.Enabled ||
+                configuredService.Version != expectedServiceVersion ||
+                !IsServiceEnabledForSnapshot(latest, serviceId) ||
+                !view.Services.TryGetValue(serviceId, out var committed) ||
+                committed.ServiceVersion != configuredService.Version ||
+                !string.Equals(
+                    committed.Endpoint.OwnerExtensionId,
+                    GetServiceOwner(serviceId),
+                    StringComparison.Ordinal) ||
+                !committed.Endpoint.IsActive(DateTimeOffset.UtcNow))
+            {
+                binding = null;
+                return false;
+            }
+
+            var leaseIdentity = new DependencyLeaseIdentity(
+                _nodeId,
+                serviceId,
+                committed.GenerationId,
+                committed.Endpoint.Port);
+            binding = new ServiceDependencyBinding(
+                serviceId,
+                committed.ServiceVersion,
+                committed.GenerationId,
+                committed.ResolvedEnvironment,
+                leaseIdentity,
+                committed.Endpoint.OwnerExtensionId);
+            return true;
         }
     }
 
-    private string? ResolveRemoteEnvironment(Guid serviceId, string name) =>
-        _runtimeEnvironments.TryGetValue(serviceId, out var entry) &&
-        entry.Values.TryGetValue(name, out var value)
-            ? value
+    private bool AreDependencyBindingsCurrent(
+        HostConfigurationSnapshot latest,
+        ImmutableDictionary<Guid, ServiceDependencyBinding> bindings,
+        out Guid unavailableDependencyId)
+    {
+        unavailableDependencyId = Guid.Empty;
+        if (bindings.IsEmpty)
+        {
+            return true;
+        }
+
+        var view = _endpointPublisher.CommittedView;
+        var now = DateTimeOffset.UtcNow;
+        foreach (var binding in bindings.Values)
+        {
+            unavailableDependencyId = binding.ServiceId;
+            var configuredService = latest.Services.FirstOrDefault(value => value.Id == binding.ServiceId);
+            if (configuredService is null ||
+                !configuredService.Enabled ||
+                configuredService.Version != binding.ServiceVersion ||
+                !IsServiceEnabledForSnapshot(latest, binding.ServiceId) ||
+                !string.Equals(
+                    GetServiceOwner(binding.ServiceId),
+                    binding.OwnerExtensionId,
+                    StringComparison.Ordinal) ||
+                !view.Services.TryGetValue(binding.ServiceId, out var committed) ||
+                committed.ServiceVersion != binding.ServiceVersion ||
+                committed.GenerationId != binding.GenerationId ||
+                !ReferenceEquals(committed.ResolvedEnvironment, binding.ResolvedEnvironment) ||
+                !string.Equals(
+                    committed.Endpoint.OwnerExtensionId,
+                    binding.OwnerExtensionId,
+                    StringComparison.Ordinal) ||
+                !committed.Endpoint.IsActive(now) ||
+                new DependencyLeaseIdentity(
+                    _nodeId,
+                    binding.ServiceId,
+                    committed.GenerationId,
+                    committed.Endpoint.Port) != binding.LeaseIdentity)
+            {
+                return false;
+            }
+        }
+
+        unavailableDependencyId = Guid.Empty;
+        return true;
+    }
+
+
+    private string? GetServiceOwner(Guid serviceId) =>
+        _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(serviceId, out var owner) == true
+            ? owner
             : null;
 
-    private void RemoveRuntimeEnvironment(ServiceGeneration generation)
-    {
-        if (_runtimeEnvironments.TryGetValue(generation.Configuration.Id, out var entry) &&
-            ReferenceEquals(entry.Generation, generation))
-        {
-            ((ICollection<KeyValuePair<Guid, ServiceRuntimeEnvironmentEntry>>)_runtimeEnvironments)
-                .Remove(new KeyValuePair<Guid, ServiceRuntimeEnvironmentEntry>(generation.Configuration.Id, entry));
-        }
-    }
+    private bool IsValidDependencyLease(
+        PortLease lease,
+        Guid serviceId,
+        Guid generationId,
+        DateTimeOffset now) =>
+        lease.NodeId == _nodeId &&
+        lease.ServiceId == serviceId &&
+        lease.GenerationId == generationId &&
+        lease.Port is >= 1 and <= 65535 &&
+        !lease.IsExpired(now);
+
+    private static DependencyLeaseIdentity GetDependencyLeaseIdentity(PortLease lease) =>
+        new(lease.NodeId, lease.ServiceId, lease.GenerationId, lease.Port);
+
 
     private bool WouldCreateStartupDependencyCycle(Guid serviceId, Guid dependencyId)
     {
@@ -200,6 +302,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             drainTracker,
             nodeOptions,
             runtimeManager,
+            null,
             null)
     {
     }
@@ -217,7 +320,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         IMicroserviceDrainTracker drainTracker,
         HostNodeOptions nodeOptions,
         ExtensionRuntimeManager? runtimeManager,
-        HostServiceRuntimeRegistry? runtimeRegistry)
+        HostServiceRuntimeRegistry? runtimeRegistry,
+        IMicroserviceAdmissionCoordinator? admissionCoordinator = null)
     {
         _processExecutor = processExecutor ?? throw new ArgumentNullException(nameof(processExecutor));
         _healthProbe = healthProbe ?? throw new ArgumentNullException(nameof(healthProbe));
@@ -230,6 +334,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         _dataDirectory = nodeOptions?.DataDirectory ?? throw new ArgumentNullException(nameof(nodeOptions));
         _runtimeManager = runtimeManager;
         _runtimeRegistry = runtimeRegistry ?? new HostServiceRuntimeRegistry();
+        _runtimeRegistry.AttachCommittedViewPublisher(_endpointPublisher);
+        _admissionCoordinator = admissionCoordinator ?? new MicroserviceAdmissionCoordinator();
         _serviceLogBufferRegistry = new HostServiceLogBufferRegistry(options, processExecutor as PosixProcessExecutor);
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _nodeId = new NodeIdentifier(options.NodeId);
@@ -267,7 +373,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         {
             lock (pair.Value.Gate)
             {
-                if (pair.Value.Active is not null || pair.Value.Starting is not null || pair.Value.Startup is not null)
+                if (pair.Value.Active is not null || pair.Value.Starting is not null || pair.Value.Startup is not null || pair.Value.GraphPreparation)
                 {
                     lifecycleWork.Add(pair.Key);
                 }
@@ -288,7 +394,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         HostConfigurationSnapshot snapshot,
         Guid serviceId,
         CancellationToken cancellationToken = default) =>
-        EnsureReadyAsync(snapshot, serviceId, ImmutableHashSet<Guid>.Empty, cancellationToken);
+        EnsureReadyWithGraphRefreshAsync(snapshot, serviceId, cancellationToken);
 
     private async ValueTask<HostServiceReadinessResult> EnsureReadyAsync(
         HostConfigurationSnapshot snapshot,
@@ -482,6 +588,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         }
 
         await QuiesceStartupsAsync(startups, _logger).ConfigureAwait(false);
+        await _graphTransactionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        _graphTransactionGate.Release();
         _serviceLogBufferRegistry.TerminateAll(ExtensionServiceLogTerminationReason.HostShutdown);
         foreach (var slot in _slots.Values)
         {
@@ -526,6 +634,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             {
                 _ = await RetryPendingLeaseReleasesAsync(
                     serviceId,
+                    null,
                     DateTimeOffset.UtcNow,
                     CancellationToken.None).ConfigureAwait(false);
             }
@@ -623,6 +732,14 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
     internal async Task ReconcileAsync(HostConfigurationSnapshot snapshot, CancellationToken cancellationToken)
     {
+        await RefreshChangedActiveGraphAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        var latest = LatestSnapshot(snapshot);
+        if (latest.Version > snapshot.Version)
+        {
+            return;
+        }
+
+        snapshot = latest;
         var configured = snapshot.Services
             .Where(value => value.Enabled && IsServiceEnabledForSnapshot(snapshot, value.Id))
             .ToImmutableDictionary(value => value.Id);
@@ -671,6 +788,8 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 .ToArray();
             await Task.WhenAll(starts).ConfigureAwait(false);
         }
+        await PublishReadyEndpointsAsync().ConfigureAwait(false);
+
     }
 
     private void TrackEagerStartupResult(
@@ -908,7 +1027,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
     }
 
     internal async Task RetryWaitingServicesAsync(
-        DateTimeOffset eagerRetryNow,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         foreach (var slotPair in _slots)
@@ -932,7 +1051,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                         !generation.Ready &&
                         current is { ObservedLifecycle: ServiceLifecycleState.Waiting } &&
                         current.Deadline is { } deadline &&
-                        deadline.IsReached(DateTimeOffset.UtcNow) &&
+                        deadline.IsReached(now) &&
                         snapshot is not null &&
                         _runtimeState.NewServicesAllowed &&
                         snapshot.Services.Any(value =>
@@ -978,7 +1097,7 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
             await RetryEagerStartupForSlotAsync(
                 slot,
                 slotPair.Key,
-                eagerRetryNow,
+                now,
                 cancellationToken).ConfigureAwait(false);
         }
     }
@@ -990,14 +1109,80 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
         CancellationToken cancellationToken)
     {
         await Task.Yield();
-        PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
+        Task<SupervisorOperationResult>? startTask = null;
+        var latest = snapshot;
+        var generationIsCurrent = false;
+        var dependencyBindingsCurrent = true;
+        var unavailableDependencyId = Guid.Empty;
+        lock (_lifecycleGate)
+        {
+            latest = LatestSnapshot(snapshot);
+            var currentService = latest.Services.FirstOrDefault(value => value.Id == generation.Configuration.Id);
+            var stillConfigured = currentService is { Enabled: true } &&
+                currentService.Version == generation.Configuration.Version &&
+                IsServiceEnabledForSnapshot(latest, generation.Configuration.Id);
+            lock (slot.Gate)
+            {
+                generationIsCurrent = !IsStopping &&
+                    ReferenceEquals(slot.Active, generation) &&
+                    !generation.Ready &&
+                    stillConfigured;
+            }
+
+            if (generationIsCurrent)
+            {
+                dependencyBindingsCurrent = AreDependencyBindingsCurrent(
+                    latest,
+                    generation.DependencyBindings,
+                    out unavailableDependencyId);
+                if (dependencyBindingsCurrent)
+                {
+                    PublishRuntimeSnapshot(generation, lifecycleState: ExtensionServiceLifecycleState.Starting);
+                    startTask = StartSupervisorWithPendingLeaseCleanupAsync(
+                        generation,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken);
+                }
+            }
+        }
+
+        if (generationIsCurrent && !dependencyBindingsCurrent)
+        {
+            HostLogMessages.ServiceDependencyUnsatisfied(
+                _logger,
+                generation.Configuration.Id,
+                latest.Version,
+                unavailableDependencyId);
+            PublishRuntimeFailure(
+                slot,
+                latest,
+                generation.Configuration,
+                generation,
+                generation.Supervisor.Snapshot,
+                ExtensionServiceLifecycleState.Waiting,
+                ExtensionServiceFailureStage.Spawn,
+                ExtensionServiceFailureCode.DependencyUnavailable);
+            await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
+            return new(
+                generation.Configuration.Id,
+                latest.Version,
+                HostServiceReadinessStatus.Unavailable,
+                generation.Supervisor.Snapshot);
+        }
+
+        if (startTask is null)
+        {
+            return new(
+                generation.Configuration.Id,
+                latest.Version,
+                HostServiceReadinessStatus.Cancelled,
+                generation.Supervisor.Snapshot);
+        }
+
         SupervisorOperationResult started;
         try
         {
-            started = await StartSupervisorWithPendingLeaseCleanupAsync(
-                generation,
-                DateTimeOffset.UtcNow,
-                cancellationToken).ConfigureAwait(false);
+            started = await startTask.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1162,20 +1347,82 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
                 generation.Supervisor.Snapshot);
         }
 
-        lock (slot.Gate)
+        var readyCandidateIsCurrent = false;
+        var readyDependencyBindingsCurrent = true;
+        var readyUnavailableDependencyId = Guid.Empty;
+        var promoted = false;
+        lock (_lifecycleGate)
         {
-            if (!ReferenceEquals(slot.Active, generation))
+            latest = LatestSnapshot(snapshot);
+            var currentService = latest.Services.FirstOrDefault(value => value.Id == generation.Configuration.Id);
+            var stillConfigured = currentService is { Enabled: true } &&
+                currentService.Version == generation.Configuration.Version &&
+                IsServiceEnabledForSnapshot(latest, generation.Configuration.Id);
+            lock (slot.Gate)
             {
+                readyCandidateIsCurrent = !IsStopping &&
+                    ReferenceEquals(slot.Active, generation) &&
+                    !generation.Ready &&
+                    stillConfigured;
+            }
+
+            if (readyCandidateIsCurrent)
+            {
+                readyDependencyBindingsCurrent = AreDependencyBindingsCurrent(
+                    latest,
+                    generation.DependencyBindings,
+                    out readyUnavailableDependencyId);
+                if (readyDependencyBindingsCurrent)
+                {
+                    lock (slot.Gate)
+                    {
+                        if (!IsStopping && ReferenceEquals(slot.Active, generation))
+                        {
+                            generation.Lease = ready.Lease;
+                            generation.HealthRetryState = ready.Retry;
+                            generation.Ready = true;
+                            promoted = true;
+                        }
+                        else
+                        {
+                            readyCandidateIsCurrent = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!promoted)
+        {
+            if (readyCandidateIsCurrent && !readyDependencyBindingsCurrent)
+            {
+                HostLogMessages.ServiceDependencyUnsatisfied(
+                    _logger,
+                    generation.Configuration.Id,
+                    latest.Version,
+                    readyUnavailableDependencyId);
+                PublishRuntimeFailure(
+                    slot,
+                    latest,
+                    generation.Configuration,
+                    generation,
+                    generation.Supervisor.Snapshot,
+                    ExtensionServiceLifecycleState.Waiting,
+                    ExtensionServiceFailureStage.Spawn,
+                    ExtensionServiceFailureCode.DependencyUnavailable);
+                await WithdrawFailedWaitingGenerationAsync(slot, generation).ConfigureAwait(false);
                 return new(
                     generation.Configuration.Id,
-                    snapshot.Version,
-                    HostServiceReadinessStatus.Cancelled,
+                    latest.Version,
+                    HostServiceReadinessStatus.Unavailable,
                     generation.Supervisor.Snapshot);
             }
 
-            generation.Lease = ready.Lease;
-            generation.HealthRetryState = ready.Retry;
-            generation.Ready = true;
+            return new(
+                generation.Configuration.Id,
+                latest.Version,
+                HostServiceReadinessStatus.Cancelled,
+                generation.Supervisor.Snapshot);
         }
 
         await PublishReadyEndpointsAsync().ConfigureAwait(false);
@@ -1242,6 +1489,44 @@ public sealed partial class HostServiceLifecycleManager : BackgroundService, IHo
 
     internal async Task RenewLeasesAsync(CancellationToken cancellationToken)
     {
+        if (!_pendingLeaseReleases.IsEmpty)
+        {
+            var pendingServiceIds = _pendingLeaseReleases.Keys
+                .Select(static key => key.ServiceId)
+                .Distinct()
+                .ToArray();
+            foreach (var serviceId in pendingServiceIds)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                var leaseGate = LeaseLifecycleGate(serviceId);
+                // A lifecycle tick must not queue ahead of a generation's start or stop operation.
+                if (!leaseGate.Wait(0, cancellationToken))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    _ = await RetryPendingLeaseReleasesAsync(
+                        serviceId,
+                        null,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    leaseGate.Release();
+                }
+            }
+        }
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
         foreach (var slot in _slots.Values)
         {
             ServiceGeneration? generation;

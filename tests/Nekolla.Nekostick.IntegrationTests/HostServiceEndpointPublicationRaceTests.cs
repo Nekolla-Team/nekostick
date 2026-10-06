@@ -20,13 +20,13 @@ public sealed class HostServiceEndpointPublicationRaceTests
         var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
         const int deadPort = 31_947;
         await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
-        var (serviceId, nodeId, leaseExpiresAt) =
+        var (serviceId, generationId, nodeId, leaseExpiresAt) =
             await SeedLeaseAsync(database, deadPort, cancellationToken);
 
         var publisher = new HostServiceEndpointSnapshotPublisher();
         publisher.Publish(
         [
-            new HostServiceEndpointLease(serviceId, deadPort, leaseExpiresAt)
+            new HostServiceEndpointLease(serviceId, generationId, deadPort, leaseExpiresAt)
         ]);
         publisher.Publish(Array.Empty<HostServiceEndpointLease>());
         Assert.Empty(publisher.Current);
@@ -53,20 +53,20 @@ public sealed class HostServiceEndpointPublicationRaceTests
         var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
         const int activePort = 31_948;
         await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
-        var (serviceId, nodeId, leaseExpiresAt) =
+        var (serviceId, generationId, nodeId, leaseExpiresAt) =
             await SeedLeaseAsync(database, activePort, cancellationToken);
 
         var publisher = new HostServiceEndpointSnapshotPublisher();
         publisher.Publish(
         [
-            new HostServiceEndpointLease(serviceId, activePort, leaseExpiresAt)
+            new HostServiceEndpointLease(serviceId, generationId, activePort, leaseExpiresAt)
         ]);
         publisher.Publish(Array.Empty<HostServiceEndpointLease>());
         Assert.Empty(publisher.Current);
 
         using var publicationService = new HostServiceEndpointPublicationService(
             new TestDbContextFactory(database),
-            new FixedEndpointAuthority(publisher, (serviceId, activePort)),
+            new FixedEndpointAuthority(publisher, (serviceId, generationId, activePort)),
             new HostRuntimeOptions(connectionString, nodeId, readOnly: false));
         await InvokePublicationTickAsync(publicationService, cancellationToken);
 
@@ -75,6 +75,7 @@ public sealed class HostServiceEndpointPublicationRaceTests
 
         Assert.True(resolution.IsAvailable);
         Assert.Equal(activePort, resolution.Endpoint!.BaseUri.Port);
+        Assert.Equal(generationId, publisher.Current[serviceId].GenerationId);
         Assert.True(publisher.Current.ContainsKey(serviceId));
     }
 
@@ -86,13 +87,13 @@ public sealed class HostServiceEndpointPublicationRaceTests
         const int databasePort = 31_949;
         const int authorityPort = 31_950;
         await using var database = await PostgresTestDatabase.CreateAsync(connectionString);
-        var (serviceId, nodeId, _) =
+        var (serviceId, generationId, nodeId, _) =
             await SeedLeaseAsync(database, databasePort, cancellationToken);
 
         var publisher = new HostServiceEndpointSnapshotPublisher();
         using var publicationService = new HostServiceEndpointPublicationService(
             new TestDbContextFactory(database),
-            new FixedEndpointAuthority(publisher, (serviceId, authorityPort)),
+            new FixedEndpointAuthority(publisher, (serviceId, generationId, authorityPort)),
             new HostRuntimeOptions(connectionString, nodeId, readOnly: false));
         await InvokePublicationTickAsync(publicationService, cancellationToken);
 
@@ -106,9 +107,11 @@ public sealed class HostServiceEndpointPublicationRaceTests
         var cancellationToken = TestContext.Current.CancellationToken;
         var connectionString = IntegrationTestBoundary.RequirePostgresConnectionString();
         var serviceId = Guid.CreateVersion7();
+        var generationId = Guid.CreateVersion7();
         const int port = 31_951;
         var initialLease = new HostServiceEndpointLease(
             serviceId,
+            generationId,
             port,
             DateTimeOffset.UtcNow.AddMinutes(5));
         var publisher = new HostServiceEndpointSnapshotPublisher();
@@ -117,15 +120,16 @@ public sealed class HostServiceEndpointPublicationRaceTests
 
         using var publicationService = new HostServiceEndpointPublicationService(
             new ThrowingDbContextFactory(),
-            new FixedEndpointAuthority(publisher, (serviceId, port)),
+            new FixedEndpointAuthority(publisher, (serviceId, generationId, port)),
             new HostRuntimeOptions(connectionString, "publication-race-failure", readOnly: false));
         await InvokePublicationTickAsync(publicationService, cancellationToken);
 
         Assert.Same(before, publisher.Current);
         Assert.Equal(initialLease, publisher.Current[serviceId]);
+        Assert.Equal(generationId, publisher.Current[serviceId].GenerationId);
     }
 
-    private static async Task<(Guid ServiceId, string NodeId, DateTimeOffset LeaseExpiresAt)> SeedLeaseAsync(
+    private static async Task<(Guid ServiceId, Guid GenerationId, string NodeId, DateTimeOffset LeaseExpiresAt)> SeedLeaseAsync(
         PostgresTestDatabase database,
         int port,
         CancellationToken cancellationToken)
@@ -136,6 +140,7 @@ public sealed class HostServiceEndpointPublicationRaceTests
         Assert.True(migration.IsSuccess, migration.Error?.Message);
 
         var serviceId = Guid.CreateVersion7();
+        var generationId = Guid.CreateVersion7();
         var nodeId = $"publication-race-{Guid.NewGuid():N}";
         var now = DateTimeOffset.UtcNow;
         var leaseExpiresAt = now.AddMinutes(5);
@@ -174,6 +179,7 @@ public sealed class HostServiceEndpointPublicationRaceTests
             NodeId = nodeId,
             Port = port,
             ServiceId = serviceId,
+            GenerationId = generationId,
             LeaseExpiresAt = leaseExpiresAt,
             RenewedAt = now,
             Version = 1,
@@ -181,7 +187,7 @@ public sealed class HostServiceEndpointPublicationRaceTests
             UpdatedAt = now
         });
         await seedContext.SaveChangesAsync(cancellationToken);
-        return (serviceId, nodeId, leaseExpiresAt);
+        return (serviceId, generationId, nodeId, leaseExpiresAt);
     }
 
     private static async Task InvokePublicationTickAsync(
@@ -203,11 +209,11 @@ public sealed class HostServiceEndpointPublicationRaceTests
     private sealed class FixedEndpointAuthority : IHostServiceEndpointAuthority
     {
         private readonly HostServiceEndpointSnapshotPublisher _publisher;
-        private readonly ImmutableHashSet<(Guid ServiceId, int Port)> _endpoints;
+        private readonly ImmutableHashSet<(Guid ServiceId, Guid GenerationId, int Port)> _endpoints;
 
         internal FixedEndpointAuthority(
             HostServiceEndpointSnapshotPublisher publisher,
-            params (Guid ServiceId, int Port)[] endpoints)
+            params (Guid ServiceId, Guid GenerationId, int Port)[] endpoints)
         {
             _publisher = publisher;
             _endpoints = endpoints.ToImmutableHashSet();
@@ -217,7 +223,7 @@ public sealed class HostServiceEndpointPublicationRaceTests
         {
             _publisher.Publish(
                 dbLeases.Where(lease =>
-                    lease is not null && _endpoints.Contains((lease.ServiceId, lease.Port))));
+                    lease is not null && _endpoints.Contains((lease.ServiceId, lease.GenerationId, lease.Port))));
             return Task.CompletedTask;
         }
     }

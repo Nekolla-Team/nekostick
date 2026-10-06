@@ -105,7 +105,7 @@ Docker 和 systemd 都必须将 SIGTERM 传递给主进程。主进程收到停�
 | `extension_records` | manifest ID、安装版本、载入状态和公开 UUID v7。manifest ID 为唯一的稳定文本键。 |
 | `extension_settings` | extension record ID、schema version、JSONB 配置、version。 |
 | `nodes` | UUID v7、唯一 `nodeId`、心跳、最后配置版本、运行状态。 |
-| `port_leases` | node ID、port、service ID、租约到期时间、续约版本；唯一键为 `(node_id, port)`。 |
+| `port_leases` | node ID、port、service ID、UUID v7 `generation_id`、租约到期时间和续约版本；唯一键为 `(node_id, port)` 与 `(node_id, service_id, generation_id)`。现有租约行以既有 UUID v7 主键 `id` 回填 `generation_id = id`，不重置租约数据。 |
 
 `routes.metadata` 和 extension 设置允许扩展保存其业务元数据，但核心只校验 JSON 有效性、大小上限和乐观版本。route/service/global settings 的核心字段须由 Host Config API 严格校验。
 
@@ -143,6 +143,14 @@ Docker 和 systemd 都必须将 SIGTERM 传递给主进程。主进程收到停�
 - OS bind race 或子进程启动失败时释放本次租约，使用 100ms、200ms、400ms、800ms、1600ms 的带抖动退避重试；耗尽后服务标记为失败，相关 route 返回 `503`。
 
 显式端口也要登记租约，以防同一节点中两个服务使用同一端口。范围外显式端口允许使用，但同样受 `(nodeId, port)` 租约约束。固定端口冲突时不改换端口，直接标记该服务启动失败。租约过期后可被回收；数据库不可用期间不以本地假续约启动或重启服务。
+
+每个服务代次在租约申请前取得独立 UUID v7 `generation_id`；同代进程崩溃重启沿用该 ID，新配置候选创建新 ID。一个 service 可同时存在多个 live generation，但每代至多有一条租约，且因 `(node_id, port)` 唯一约束，不同代次必须使用不同的空闲端口。配置切换遵循 make-before-break：先为候选代次申请租约并启动，通过 health check 后再切换活动 endpoint，最后 drain/stop 并释放旧代次。续约与释放均按 generation、port 和期望 lease version fencing；A 代次的未决清理只阻止复用 A，不会释放或阻止持有另一空闲端口的 B。Host endpoint snapshot 与扩展 `ExtensionEndpointLease` 暴露当前活动代次的 `GenerationId`。
+
+**依赖图原子切换（API 1.4）：** 配置快照变更时，Host 按启动模板中实际引用的依赖解析活动服务消费者闭包，并按依赖拓扑顺序准备候选代次；运行中的 OnDemand/Never 服务也属于活动消费者，未运行的服务不会被启动。候选代次的租约、进程、健康状态、依赖绑定和解析环境在提交前不替换活动视图。所有候选就绪后，Host 暂停受影响服务的新 endpoint capture，等待已开始的 capture 完成，再以一个不可变提交视图同时切换 endpoints、依赖 bindings 与 runtime snapshots；随后恢复 admission，并按旧依赖图的逆拓扑顺序 drain/stop 旧代次。准备失败、取消或快照被取代时，候选代次按逆拓扑顺序清理，旧提交视图保持权威；已派发请求继续使用原 endpoint 排空，不重放。图刷新也在手动或自动 crash/health restart 后执行，即使配置版本未变。活动消费者是否需要新代次，依据自身服务配置/属主、直接依赖引用集及完全展开的 argv/environment 值判断；依赖边变化本身要求替换，即使展开值相同；依赖代次、租约或 endpoint 身份单独变化而展开输入不变时，仅原子更新提交图中的关系绑定，不重启消费者。候选启动输入使用已准备上游的投影输出重新展开；已运行代次继续保留原依赖绑定供精确代次校验。
+
+During commit, new HTTP requests for affected services wait at admission before endpoint capture and resolve against the current committed view after admission resumes. The existing operation timeout and cancellation token govern this wait; the Host does not buffer request bodies for it. Requests dispatched before the barrier keep their captured old endpoint and drain there without replay. Direct child-to-child sockets bypass the Host proxy, are not covered by Host request draining, and existing TCP connections cannot be migrated atomically. Old generations retire in reverse dependency order of the old graph, consumers before dependencies; the bounded drain grace covers only Host-tracked in-flight requests.
+
+`Supervisor.RestartAsync` (API 1.3.3) remains a node-local strict stop-then-start operation: the targeted service is stopped before it is started, so configuration cutover's make-before-break guarantee does not apply to that service. Automatic crash/health restarts remain governed by the existing service restart policy and backoff. After either a completed explicit restart or a policy-permitted automatic restart, the Host re-evaluates the graph even when the configuration revision is unchanged. An automatic crash restart may reuse its current generation in place only when the service's owner, definition version, actually used direct dependency reference set, and fully resolved `ArgumentList`/`Environment` still match; a dependency generation, lease, or endpoint identity change alone does not prevent reuse when those launch inputs are unchanged. For cascading active consumers, a changed service definition/version or owner, actual direct reference set, or fully expanded launch input requires replacement; a relation-identity change alone only rebinds the relationship when launch inputs are unchanged. Only the active-consumer closure is reconciled: running `OnDemand`/`Never` services participate, while inactive ones are not started solely for graph refresh. No graph-specific feature flag, control interface, or authorization fence is added; existing `Supervisor` semantics and full service configuration remain authoritative.
 
 **心跳与注册自愈：** 心跳写入失败时节点以带抖动的指数退避重建注册行并重取 lease；若默认节点（nodeId=0）发现活跃锁已被其他进程接管，进程以非零退出码终止（日志事件 1017），交由 systemd / 容器重启策略处理，避免双活。
 

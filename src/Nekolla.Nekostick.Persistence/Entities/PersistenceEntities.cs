@@ -425,6 +425,9 @@ public sealed class PortLease
     /// <summary>Gets or sets the referenced service identifier.</summary>
     public Guid ServiceId { get; set; }
 
+    /// <summary>Gets or sets the UUID v7 service generation identifier.</summary>
+    public Guid GenerationId { get; set; }
+
     /// <summary>Gets or sets the lease expiration timestamp in UTC.</summary>
     public DateTimeOffset LeaseExpiresAt { get; set; }
 

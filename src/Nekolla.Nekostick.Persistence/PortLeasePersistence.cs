@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Nekolla.Nekostick.Domain;
 using Nekolla.Nekostick.Persistence.Entities;
 
 namespace Nekolla.Nekostick.Persistence;
@@ -62,21 +63,25 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 return new(PersistencePortLeaseOperationStatus.Rejected);
             }
 
-            var existingForService = await _db.PortLeases
-                .SingleOrDefaultAsync(value => value.NodeId == request.NodeId && value.ServiceId == request.ServiceId, cancellationToken)
+            var existingForGeneration = await _db.PortLeases
+                .SingleOrDefaultAsync(
+                    value => value.NodeId == request.NodeId &&
+                        value.ServiceId == request.ServiceId &&
+                        value.GenerationId == request.GenerationId,
+                    cancellationToken)
                 .ConfigureAwait(false);
-            if (existingForService is not null && existingForService.LeaseExpiresAt > now)
+            if (existingForGeneration is not null && existingForGeneration.LeaseExpiresAt > now)
             {
                 return new(PersistencePortLeaseOperationStatus.Conflict);
             }
 
-            if (existingForService is not null && request.ExpectedVersion is not null &&
-                existingForService.Version != request.ExpectedVersion.Value)
+            if (existingForGeneration is not null && request.ExpectedVersion is not null &&
+                existingForGeneration.Version != request.ExpectedVersion.Value)
             {
                 return new(PersistencePortLeaseOperationStatus.Conflict);
             }
 
-            if (existingForService is null && request.ExpectedVersion is not null)
+            if (existingForGeneration is null && request.ExpectedVersion is not null)
             {
                 return new(PersistencePortLeaseOperationStatus.Conflict);
             }
@@ -104,6 +109,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
                 NodeId = request.NodeId,
                 Port = port.Value,
                 ServiceId = request.ServiceId,
+                GenerationId = request.GenerationId,
                 LeaseExpiresAt = leaseExpiresAt.Value,
                 RenewedAt = now,
                 Version = 1,
@@ -183,7 +189,10 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             }
 
             var entity = await _db.PortLeases.SingleOrDefaultAsync(
-                value => value.NodeId == request.NodeId && value.ServiceId == request.ServiceId && value.Port == request.Port,
+                value => value.NodeId == request.NodeId &&
+                    value.ServiceId == request.ServiceId &&
+                    value.GenerationId == request.GenerationId &&
+                    value.Port == request.Port,
                 cancellationToken).ConfigureAwait(false);
             if (entity is null)
             {
@@ -277,14 +286,17 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             }
 
             var entity = await _db.PortLeases.SingleOrDefaultAsync(
-                value => value.NodeId == request.NodeId && value.ServiceId == request.ServiceId && value.Port == request.Port,
+                value => value.NodeId == request.NodeId &&
+                    value.ServiceId == request.ServiceId &&
+                    value.GenerationId == request.GenerationId &&
+                    value.Port == request.Port,
                 cancellationToken).ConfigureAwait(false);
             if (entity is null)
             {
                 return new(PersistencePortLeaseOperationStatus.NotFound);
             }
 
-            if (request.LeaseVersion is not null && entity.Version != request.LeaseVersion.Value)
+            if (entity.Version != request.LeaseVersion)
             {
                 return new(PersistencePortLeaseOperationStatus.Conflict);
             }
@@ -359,10 +371,11 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
             var leases = await _db.PortLeases
                 .AsNoTracking()
                 .Where(value => value.NodeId == nodeId && value.LeaseExpiresAt > now)
-                .OrderBy(value => value.ServiceId).ThenBy(value => value.Port)
+                .OrderBy(value => value.ServiceId).ThenBy(value => value.GenerationId).ThenBy(value => value.Port)
                 .Select(value => new PersistencePortLease(
                     value.NodeId,
                     value.ServiceId,
+                    value.GenerationId,
                     value.Port,
                     value.CreatedAt,
                     value.LeaseExpiresAt,
@@ -502,7 +515,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
         new(PersistencePortLeaseOperationStatus.Applied, lease);
 
     private static PersistencePortLease ToSnapshot(PortLease value) =>
-        new(value.NodeId, value.ServiceId, value.Port, value.CreatedAt, value.LeaseExpiresAt, value.Version);
+        new(value.NodeId, value.ServiceId, value.GenerationId, value.Port, value.CreatedAt, value.LeaseExpiresAt, value.Version);
 
     private DateTimeOffset? TryGetExpiry(DateTimeOffset now, TimeSpan ttl)
     {
@@ -527,6 +540,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
              request.AutomaticPortRangeStart <= request.AutomaticPortRangeEnd);
         return PersistencePortLease.IsSafeNodeId(request.NodeId) &&
             request.ServiceId != Guid.Empty &&
+            UuidV7.IsVersion7(request.GenerationId) &&
             request.TimeToLive > TimeSpan.Zero &&
             request.ExpectedVersion is null or >= 0 &&
             validPort && (!rangeSpecified || request.Port == 0) && validRange;
@@ -535,6 +549,7 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
     private static bool IsValidRenew(PersistencePortLeaseRenewRequest request) =>
         PersistencePortLease.IsSafeNodeId(request.NodeId) &&
         request.ServiceId != Guid.Empty &&
+        UuidV7.IsVersion7(request.GenerationId) &&
         request.Port is >= MinimumPort and <= MaximumPort &&
         request.LeaseVersion >= 0 &&
         request.TimeToLive > TimeSpan.Zero;
@@ -542,8 +557,9 @@ public sealed class EfPortLeaseStore : IPersistencePortLeaseStore, IAsyncDisposa
     private static bool IsValidRelease(PersistencePortLeaseReleaseRequest request) =>
         PersistencePortLease.IsSafeNodeId(request.NodeId) &&
         request.ServiceId != Guid.Empty &&
+        UuidV7.IsVersion7(request.GenerationId) &&
         request.Port is >= MinimumPort and <= MaximumPort &&
-        request.LeaseVersion is null or >= 0;
+        request.LeaseVersion >= 0;
 
     private static bool IsLeaseConflict(DbUpdateException exception) =>
         exception.InnerException is PostgresException postgresException &&

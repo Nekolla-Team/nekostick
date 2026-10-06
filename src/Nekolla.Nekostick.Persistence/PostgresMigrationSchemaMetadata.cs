@@ -30,7 +30,7 @@ internal static class PostgresMigrationSchemaMetadata
         new("nodes", 9),
         new("routes", 36),
         new("extension_settings", 7),
-        new("port_leases", 9),
+        new("port_leases", 10),
         new(PersistenceDatabaseDefaults.MigrationHistoryTable, 2)
     ];
 
@@ -179,6 +179,7 @@ internal static class PostgresMigrationSchemaMetadata
         new("port_leases", "version", "bigint", false),
         new("port_leases", "created_at", "timestamp with time zone", false),
         new("port_leases", "updated_at", "timestamp with time zone", false),
+        new("port_leases", "generation_id", "uuid", false),
 
         new(PersistenceDatabaseDefaults.MigrationHistoryTable, "MigrationId", "character varying(150)", false),
         new(PersistenceDatabaseDefaults.MigrationHistoryTable, "ProductVersion", "character varying(32)", false)
@@ -251,6 +252,7 @@ internal static class PostgresMigrationSchemaMetadata
         new("extension_settings", "ck_extension_settings_schema_version"),
         new("extension_settings", "ck_extension_settings_json"),
         new("port_leases", "ck_port_leases_id_uuid_v7"),
+        new("port_leases", "ck_port_leases_generation_id_uuid_v7"),
         new("port_leases", "ck_port_leases_port")
     ];
 
@@ -265,7 +267,7 @@ internal static class PostgresMigrationSchemaMetadata
         new("nodes", 3),
         new("routes", 10),
         new("extension_settings", 3),
-        new("port_leases", 2),
+        new("port_leases", 3),
         new(PersistenceDatabaseDefaults.MigrationHistoryTable, 0)
     ];
 
@@ -283,6 +285,7 @@ internal static class PostgresMigrationSchemaMetadata
         new("extension_settings", "ux_extension_settings_extension_record_id", true, "extension_record_id", 1, false, ""),
         new("nodes", "ux_nodes_default_node_id_active", true, "node_id", 1, true, "%node_id%0%is_active%"),
         new("port_leases", "ux_port_leases_node_id_port", true, "node_id,port", 2, false, ""),
+        new("port_leases", "ux_port_leases_node_id_service_id_generation_id", true, "node_id,service_id,generation_id", 3, false, ""),
         new("port_leases", "ix_port_leases_service_id", false, "service_id", 1, false, "")
     ];
 

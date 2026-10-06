@@ -56,6 +56,7 @@ public sealed class HostServiceEndpointPublicationService : BackgroundService
                 where lease.NodeId == _options.NodeId && lease.LeaseExpiresAt > now
                 select new HostServiceEndpointLease(
                     lease.ServiceId,
+                    lease.GenerationId,
                     lease.Port,
                     lease.LeaseExpiresAt,
                     service.OwnerExtensionId))

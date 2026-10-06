@@ -127,44 +127,59 @@ public sealed partial class HostServiceLifecycleManager
         TaskCompletionSource<HostServiceReadinessResult> startup,
         long operationId)
     {
+        HostServiceReadinessResult? result = null;
+        Exception? completionException = null;
         try
         {
-            var result = await RunStartOrSwitchAsync(
+            result = await RunStartOrSwitchAsync(
                 slot,
                 snapshot,
                 service,
                 dependencyChain,
                 stopReplacedGeneration).ConfigureAwait(false);
             TrackEagerStartupResult(slot, snapshot, service, result, operationId);
-            startup.TrySetResult(result);
         }
         catch (OperationCanceledException exception)
         {
+            completionException = exception;
             HostLogMessages.LifecycleBackgroundCancelled(
                 _logger,
                 nameof(CompleteStartOrSwitchAsync),
                 service.Id);
-            startup.TrySetException(exception);
         }
         catch (Exception exception)
         {
+            completionException = exception;
             HostLogMessages.LifecycleBackgroundFailed(
                 _logger,
                 exception,
                 nameof(CompleteStartOrSwitchAsync),
                 service.Id);
-            startup.TrySetException(exception);
         }
         finally
         {
-            lock (slot.Gate)
+            try
             {
-                if (ReferenceEquals(slot.Startup, startup.Task))
+                lock (slot.Gate)
                 {
-                    slot.Startup = null;
+                    if (ReferenceEquals(slot.Startup, startup.Task))
+                    {
+                        slot.Startup = null;
+                    }
+                }
+                SynchronizePublishedRuntimeConfiguration();
+            }
+            finally
+            {
+                if (completionException is null)
+                {
+                    startup.TrySetResult(result!);
+                }
+                else
+                {
+                    startup.TrySetException(completionException);
                 }
             }
-            SynchronizePublishedRuntimeConfiguration();
         }
     }
 
@@ -206,6 +221,7 @@ public sealed partial class HostServiceLifecycleManager
             await Task.Yield();
             var dependencies = ServiceLaunchTemplate.ExtractDependencies(
                 service.ArgumentList.Cast<string?>().Concat(service.Environment.Values));
+            var dependencyBindings = ImmutableDictionary.CreateBuilder<Guid, ServiceDependencyBinding>();
             foreach (var dependencyId in dependencies)
             {
                 if (dependencyId == service.Id || dependencyChain.Contains(dependencyId))
@@ -228,15 +244,12 @@ public sealed partial class HostServiceLifecycleManager
                     return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
                 }
 
-                if (_runtimeEnvironments.ContainsKey(dependencyId))
-                {
-                    continue;
-                }
 
-                var dependency = snapshot.Services.FirstOrDefault(value => value.Id == dependencyId);
+                var dependencySnapshot = LatestSnapshot(snapshot);
+                var dependency = dependencySnapshot.Services.FirstOrDefault(value => value.Id == dependencyId);
                 if (dependency is null ||
                     !dependency.Enabled ||
-                    !IsServiceEnabledForSnapshot(snapshot, dependencyId))
+                    !IsServiceEnabledForSnapshot(dependencySnapshot, dependencyId))
                 {
                     HostLogMessages.ServiceDependencyUnsatisfied(
                         _logger,
@@ -284,7 +297,7 @@ public sealed partial class HostServiceLifecycleManager
                     }
 
                     dependencyResult = await EnsureReadyAsync(
-                        snapshot,
+                        dependencySnapshot,
                         dependencyId,
                         dependencyChain.Add(service.Id),
                         _shutdownCts.Token).ConfigureAwait(false);
@@ -317,12 +330,40 @@ public sealed partial class HostServiceLifecycleManager
                         databaseUnavailableProvenance:
                             dependencyResult.DatabaseUnavailableProvenance);
                 }
+                if (!TryCaptureDependencyBinding(
+                        dependencySnapshot,
+                        dependencyId,
+                        dependency.Version,
+                        out var dependencyBinding) ||
+                    dependencyBinding is null)
+                {
+                    HostLogMessages.ServiceDependencyUnsatisfied(
+                        _logger,
+                        service.Id,
+                        snapshot.Version,
+                        dependencyId);
+                    PublishRuntimeFailure(
+                        slot,
+                        snapshot,
+                        service,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.DependencyUnavailable);
+                    PublishServiceState(service.Id, snapshot.Version, "unavailable");
+                    return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                }
+
+                dependencyBindings.Add(dependencyId, dependencyBinding);
             }
+            var capturedDependencyBindings = dependencyBindings.ToImmutable();
             var generationResult = await StartGenerationAsync(
                 slot,
                 snapshot,
                 service,
                 attemptNumber,
+                capturedDependencyBindings,
                 _shutdownCts.Token).ConfigureAwait(false);
             var candidate = generationResult.Generation;
             if (candidate is null)
@@ -380,16 +421,21 @@ public sealed partial class HostServiceLifecycleManager
 
             ServiceGeneration? old = null;
             var accepted = false;
+            var candidateServiceStillConfigured = false;
+            var dependencyBindingsCurrent = true;
+            var unavailableDependencyId = Guid.Empty;
             lock (_lifecycleGate)
             {
-                var latest = _snapshotHolder.Current;
-                var stillConfigured = latest is null || latest.Version < snapshot.Version ||
-                    latest.Services.Any(value =>
-                        value.Id == service.Id &&
-                        value.Version == service.Version &&
-                        value.Enabled) &&
+                var latest = LatestSnapshot(snapshot);
+                var currentService = latest.Services.FirstOrDefault(value => value.Id == service.Id);
+                candidateServiceStillConfigured = currentService is { Enabled: true } &&
+                    currentService.Version == service.Version &&
                     IsServiceEnabledForSnapshot(latest, service.Id);
-                if (!IsStopping && stillConfigured)
+                dependencyBindingsCurrent = AreDependencyBindingsCurrent(
+                    latest,
+                    capturedDependencyBindings,
+                    out unavailableDependencyId);
+                if (!IsStopping && candidateServiceStillConfigured && dependencyBindingsCurrent)
                 {
                     lock (slot.Gate)
                     {
@@ -401,8 +447,6 @@ public sealed partial class HostServiceLifecycleManager
                         }
                     }
 
-                    _runtimeEnvironments[service.Id] =
-                        new ServiceRuntimeEnvironmentEntry(candidate, candidate.ResolvedEnvironment);
                     accepted = true;
                 }
             }
@@ -419,7 +463,29 @@ public sealed partial class HostServiceLifecycleManager
                 }
 
                 SynchronizePublishedRuntimeConfiguration();
-                PublishActiveRuntimeState(slot, _snapshotHolder.Current ?? snapshot);
+                PublishActiveRuntimeState(slot, LatestSnapshot(snapshot));
+                if (!IsStopping && candidateServiceStillConfigured && !dependencyBindingsCurrent)
+                {
+                    HostLogMessages.ServiceDependencyUnsatisfied(
+                        _logger,
+                        service.Id,
+                        snapshot.Version,
+                        unavailableDependencyId);
+                    var failureSnapshot = LatestSnapshot(snapshot);
+                    var failureService = failureSnapshot.Services.FirstOrDefault(value => value.Id == service.Id) ?? service;
+                    PublishRuntimeFailure(
+                        slot,
+                        failureSnapshot,
+                        failureService,
+                        null,
+                        null,
+                        ExtensionServiceLifecycleState.Waiting,
+                        ExtensionServiceFailureStage.Spawn,
+                        ExtensionServiceFailureCode.DependencyUnavailable);
+                    PublishServiceState(service.Id, failureSnapshot.Version, "unavailable");
+                    return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Unavailable);
+                }
+
                 PublishServiceState(service.Id, snapshot.Version, "stopped");
                 return new(service.Id, snapshot.Version, HostServiceReadinessStatus.Cancelled);
             }
@@ -491,8 +557,11 @@ public sealed partial class HostServiceLifecycleManager
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
         int attemptNumber,
-        CancellationToken cancellationToken)
+        ImmutableDictionary<Guid, ServiceDependencyBinding> dependencyBindings,
+        CancellationToken cancellationToken,
+        bool graphPreparation = false)
     {
+        var generationId = Guid.CreateVersion7();
         var leaseGate = LeaseLifecycleGate(service.Id);
         await leaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -500,6 +569,7 @@ public sealed partial class HostServiceLifecycleManager
             var now = DateTimeOffset.UtcNow;
             var pendingFailure = await RetryPendingLeaseReleasesAsync(
                 service.Id,
+                generationId,
                 now,
                 cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
@@ -532,7 +602,10 @@ public sealed partial class HostServiceLifecycleManager
                 slot,
                 snapshot,
                 service,
+                generationId,
                 attemptNumber,
+                dependencyBindings,
+                graphPreparation,
                 cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -544,7 +617,10 @@ public sealed partial class HostServiceLifecycleManager
         ServiceSlot slot,
         HostConfigurationSnapshot snapshot,
         ServiceConfiguration service,
+        Guid generationId,
         int attemptNumber,
+        ImmutableDictionary<Guid, ServiceDependencyBinding> dependencyBindings,
+        bool graphPreparation,
         CancellationToken cancellationToken)
     {
         ServiceGeneration? candidate = null;
@@ -571,6 +647,7 @@ public sealed partial class HostServiceLifecycleManager
             var request = PortLeaseRequest.Automatic(
                 _nodeId,
                 service.Id,
+                generationId,
                 LeasePolicy.TimeToLive,
                 rangeStart,
                 rangeEnd);
@@ -634,6 +711,7 @@ public sealed partial class HostServiceLifecycleManager
                 acquired.ServiceId != request.ServiceId ||
                 acquired.Port < rangeStart ||
                 acquired.Port > rangeEnd ||
+                acquired.GenerationId != request.GenerationId ||
                 acquired.IsExpired(now))
             {
                 _ = await ReleaseAutomaticLeaseAsync(request, acquired, CancellationToken.None).ConfigureAwait(false);
@@ -654,13 +732,14 @@ public sealed partial class HostServiceLifecycleManager
             }
 
             Task<SupervisorOperationResult>? startTask = null;
+            var resolvedArguments = ImmutableArray<string>.Empty;
             var resolvedEnvironment = ImmutableDictionary<string, string>.Empty;
-            var gateSnapshot = _snapshotHolder.Current is { } latestSnapshot &&
-                latestSnapshot.Version > snapshot.Version
-                    ? latestSnapshot
-                    : snapshot;
+            var dependencyBindingUnavailable = false;
+            var candidateSuperseded = false;
+            var unavailableDependencyId = Guid.Empty;
             lock (_lifecycleGate)
             {
+                var gateSnapshot = LatestSnapshot(snapshot);
                 if (!IsStopping &&
                     gateSnapshot.Services.Any(value =>
                         value.Id == service.Id &&
@@ -670,29 +749,40 @@ public sealed partial class HostServiceLifecycleManager
                 {
                     try
                     {
-                        var created = CreateSupervisor(service, acquired.Port, attemptNumber, acquired, now);
+                        Func<Guid, string, string?> remoteEnvironmentResolver = (dependencyId, name) =>
+                            dependencyBindings.TryGetValue(dependencyId, out var binding) &&
+                            binding.ResolvedEnvironment.TryGetValue(name, out var value)
+                                ? value
+                                : null;
+                        var created = CreateSupervisor(
+                            service,
+                            generationId,
+                            acquired.Port,
+                            attemptNumber,
+                            remoteEnvironmentResolver,
+                            acquired,
+                            now);
                         supervisor = created.Supervisor;
+                        resolvedArguments = created.ResolvedArguments;
                         resolvedEnvironment = created.ResolvedEnvironment;
-                        var ownerExtensionId = _snapshotHolder.RoutingSnapshot?.ServiceOwners.TryGetValue(
-                            service.Id,
-                            out var owner)
-                            == true
-                            ? owner
-                            : null;
+                        var ownerExtensionId = GetServiceOwner(service.Id);
                         candidate = new ServiceGeneration(
                             service,
+                            generationId,
                             supervisor,
                             acquired,
                             snapshot.Version,
                             HealthRetryState.StartStartup(service.Id, now, HealthPolicy.StartupTimeout),
                             ownerExtensionId,
+                            resolvedArguments,
                             resolvedEnvironment,
-                            ready: false);
+                            dependencyBindings,
+                            ready: false,
+                            graphPreparation: graphPreparation);
                         lock (slot.Gate)
                         {
                             slot.Starting = candidate;
                         }
-
                     }
                     catch (Exception exception)
                     {
@@ -719,30 +809,74 @@ public sealed partial class HostServiceLifecycleManager
             if (candidate is not null)
             {
                 PublishConfiguredRuntimeTransition(slot, snapshot, service, ExtensionServiceLifecycleState.Starting);
-                try
+                lock (_lifecycleGate)
                 {
-                    startTask = candidate.Supervisor.StartAsync(now, _shutdownCts.Token).AsTask();
-                }
-                catch (Exception exception)
-                {
-                    HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
+                    var latest = LatestSnapshot(snapshot);
+                    var currentService = latest.Services.FirstOrDefault(value => value.Id == service.Id);
+                    var stillConfigured = currentService is { Enabled: true } &&
+                        currentService.Version == service.Version &&
+                        IsServiceEnabledForSnapshot(latest, service.Id);
+                    if (IsStopping || !stillConfigured)
+                    {
+                        candidateSuperseded = true;
+                    }
+                    else if (!graphPreparation && !AreDependencyBindingsCurrent(
+                        latest,
+                        dependencyBindings,
+                        out unavailableDependencyId))
+                    {
+                        dependencyBindingUnavailable = true;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            startTask = candidate.Supervisor.StartAsync(now, cancellationToken).AsTask();
+                        }
+                        catch (Exception exception)
+                        {
+                            HostLogMessages.FailureDetails(_logger, exception, nameof(StartGenerationAsync));
+                        }
+                    }
                 }
             }
 
             if (startTask is null)
             {
+                if (candidateSuperseded || IsStopping)
+                {
+                    await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
+                    return (null, false);
+                }
+
+                var failureCode = dependencyBindingUnavailable
+                    ? ExtensionServiceFailureCode.DependencyUnavailable
+                    : ExtensionServiceFailureCode.InvalidLaunchSpecification;
+                var failureSnapshot = dependencyBindingUnavailable ? LatestSnapshot(snapshot) : snapshot;
+                var failureService = dependencyBindingUnavailable
+                    ? failureSnapshot.Services.FirstOrDefault(value => value.Id == service.Id) ?? service
+                    : service;
                 var failedState = supervisor.Snapshot;
                 if (candidate is not null)
                 {
+                    if (dependencyBindingUnavailable)
+                    {
+                        HostLogMessages.ServiceDependencyUnsatisfied(
+                            _logger,
+                            service.Id,
+                            snapshot.Version,
+                            unavailableDependencyId);
+                    }
+
                     PublishRuntimeFailure(
                         slot,
-                        snapshot,
-                        service,
+                        failureSnapshot,
+                        failureService,
                         candidate,
                         failedState,
-                        ExtensionServiceLifecycleState.Failed,
+                        ExtensionServiceLifecycleState.Waiting,
                         ExtensionServiceFailureStage.Spawn,
-                        ExtensionServiceFailureCode.InvalidLaunchSpecification);
+                        failureCode);
                 }
 
                 await supervisor.StopAsync(DateTimeOffset.UtcNow, CancellationToken.None).ConfigureAwait(false);
@@ -750,13 +884,13 @@ public sealed partial class HostServiceLifecycleManager
                 {
                     PublishRuntimeFailure(
                         slot,
-                        snapshot,
-                        service,
+                        failureSnapshot,
+                        failureService,
                         candidate,
                         failedState,
-                        ExtensionServiceLifecycleState.Failed,
+                        ExtensionServiceLifecycleState.Waiting,
                         ExtensionServiceFailureStage.Spawn,
-                        ExtensionServiceFailureCode.InvalidLaunchSpecification,
+                        failureCode,
                         updatedAt: DateTimeOffset.UtcNow);
                 }
 

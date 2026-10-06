@@ -1,3 +1,5 @@
+using Nekolla.Nekostick.Domain;
+
 namespace Nekolla.Nekostick.Supervision;
 
 /// <summary>Contains the immutable default port lease timing policy.</summary>
@@ -43,6 +45,7 @@ public sealed record PortLeaseRequest
     /// <summary>Creates a port lease request.</summary>
     /// <param name="nodeId">The validated node identifier.</param>
     /// <param name="serviceId">The service identifier.</param>
+    /// <param name="generationId">The UUID v7 service generation identifier.</param>
     /// <param name="port">The fixed TCP port, or zero for automatic allocation.</param>
     /// <param name="timeToLive">The requested TTL.</param>
     /// <param name="expectedVersion">The expected lease version, if any.</param>
@@ -51,6 +54,7 @@ public sealed record PortLeaseRequest
     public PortLeaseRequest(
         NodeIdentifier nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
         TimeSpan timeToLive,
         long? expectedVersion = null,
@@ -58,7 +62,7 @@ public sealed record PortLeaseRequest
         int? automaticPortRangeEnd = null)
     {
         ValidateNode(nodeId);
-        ValidateServiceAndPort(serviceId, port, automaticPortRangeStart, automaticPortRangeEnd);
+        ValidateServiceAndPort(serviceId, generationId, port, automaticPortRangeStart, automaticPortRangeEnd);
         ValidateTimeToLive(timeToLive);
         if (expectedVersion is < 0)
         {
@@ -67,6 +71,7 @@ public sealed record PortLeaseRequest
 
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         TimeToLive = timeToLive;
         ExpectedVersion = expectedVersion;
@@ -77,6 +82,7 @@ public sealed record PortLeaseRequest
     /// <summary>Creates an automatic-port request for an optional inclusive range.</summary>
     /// <param name="nodeId">The validated node identifier.</param>
     /// <param name="serviceId">The service identifier.</param>
+    /// <param name="generationId">The UUID v7 service generation identifier.</param>
     /// <param name="timeToLive">The requested TTL.</param>
     /// <param name="rangeStart">The optional inclusive range start.</param>
     /// <param name="rangeEnd">The optional inclusive range end.</param>
@@ -84,17 +90,20 @@ public sealed record PortLeaseRequest
     public static PortLeaseRequest Automatic(
         NodeIdentifier nodeId,
         Guid serviceId,
+        Guid generationId,
         TimeSpan timeToLive,
         int? rangeStart = null,
         int? rangeEnd = null,
         long? expectedVersion = null) =>
-        new(nodeId, serviceId, 0, timeToLive, expectedVersion, rangeStart, rangeEnd);
+        new(nodeId, serviceId, generationId, 0, timeToLive, expectedVersion, rangeStart, rangeEnd);
 
     /// <summary>Gets the node lease key.</summary>
     public NodeIdentifier NodeId { get; }
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+    /// <summary>Gets the UUID v7 service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the requested fixed TCP port, or zero for automatic allocation.</summary>
     public int Port { get; }
@@ -113,6 +122,7 @@ public sealed record PortLeaseRequest
 
     private static void ValidateServiceAndPort(
         Guid serviceId,
+        Guid generationId,
         int port,
         int? automaticPortRangeStart,
         int? automaticPortRangeEnd)
@@ -120,6 +130,10 @@ public sealed record PortLeaseRequest
         if (serviceId == Guid.Empty)
         {
             throw new ArgumentException("A service identifier is required.", nameof(serviceId));
+        }
+        if (!UuidV7.IsVersion7(generationId))
+        {
+            throw new ArgumentException("A UUID v7 generation identifier is required.", nameof(generationId));
         }
 
         var automatic = automaticPortRangeStart.HasValue || automaticPortRangeEnd.HasValue;
@@ -171,21 +185,24 @@ public sealed record PortLeaseRenewal
     /// <summary>Creates a port lease renewal request.</summary>
     /// <param name="nodeId">The validated node identifier.</param>
     /// <param name="serviceId">The service identifier.</param>
+    /// <param name="generationId">The UUID v7 service generation identifier.</param>
     /// <param name="port">The TCP port.</param>
     /// <param name="leaseVersion">The version being renewed.</param>
     /// <param name="timeToLive">The requested new TTL.</param>
     public PortLeaseRenewal(
         NodeIdentifier nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
         long leaseVersion,
         TimeSpan timeToLive)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(leaseVersion);
 
-        _ = new PortLeaseRequest(nodeId, serviceId, port, timeToLive);
+        _ = new PortLeaseRequest(nodeId, serviceId, generationId, port, timeToLive);
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         LeaseVersion = leaseVersion;
         TimeToLive = timeToLive;
@@ -196,6 +213,8 @@ public sealed record PortLeaseRenewal
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+    /// <summary>Gets the UUID v7 service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the TCP port.</summary>
     public int Port { get; }
@@ -213,18 +232,22 @@ public sealed record PortLeaseRelease
     /// <summary>Creates a port lease release request.</summary>
     /// <param name="nodeId">The validated node identifier.</param>
     /// <param name="serviceId">The service identifier.</param>
+    /// <param name="generationId">The UUID v7 service generation identifier.</param>
     /// <param name="port">The TCP port.</param>
-    /// <param name="leaseVersion">The expected version, if any.</param>
-    public PortLeaseRelease(NodeIdentifier nodeId, Guid serviceId, int port, long? leaseVersion = null)
+    /// <param name="leaseVersion">The expected lease version.</param>
+    public PortLeaseRelease(
+        NodeIdentifier nodeId,
+        Guid serviceId,
+        Guid generationId,
+        int port,
+        long leaseVersion)
     {
-        _ = new PortLeaseRequest(nodeId, serviceId, port, TimeSpan.FromTicks(1));
-        if (leaseVersion is < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(leaseVersion));
-        }
+        _ = new PortLeaseRequest(nodeId, serviceId, generationId, port, TimeSpan.FromTicks(1));
+        ArgumentOutOfRangeException.ThrowIfNegative(leaseVersion);
 
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         LeaseVersion = leaseVersion;
     }
@@ -235,9 +258,12 @@ public sealed record PortLeaseRelease
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
 
+    /// <summary>Gets the UUID v7 service generation identifier.</summary>
+    public Guid GenerationId { get; }
+
     /// <summary>Gets the TCP port.</summary>
     public int Port { get; }
 
     /// <summary>Gets the expected lease version.</summary>
-    public long? LeaseVersion { get; }
+    public long LeaseVersion { get; }
 }

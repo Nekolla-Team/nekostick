@@ -244,6 +244,7 @@ public sealed class PostgresExtensionManagementTests
         Assert.True(bootstrap.IsSuccess, bootstrap.Errors.FirstOrDefault()?.Message);
 
         var serviceId = Guid.CreateVersion7();
+        var generationId = Guid.CreateVersion7();
         var routeId = Guid.CreateVersion7();
         var owned = new EfExtensionOwnedConfigurationApi(test.Api);
         var ownedSnapshot = await owned.ReadOwnedAsync(extensionId, cancellationToken);
@@ -319,6 +320,7 @@ public sealed class PostgresExtensionManagementTests
                 NodeId = nodeId,
                 Port = 35123,
                 ServiceId = serviceId,
+                GenerationId = generationId,
                 LeaseExpiresAt = now.AddMinutes(5),
                 RenewedAt = now,
                 Version = 1,

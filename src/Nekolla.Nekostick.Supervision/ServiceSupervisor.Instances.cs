@@ -353,7 +353,12 @@ public sealed partial class ServiceSupervisor
         PortLeaseOperationResult releaseResult;
         try
         {
-            var release = new PortLeaseRelease(current.NodeId, current.ServiceId, current.Port, current.Version);
+            var release = new PortLeaseRelease(
+                current.NodeId,
+                current.ServiceId,
+                current.GenerationId,
+                current.Port,
+                current.Version);
             releaseResult = await leaseStore.ApplyAsync(
                 PortLeaseIntent.ReleaseLease(release),
                 cancellationToken).ConfigureAwait(false);

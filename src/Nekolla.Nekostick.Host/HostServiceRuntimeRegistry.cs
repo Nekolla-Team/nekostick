@@ -26,6 +26,17 @@ internal sealed class HostServiceRuntimeRegistry :
     private readonly HashSet<RuntimeStateSubscription> _subscriptions = [];
     private long _sequence;
     private bool _disposed;
+    private HostServiceEndpointSnapshotPublisher? _committedViewPublisher;
+
+    internal void AttachCommittedViewPublisher(HostServiceEndpointSnapshotPublisher publisher)
+    {
+        ArgumentNullException.ThrowIfNull(publisher);
+        lock (_gate)
+        {
+            _committedViewPublisher = publisher;
+            PublishCommittedViewLocked();
+        }
+    }
 
     public ImmutableArray<HostServiceRuntimeSnapshot> ReadCurrent()
     {
@@ -83,6 +94,13 @@ internal sealed class HostServiceRuntimeRegistry :
             {
                 return;
             }
+            if (snapshot.GenerationId is { } generationId &&
+                _committedViewPublisher is { } publisher &&
+                publisher.CommittedView.Services.TryGetValue(snapshot.ServiceId, out var committedService) &&
+                committedService.GenerationId != generationId)
+            {
+                return;
+            }
 
             if (preserveServiceVersion && _entries.TryGetValue(snapshot.ServiceId, out var current))
             {
@@ -90,6 +108,73 @@ internal sealed class HostServiceRuntimeRegistry :
             }
 
             PublishLocked(snapshot, serviceVersion, enabled, restartCountIncrement);
+        }
+    }
+
+    internal void PublishCommittedGraph(
+        HostServiceCommittedGraphView view,
+        IReadOnlyList<(HostServiceRuntimeSnapshot Snapshot, long ServiceVersion)> publications)
+    {
+        ArgumentNullException.ThrowIfNull(view);
+        ArgumentNullException.ThrowIfNull(publications);
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var changes = new List<HostServiceRuntimeStateChange>(publications.Count);
+            foreach (var (snapshot, serviceVersion) in publications)
+            {
+                PublishLocked(
+                    snapshot,
+                    serviceVersion,
+                    enabled: true,
+                    publishCommittedView: false,
+                    deferredChanges: changes);
+            }
+
+            var runtimeSnapshots = ImmutableDictionary.CreateBuilder<Guid, HostServiceRuntimeSnapshot>();
+            foreach (var entry in _entries.Values.OrderBy(static entry => entry.Sequence))
+            {
+                if (view.Services.TryGetValue(entry.Snapshot.ServiceId, out var service) &&
+                    entry.Snapshot.GenerationId != service.GenerationId)
+                {
+                    runtimeSnapshots[entry.Snapshot.ServiceId] = service.Runtime;
+                }
+                else
+                {
+                    runtimeSnapshots[entry.Snapshot.ServiceId] = entry.Snapshot;
+                }
+            }
+
+            var services = view.Services.ToBuilder();
+            foreach (var service in view.Services)
+            {
+                if (runtimeSnapshots.TryGetValue(service.Key, out var runtime) &&
+                    runtime.GenerationId == service.Value.GenerationId)
+                {
+                    services[service.Key] = service.Value with { Runtime = runtime };
+                }
+                else
+                {
+                    runtimeSnapshots[service.Key] = service.Value.Runtime;
+                }
+            }
+
+            _committedViewPublisher?.CommitGraph(view with
+            {
+                Services = services.ToImmutable(),
+                RuntimeSnapshots = runtimeSnapshots.ToImmutable()
+            });
+            foreach (var change in changes)
+            {
+                foreach (var subscription in _subscriptions)
+                {
+                    subscription.Enqueue(change);
+                }
+            }
         }
     }
 
@@ -273,7 +358,9 @@ internal sealed class HostServiceRuntimeRegistry :
         HostServiceRuntimeSnapshot snapshot,
         long serviceVersion,
         bool enabled,
-        int restartCountIncrement = 0)
+        int restartCountIncrement = 0,
+        bool publishCommittedView = true,
+        List<HostServiceRuntimeStateChange>? deferredChanges = null)
     {
         _entries.TryGetValue(snapshot.ServiceId, out var current);
         var cumulativeRestartCount = current?.RestartCount ?? snapshot.RestartCount;
@@ -314,9 +401,21 @@ internal sealed class HostServiceRuntimeRegistry :
             snapshot,
             IsInitialSnapshot: false,
             OwnerExtensionId: snapshot.OwnerExtensionId);
-        foreach (var subscription in _subscriptions)
+        if (deferredChanges is not null)
         {
-            subscription.Enqueue(change);
+            deferredChanges.Add(change);
+        }
+        else
+        {
+            foreach (var subscription in _subscriptions)
+            {
+                subscription.Enqueue(change);
+            }
+        }
+
+        if (publishCommittedView)
+        {
+            PublishCommittedViewLocked();
         }
     }
 
@@ -339,7 +438,15 @@ internal sealed class HostServiceRuntimeRegistry :
         {
             subscription.Enqueue(change);
         }
+        PublishCommittedViewLocked();
     }
+
+    private void PublishCommittedViewLocked() =>
+        _committedViewPublisher?.SetRuntimeSnapshots(
+            _entries.Values
+                .OrderBy(static entry => entry.Sequence)
+                .Select(static entry => entry.Snapshot)
+                .ToImmutableArray());
 
     private void RemoveSubscription(RuntimeStateSubscription subscription)
     {

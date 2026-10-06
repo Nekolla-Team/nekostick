@@ -887,4 +887,49 @@ BEGIN
     END IF;
 END $EF$;
 COMMIT;
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261006090000_AddPortLeaseGenerations') THEN
+    ALTER TABLE nekostick.port_leases ADD generation_id uuid;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261006090000_AddPortLeaseGenerations') THEN
+    UPDATE "nekostick".port_leases SET generation_id = id;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261006090000_AddPortLeaseGenerations') THEN
+    ALTER TABLE nekostick.port_leases ALTER COLUMN generation_id SET NOT NULL;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261006090000_AddPortLeaseGenerations') THEN
+    ALTER TABLE nekostick.port_leases ADD CONSTRAINT ck_port_leases_generation_id_uuid_v7 CHECK (substring(generation_id::text, 15, 1) = '7' AND substring(generation_id::text, 20, 1) IN ('8', '9', 'a', 'b'));
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261006090000_AddPortLeaseGenerations') THEN
+    CREATE UNIQUE INDEX ux_port_leases_node_id_service_id_generation_id ON nekostick.port_leases (node_id, service_id, generation_id);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM nekostick."__EFMigrationsHistory" WHERE "MigrationId" = '20261006090000_AddPortLeaseGenerations') THEN
+    INSERT INTO nekostick."__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20261006090000_AddPortLeaseGenerations', '10.0.11');
+    END IF;
+END $EF$;
+COMMIT;
 

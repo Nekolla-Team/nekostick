@@ -208,6 +208,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         await host.RenewLeasesAsync();
 
         Assert.True(host.Publisher.Current.ContainsKey(host.ServiceId));
+        Assert.Equal(endpoint!.GenerationId, host.Publisher.Current[host.ServiceId].GenerationId);
         Assert.False(host.RuntimeState.Status.DatabaseAvailable);
     }
 
@@ -342,6 +343,7 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
         Assert.True(host.AutomaticPortRangeEnd > host.Port);
         Assert.Equal(host.NodeId, request.NodeId.Value);
         Assert.Equal(host.ServiceId, request.ServiceId);
+        Assert.Equal(request.GenerationId, host.Publisher.Current[host.ServiceId].GenerationId);
     }
 
 
@@ -1201,8 +1203,10 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
     {
         private readonly bool _shortRenewalLease;
         private readonly int _automaticPort;
+        private readonly object _gate = new();
+        private readonly Dictionary<(NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId), PortLease> _leases = [];
+        private readonly Dictionary<(NodeIdentifier NodeId, int Port), (NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId)> _occupiedPorts = [];
         private readonly ConcurrentQueue<PortLeaseRequest> _automaticAcquireRequests = new();
-        private long _version;
 
         internal InMemoryLeaseStore(bool shortRenewalLease, int automaticPort)
         {
@@ -1220,47 +1224,197 @@ public sealed class ConcreteFixtureLifecycleIntegrationTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (intent.Kind == PortLeaseIntentKind.Renew)
+            switch (intent.Kind)
             {
-                if (FailRenewals)
+                case PortLeaseIntentKind.Acquire when intent.Request is { } request:
                 {
-                    return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.DatabaseUnavailable));
+                    if (request.Port == 0)
+                    {
+                        _automaticAcquireRequests.Enqueue(request);
+                    }
+
+                    lock (_gate)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        RemoveExpiredLeases(now);
+                        var leaseKey = (request.NodeId, request.ServiceId, request.GenerationId);
+                        if (_leases.ContainsKey(leaseKey))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        int port;
+                        if (request.Port != 0)
+                        {
+                            port = request.Port;
+                        }
+                        else
+                        {
+                            var rangeStart = request.AutomaticPortRangeStart ?? _automaticPort;
+                            var rangeEnd = request.AutomaticPortRangeEnd ?? _automaticPort;
+                            port = _automaticPort >= rangeStart && _automaticPort <= rangeEnd &&
+                                !_occupiedPorts.ContainsKey((request.NodeId, _automaticPort))
+                                ? _automaticPort
+                                : FindAvailablePort(request.NodeId, rangeStart, rangeEnd) ?? 0;
+                            if (port == 0)
+                            {
+                                return ValueTask.FromResult(new PortLeaseOperationResult(
+                                    PortLeaseOperationStatus.Conflict));
+                            }
+                        }
+
+                        if (_occupiedPorts.ContainsKey((request.NodeId, port)))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        var lifetime = _shortRenewalLease
+                            ? TimeSpan.FromSeconds(10)
+                            : TimeSpan.FromSeconds(30);
+                        var lease = CreateLease(
+                            request.NodeId,
+                            request.ServiceId,
+                            request.GenerationId,
+                            port,
+                            now,
+                            lifetime,
+                            version: 1);
+                        _leases.Add(leaseKey, lease);
+                        _occupiedPorts.Add((request.NodeId, port), leaseKey);
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.Applied,
+                            lease));
+                    }
                 }
+                case PortLeaseIntentKind.Renew when intent.Renewal is { } renewal:
+                {
+                    if (FailRenewals)
+                    {
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.DatabaseUnavailable));
+                    }
 
-                var renewal = intent.Renewal!;
-                return ValueTask.FromResult(new PortLeaseOperationResult(
-                    PortLeaseOperationStatus.Applied,
-                    CreateLease(renewal.NodeId, renewal.ServiceId, renewal.Port)));
+                    lock (_gate)
+                    {
+                        var leaseKey = (renewal.NodeId, renewal.ServiceId, renewal.GenerationId);
+                        if (!_leases.TryGetValue(leaseKey, out var current))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.NotFound));
+                        }
+
+                        if (current.Port != renewal.Port || current.Version != renewal.LeaseVersion ||
+                            current.IsExpired(DateTimeOffset.UtcNow))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        var lease = CreateLease(
+                            renewal.NodeId,
+                            renewal.ServiceId,
+                            renewal.GenerationId,
+                            renewal.Port,
+                            current.AcquiredAt,
+                            _shortRenewalLease ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(30),
+                            checked(current.Version + 1));
+                        _leases[leaseKey] = lease;
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.Applied,
+                            lease));
+                    }
+                }
+                case PortLeaseIntentKind.Release when intent.Release is { } release:
+                {
+                    lock (_gate)
+                    {
+                        var leaseKey = (release.NodeId, release.ServiceId, release.GenerationId);
+                        if (!_leases.TryGetValue(leaseKey, out var released))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.NotFound));
+                        }
+
+                        if (released.Port != release.Port || released.Version != release.LeaseVersion)
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        _leases.Remove(leaseKey);
+                        var portKey = (release.NodeId, release.Port);
+                        if (_occupiedPorts.TryGetValue(portKey, out var currentOwner) &&
+                            currentOwner == leaseKey)
+                        {
+                            _occupiedPorts.Remove(portKey);
+                        }
+
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.Applied,
+                            released));
+                    }
+                }
+                default:
+                    return ValueTask.FromResult(new PortLeaseOperationResult(
+                        PortLeaseOperationStatus.Rejected));
             }
-
-            if (intent.Kind == PortLeaseIntentKind.Release)
-            {
-                return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.NotFound));
-            }
-
-            var request = intent.Request!;
-            if (request.Port == 0)
-            {
-                _automaticAcquireRequests.Enqueue(request);
-            }
-
-            var acquiredPort = request.Port == 0 ? _automaticPort : request.Port;
-            return ValueTask.FromResult(new PortLeaseOperationResult(
-                PortLeaseOperationStatus.Applied,
-                CreateLease(request.NodeId, request.ServiceId, acquiredPort)));
         }
 
-        private PortLease CreateLease(NodeIdentifier nodeId, Guid serviceId, int port)
+        private int? FindAvailablePort(NodeIdentifier nodeId, int rangeStart, int rangeEnd)
+        {
+            for (var port = rangeStart; port <= rangeEnd; port++)
+            {
+                if (!_occupiedPorts.ContainsKey((nodeId, port)))
+                {
+                    return port;
+                }
+            }
+
+            return null;
+        }
+
+        private void RemoveExpiredLeases(DateTimeOffset now)
+        {
+            foreach (var leaseKey in _leases
+                         .Where(value => value.Value.IsExpired(now))
+                         .Select(value => value.Key)
+                         .ToArray())
+            {
+                if (!_leases.TryGetValue(leaseKey, out var lease))
+                {
+                    continue;
+                }
+
+                _leases.Remove(leaseKey);
+                var portKey = (leaseKey.NodeId, lease.Port);
+                if (_occupiedPorts.TryGetValue(portKey, out var currentOwner) &&
+                    currentOwner == leaseKey)
+                {
+                    _occupiedPorts.Remove(portKey);
+                }
+            }
+        }
+
+        private static PortLease CreateLease(
+            NodeIdentifier nodeId,
+            Guid serviceId,
+            Guid generationId,
+            int port,
+            DateTimeOffset acquiredAt,
+            TimeSpan lifetime,
+            long version)
         {
             var now = DateTimeOffset.UtcNow;
-            var lifetime = _shortRenewalLease ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(30);
             return new PortLease(
                 nodeId,
                 serviceId,
+                generationId,
                 port,
-                now,
+                acquiredAt,
                 now.Add(lifetime),
-                Interlocked.Increment(ref _version));
+                version);
         }
     }
 

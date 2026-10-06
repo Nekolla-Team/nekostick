@@ -41,6 +41,26 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
 
     private static readonly Guid ForeignServiceId =
         Guid.Parse("018f0f00-0000-7000-8000-000000000106");
+    private static readonly Guid OwnerEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000121");
+
+    private static readonly Guid ForeignEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000122");
+
+    private static readonly Guid HostEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000123");
+
+    private static readonly Guid ExpiredEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000124");
+
+    private static readonly Guid UpdatedOwnerEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000125");
+
+    private static readonly Guid UpdatedForeignEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000126");
+
+    private static readonly Guid UpdatedHostEndpointGenerationId =
+        Guid.Parse("018f0f00-0000-7000-8000-000000000127");
 
     private static readonly Guid ForeignRouteId =
         Guid.Parse("018f0f00-0000-7000-8000-000000000107");
@@ -887,20 +907,24 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         [
             new HostServiceEndpointLease(
                 OwnerServiceId,
+                OwnerEndpointGenerationId,
                 ownerPort,
                 activeUntil,
                 OwnerExtensionId),
             new HostServiceEndpointLease(
                 ForeignServiceId,
+                ForeignEndpointGenerationId,
                 foreignPort,
                 activeUntil,
                 ForeignExtensionId),
             new HostServiceEndpointLease(
                 HostServiceId,
+                HostEndpointGenerationId,
                 hostPort,
                 activeUntil),
             new HostServiceEndpointLease(
                 expiredServiceId,
+                ExpiredEndpointGenerationId,
                 expiredPort,
                 DateTimeOffset.UtcNow.AddMinutes(-1),
                 OwnerExtensionId)
@@ -913,6 +937,9 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.True(published[ForeignServiceId].IsActive(publishedAt));
         Assert.True(published[HostServiceId].IsActive(publishedAt));
         Assert.Equal(OwnerExtensionId, published[OwnerServiceId].OwnerExtensionId);
+        Assert.Equal(OwnerEndpointGenerationId, published[OwnerServiceId].GenerationId);
+        Assert.Equal(ForeignEndpointGenerationId, published[ForeignServiceId].GenerationId);
+        Assert.Equal(HostEndpointGenerationId, published[HostServiceId].GenerationId);
         Assert.Equal(ForeignExtensionId, published[ForeignServiceId].OwnerExtensionId);
         Assert.Null(published[HostServiceId].OwnerExtensionId);
         Assert.DoesNotContain(expiredServiceId, published.Keys);
@@ -921,9 +948,11 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.Single(ownerSnapshot);
         Assert.Equal(OwnerServiceId, ownerSnapshot[0].ServiceId);
         Assert.Equal(ownerPort, ownerSnapshot[0].Port);
+        Assert.Equal(OwnerEndpointGenerationId, ownerSnapshot[0].GenerationId);
         var ownerResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
             await owner.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
         Assert.Equal(ownerSnapshot[0], ownerResolution.Lease);
+        Assert.Equal(OwnerEndpointGenerationId, ownerResolution.Lease.GenerationId);
         AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
         AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
         AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(expiredServiceId, cancellationToken));
@@ -935,10 +964,12 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         var foreignResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
             await foreign.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
         Assert.Equal(foreignSnapshot[0], foreignResolution.Lease);
+        Assert.Equal(ForeignEndpointGenerationId, foreignSnapshot[0].GenerationId);
         AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
         AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
         AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(expiredServiceId, cancellationToken));
 
+        Assert.Equal(ForeignEndpointGenerationId, foreignResolution.Lease.GenerationId);
         const int updatedOwnerPort = 21011;
         const int updatedForeignPort = 21012;
         const int updatedHostPort = 21013;
@@ -946,19 +977,23 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         [
             new HostServiceEndpointLease(
                 OwnerServiceId,
+                UpdatedOwnerEndpointGenerationId,
                 updatedOwnerPort,
                 DateTimeOffset.UtcNow.AddMinutes(1),
                 OwnerExtensionId),
             new HostServiceEndpointLease(
                 ForeignServiceId,
+                UpdatedForeignEndpointGenerationId,
                 updatedForeignPort,
                 DateTimeOffset.UtcNow.AddMinutes(1),
                 ForeignExtensionId),
             new HostServiceEndpointLease(
                 HostServiceId,
+                UpdatedHostEndpointGenerationId,
                 updatedHostPort,
                 DateTimeOffset.UtcNow.AddMinutes(1))
         ]);
+        Assert.Equal(UpdatedHostEndpointGenerationId, harness.EndpointPublisher.Current[HostServiceId].GenerationId);
 
         Assert.Equal(ownerPort, published[OwnerServiceId].Port);
         Assert.Equal(ownerPort, ownerSnapshot[0].Port);
@@ -966,10 +1001,12 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         var updatedOwnerResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
             await owner.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
         Assert.Equal(updatedOwnerPort, updatedOwnerResolution.Lease.Port);
+        Assert.Equal(UpdatedOwnerEndpointGenerationId, updatedOwnerResolution.Lease.GenerationId);
         var updatedForeignResolution = Assert.IsType<ExtensionEndpointResolutionSuccessResult>(
             await foreign.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
         Assert.Equal(updatedForeignPort, updatedForeignResolution.Lease.Port);
         AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(ForeignServiceId, cancellationToken));
+        Assert.Equal(UpdatedForeignEndpointGenerationId, updatedForeignResolution.Lease.GenerationId);
         AssertEndpointNotFound(await owner.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
         AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(OwnerServiceId, cancellationToken));
         AssertEndpointNotFound(await foreign.Endpoints.ResolveAsync(HostServiceId, cancellationToken));
@@ -1486,9 +1523,13 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
         Assert.Empty(harness.StoppedServiceIds);
         Assert.Equal([HostServiceId], harness.AcquiredLeaseServiceIds);
         Assert.Empty(harness.ReleasedLeaseServiceIds);
-        Assert.Equal(expectedLease, harness.GetCurrentLease(HostServiceId));
-        Assert.Equal([HostServiceId], harness.EndpointPublisher.Current.Keys);
-        Assert.Equal(expectedEndpoint, harness.EndpointPublisher.Current[HostServiceId]);
+        var currentLease = Assert.IsType<PortLease>(harness.GetCurrentLease(HostServiceId));
+        var currentEndpoint = harness.EndpointPublisher.Current[HostServiceId];
+        Assert.Equal(expectedLease, currentLease);
+        Assert.Equal(expectedEndpoint, currentEndpoint);
+        Assert.Equal(expectedLease.GenerationId, currentLease.GenerationId);
+        Assert.Equal(expectedLease.GenerationId, expectedEndpoint.GenerationId);
+        Assert.Equal(expectedLease.GenerationId, currentEndpoint.GenerationId);
     }
 
     private static async Task AssertConfigurationNotificationAsync(
@@ -2002,15 +2043,27 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
 
     private sealed class TestPortLeaseStore : IPortLeaseStore
     {
-        private readonly ConcurrentDictionary<Guid, PortLease> leases = new();
+        private readonly object gate = new();
+        private readonly Dictionary<(NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId), PortLease> leases = [];
+        private readonly Dictionary<(NodeIdentifier NodeId, int Port), (NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId)> occupiedPorts = [];
+        private readonly Dictionary<Guid, (NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId)> currentLeaseKeys = [];
         private readonly ConcurrentQueue<Guid> acquiredServiceIds = new();
         private readonly ConcurrentQueue<Guid> releasedServiceIds = new();
 
         internal ImmutableArray<Guid> AcquiredServiceIds => acquiredServiceIds.ToImmutableArray();
         internal ImmutableArray<Guid> ReleasedServiceIds => releasedServiceIds.ToImmutableArray();
 
-        internal PortLease? GetCurrentLease(Guid serviceId) =>
-            leases.TryGetValue(serviceId, out var lease) ? lease : null;
+        internal PortLease? GetCurrentLease(Guid serviceId)
+        {
+            lock (gate)
+            {
+                return currentLeaseKeys.TryGetValue(serviceId, out var leaseKey) &&
+                    leases.TryGetValue(leaseKey, out var lease) &&
+                    !lease.IsExpired(DateTimeOffset.UtcNow)
+                    ? lease
+                    : null;
+            }
+        }
 
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
@@ -2022,55 +2075,179 @@ public sealed class PostgresExtensionCapabilityIntegrationTests
                 case PortLeaseIntentKind.Acquire when intent.Request is { } request:
                 {
                     acquiredServiceIds.Enqueue(request.ServiceId);
-                    var now = DateTimeOffset.UtcNow;
-                    var port = request.AutomaticPortRangeStart ?? 21000;
-                    var lease = new PortLease(
-                        request.NodeId,
-                        request.ServiceId,
-                        port,
-                        now,
-                        now.AddMinutes(1),
-                        version: 1);
-                    leases[request.ServiceId] = lease;
-                    return ValueTask.FromResult(new PortLeaseOperationResult(
-                        PortLeaseOperationStatus.Applied,
-                        lease));
+                    lock (gate)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        RemoveExpiredLeases(now);
+                        var leaseKey = (request.NodeId, request.ServiceId, request.GenerationId);
+                        if (leases.ContainsKey(leaseKey))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        var port = request.Port;
+                        if (port == 0)
+                        {
+                            var rangeStart = request.AutomaticPortRangeStart ?? 21000;
+                            var rangeEnd = request.AutomaticPortRangeEnd ?? rangeStart;
+                            port = rangeStart;
+                            while (port <= rangeEnd && occupiedPorts.ContainsKey((request.NodeId, port)))
+                            {
+                                port++;
+                            }
+
+                            if (port > rangeEnd)
+                            {
+                                return ValueTask.FromResult(new PortLeaseOperationResult(
+                                    PortLeaseOperationStatus.Conflict));
+                            }
+                        }
+
+                        if (occupiedPorts.ContainsKey((request.NodeId, port)))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        var lease = new PortLease(
+                            request.NodeId,
+                            request.ServiceId,
+                            request.GenerationId,
+                            port,
+                            now,
+                            now.AddMinutes(1),
+                            version: 1);
+                        leases.Add(leaseKey, lease);
+                        occupiedPorts.Add((request.NodeId, port), leaseKey);
+                        currentLeaseKeys[request.ServiceId] = leaseKey;
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.Applied,
+                            lease));
+                    }
                 }
                 case PortLeaseIntentKind.Renew when intent.Renewal is { } renewal:
                 {
-                    if (!leases.TryGetValue(renewal.ServiceId, out var current))
+                    lock (gate)
                     {
-                        return ValueTask.FromResult(new PortLeaseOperationResult(
-                            PortLeaseOperationStatus.NotFound));
-                    }
+                        var leaseKey = (renewal.NodeId, renewal.ServiceId, renewal.GenerationId);
+                        if (!leases.TryGetValue(leaseKey, out var current))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.NotFound));
+                        }
 
-                    var now = DateTimeOffset.UtcNow;
-                    var lease = new PortLease(
-                        renewal.NodeId,
-                        renewal.ServiceId,
-                        renewal.Port,
-                        current.AcquiredAt,
-                        now.AddMinutes(1),
-                        checked(current.Version + 1));
-                    leases[renewal.ServiceId] = lease;
-                    return ValueTask.FromResult(new PortLeaseOperationResult(
-                        PortLeaseOperationStatus.Applied,
-                        lease));
+                        if (current.Port != renewal.Port || current.Version != renewal.LeaseVersion ||
+                            current.IsExpired(DateTimeOffset.UtcNow))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        var now = DateTimeOffset.UtcNow;
+                        var lease = new PortLease(
+                            renewal.NodeId,
+                            renewal.ServiceId,
+                            renewal.GenerationId,
+                            renewal.Port,
+                            current.AcquiredAt,
+                            now.AddMinutes(1),
+                            checked(current.Version + 1));
+                        leases[leaseKey] = lease;
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.Applied,
+                            lease));
+                    }
                 }
                 case PortLeaseIntentKind.Release when intent.Release is { } release:
+                {
                     releasedServiceIds.Enqueue(release.ServiceId);
-                    if (!leases.TryRemove(release.ServiceId, out var released))
+                    lock (gate)
                     {
-                        return ValueTask.FromResult(new PortLeaseOperationResult(
-                            PortLeaseOperationStatus.NotFound));
-                    }
+                        var leaseKey = (release.NodeId, release.ServiceId, release.GenerationId);
+                        if (!leases.TryGetValue(leaseKey, out var released))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.NotFound));
+                        }
 
-                    return ValueTask.FromResult(new PortLeaseOperationResult(
-                        PortLeaseOperationStatus.Applied,
-                        released));
+                        if (released.Port != release.Port || released.Version != release.LeaseVersion)
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(
+                                PortLeaseOperationStatus.Conflict));
+                        }
+
+                        RemoveLease(leaseKey, released, DateTimeOffset.UtcNow);
+                        return ValueTask.FromResult(new PortLeaseOperationResult(
+                            PortLeaseOperationStatus.Applied,
+                            released));
+                    }
+                }
                 default:
                     return ValueTask.FromResult(new PortLeaseOperationResult(
                         PortLeaseOperationStatus.Rejected));
+            }
+        }
+
+        private void RemoveExpiredLeases(DateTimeOffset now)
+        {
+            foreach (var leaseKey in leases
+                         .Where(value => value.Value.IsExpired(now))
+                         .Select(value => value.Key)
+                         .ToArray())
+            {
+                RemoveLease(leaseKey, leases[leaseKey], now);
+            }
+        }
+
+        private void RemoveLease(
+            (NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId) leaseKey,
+            PortLease lease,
+            DateTimeOffset now)
+        {
+            leases.Remove(leaseKey);
+            var portKey = (leaseKey.NodeId, lease.Port);
+            if (occupiedPorts.TryGetValue(portKey, out var currentOwner) && currentOwner == leaseKey)
+            {
+                occupiedPorts.Remove(portKey);
+            }
+
+            if (currentLeaseKeys.TryGetValue(leaseKey.ServiceId, out var currentLeaseKey) &&
+                currentLeaseKey == leaseKey)
+            {
+                RefreshCurrentLease(leaseKey.ServiceId, now);
+            }
+        }
+
+        private void RefreshCurrentLease(Guid serviceId, DateTimeOffset now)
+        {
+            var hasLease = false;
+            var latestKey = default((NodeIdentifier NodeId, Guid ServiceId, Guid GenerationId));
+            var latestAcquiredAt = DateTimeOffset.MinValue;
+            foreach (var entry in leases)
+            {
+                if (entry.Key.ServiceId != serviceId || entry.Value.IsExpired(now))
+                {
+                    continue;
+                }
+
+                if (!hasLease || entry.Value.AcquiredAt > latestAcquiredAt ||
+                    (entry.Value.AcquiredAt == latestAcquiredAt &&
+                        entry.Key.GenerationId.CompareTo(latestKey.GenerationId) > 0))
+                {
+                    hasLease = true;
+                    latestKey = entry.Key;
+                    latestAcquiredAt = entry.Value.AcquiredAt;
+                }
+            }
+
+            if (hasLease)
+            {
+                currentLeaseKeys[serviceId] = latestKey;
+            }
+            else
+            {
+                currentLeaseKeys.Remove(serviceId);
             }
         }
     }

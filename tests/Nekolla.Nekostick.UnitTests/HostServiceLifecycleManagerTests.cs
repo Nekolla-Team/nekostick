@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
@@ -60,6 +61,400 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.True(publisher.Current.ContainsKey(EagerServiceId));
         Assert.False(publisher.Current.ContainsKey(LazyServiceId));
         Assert.False(publisher.Current.ContainsKey(DisabledServiceId));
+    }
+
+    [Fact]
+    public async Task DependencyGraphRefreshPublishesOnlyAfterEveryActiveConsumerIsReady()
+    {
+        var root = CreateServiceWithLaunch(
+            EagerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "version-one"));
+        var rootValue = string.Concat("${PUBLISHED_VALUE@", root.Id, "}");
+        var dependent = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("DEPENDENCY_VALUE", rootValue));
+        var dependentValue = string.Concat("${DEPENDENCY_VALUE@", dependent.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("CONSUMER_VALUE", dependentValue));
+        var unusedConsumer = CreateServiceWithLaunch(
+            DisabledServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("UNUSED_VALUE", rootValue));
+        var independent = CreateServiceWithLaunch(
+            LazyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("STABLE_VALUE", "independent"));
+        var snapshotV1 = CreateSnapshot(1, root, dependent, consumer, unusedConsumer, independent);
+        var holder = new HostConfigurationSnapshotHolder();
+        Assert.True(holder.TryReplace(snapshotV1));
+        var runtime = CreateRuntimeState(snapshotV1, holder);
+        await using var runtimeRegistry = new HostServiceRuntimeRegistry();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var probe = new StartupBarrierProbe(consumer.Id, blockedCall: 2);
+        var executor = new RecordingExecutor();
+        var manager = new HostServiceLifecycleManager(
+            executor,
+            probe,
+            new RecordingLeaseStore(),
+            holder,
+            publisher,
+            runtime,
+            new HostRuntimeOptions("Host=unit-test", "node", readOnly: false),
+            NullLogger<HostServiceLifecycleManager>.Instance,
+            new MicroserviceDrainTracker(),
+            new HostNodeOptions(skipExtensions: true, disableSupervisor: true, readOnly: false),
+            runtimeManager: null,
+            runtimeRegistry: runtimeRegistry);
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(
+                    snapshotV1,
+                    consumer.Id,
+                    TestContext.Current.CancellationToken)).Status);
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(
+                    snapshotV1,
+                    independent.Id,
+                    TestContext.Current.CancellationToken)).Status);
+            var previousView = publisher.CommittedView;
+            Assert.Equal(4, previousView.Services.Count);
+            Assert.Equal(4, previousView.Endpoints.Count);
+            var previousRuntime = runtimeRegistry.ReadCurrent().ToArray();
+
+            var rootV2 = CreateServiceWithLaunch(
+                root.Id,
+                ServiceStartMode.Lazy,
+                enabled: true,
+                arguments: ImmutableArray<string>.Empty,
+                environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "version-two"),
+                version: 2);
+            var snapshotV2 = CreateSnapshot(2, rootV2, dependent, consumer, unusedConsumer, independent);
+            Assert.True(holder.TryReplace(snapshotV2));
+
+            var refresh = manager.EnsureReadyAsync(
+                snapshotV2,
+                root.Id,
+                TestContext.Current.CancellationToken).AsTask();
+            await probe.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.Same(previousView, publisher.CommittedView);
+            Assert.Equal(
+                previousView.Endpoints.OrderBy(static item => item.Key),
+                publisher.Current.OrderBy(static item => item.Key));
+            Assert.Equal(previousRuntime, runtimeRegistry.ReadCurrent().ToArray());
+            Assert.DoesNotContain(unusedConsumer.Id, executor.StartedServices);
+
+            probe.Release();
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await refresh.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Status);
+
+            var committed = publisher.CommittedView;
+            Assert.Equal(4, committed.Services.Count);
+            Assert.Equal(4, committed.Endpoints.Count);
+            Assert.NotEqual(previousView.Services[root.Id].GenerationId, committed.Services[root.Id].GenerationId);
+            Assert.NotEqual(previousView.Services[dependent.Id].GenerationId, committed.Services[dependent.Id].GenerationId);
+            Assert.NotEqual(previousView.Services[consumer.Id].GenerationId, committed.Services[consumer.Id].GenerationId);
+            Assert.Equal(dependent.Version, committed.Services[dependent.Id].ServiceVersion);
+            Assert.Equal(previousView.Services[independent.Id].GenerationId, committed.Services[independent.Id].GenerationId);
+            Assert.Equal("version-two", committed.Services[dependent.Id].ResolvedEnvironment["DEPENDENCY_VALUE"]);
+            Assert.Equal("version-two", committed.Services[consumer.Id].ResolvedEnvironment["CONSUMER_VALUE"]);
+            Assert.Equal(consumer.Version, committed.Services[consumer.Id].ServiceVersion);
+            Assert.Equal(
+                committed.Services[root.Id].GenerationId,
+                committed.Services[dependent.Id].DependencyBindings[root.Id].GenerationId);
+            Assert.Equal(
+                committed.Services[dependent.Id].GenerationId,
+                committed.Services[consumer.Id].DependencyBindings[dependent.Id].GenerationId);
+            Assert.Equal(7, executor.StartedServices.Count);
+            Assert.DoesNotContain(unusedConsumer.Id, executor.StartedServices);
+
+            var runtimeById = runtimeRegistry.ReadCurrent().ToDictionary(static item => item.ServiceId);
+            foreach (var service in committed.Services)
+            {
+                Assert.Equal(service.Value.GenerationId, runtimeById[service.Key].GenerationId);
+                Assert.Equal(service.Value.Endpoint, committed.Endpoints[service.Key]);
+            }
+            var committedRuntime = runtimeRegistry.ReadCurrent().ToArray();
+            var committedView = publisher.CommittedView;
+            var previousRootRuntime = previousView.Services[root.Id].Runtime;
+            var exitTime = DateTimeOffset.UtcNow;
+            var staleExit = new HostServiceRuntimeSnapshot(
+                previousRootRuntime.ServiceId,
+                previousRootRuntime.ConfigurationVersion,
+                previousRootRuntime.ProcessId,
+                previousRootRuntime.ProcessInstanceId,
+                previousRootRuntime.StartedAt,
+                exitTime,
+                previousRootRuntime.LastHealthAt,
+                ExtensionServiceLifecycleState.Failed,
+                previousRootRuntime.Health,
+                previousRootRuntime.OwnerExtensionId,
+                ExtensionServiceFailureStage.ProcessExit,
+                ExtensionServiceFailureCode.ProcessExited,
+                processExitCode: 17,
+                restartCount: previousRootRuntime.RestartCount,
+                stateEnteredAt: exitTime,
+                generationId: previousRootRuntime.GenerationId);
+            runtimeRegistry.Publish(
+                staleExit,
+                serviceVersion: root.Version,
+                enabled: true,
+                preserveServiceVersion: true);
+            Assert.Equal(committedRuntime, runtimeRegistry.ReadCurrent().ToArray());
+            Assert.Same(committedView, publisher.CommittedView);
+        }
+        finally
+        {
+            probe.Release();
+            await manager.StopAsync(CancellationToken.None);
+        }
+    }
+
+
+    [Fact]
+    public async Task DependencyIdentityChangeRebindsWithoutRestartWhenLaunchInputsMatch()
+    {
+        var dependency = CreateServiceWithLaunch(
+            EagerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "stable"));
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty.Add("REMOTE_VALUE", remoteValue));
+        var snapshot = CreateSnapshot(1, dependency, consumer);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = CreateManager(snapshot, executor, new RecordingProbe(), publisher, leaseStore);
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(
+                    snapshot,
+                    consumer.Id,
+                    TestContext.Current.CancellationToken)).Status);
+            var previousView = publisher.CommittedView;
+            var previousDependencyGeneration = previousView.Services[dependency.Id].GenerationId;
+            var previousConsumerGeneration = previousView.Services[consumer.Id].GenerationId;
+
+            var restart = await manager.RestartAsync(dependency.Id, TestContext.Current.CancellationToken);
+
+            Assert.True(restart.IsSuccess, string.Join(" | ", restart.Errors.Select(error => $"{error.Code}: {error.Message}")));
+            var committed = publisher.CommittedView;
+            Assert.NotEqual(previousDependencyGeneration, committed.Services[dependency.Id].GenerationId);
+            Assert.Equal(previousConsumerGeneration, committed.Services[consumer.Id].GenerationId);
+            Assert.Equal(
+                committed.Services[dependency.Id].GenerationId,
+                committed.Services[consumer.Id].DependencyBindings[dependency.Id].GenerationId);
+            Assert.Equal("stable", committed.Services[consumer.Id].ResolvedEnvironment["REMOTE_VALUE"]);
+            await manager.PublishVerifiedEndpointsAsync(committed.Endpoints.Values.ToArray());
+            Assert.Same(committed, publisher.CommittedView);
+            Assert.Equal(committed.Endpoints[consumer.Id], publisher.Current[consumer.Id]);
+            Assert.Equal(2, executor.StartedServices.Count(serviceId => serviceId == dependency.Id));
+            Assert.Single(executor.StartedServices, serviceId => serviceId == consumer.Id);
+        }
+        finally
+        {
+            await manager.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task ChangedDependencyReferencesRestartConsumerWhenExpandedInputsMatch()
+    {
+        var firstDependency = CreateServiceWithLaunch(
+            EagerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "same-value"));
+        var secondDependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "same-value"));
+        var firstValue = string.Concat("${PUBLISHED_VALUE@", firstDependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", firstValue),
+            environment: ImmutableDictionary<string, string>.Empty.Add("CONSUMER_VALUE", firstValue));
+        var snapshotV1 = CreateSnapshot(1, firstDependency, secondDependency, consumer);
+        var executor = new RecordingExecutor();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = CreateManager(
+            snapshotV1,
+            executor,
+            new RecordingProbe(),
+            publisher,
+            new RecordingLeaseStore(),
+            out var holder,
+            out _);
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(
+                    snapshotV1,
+                    consumer.Id,
+                    TestContext.Current.CancellationToken)).Status);
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(
+                    snapshotV1,
+                    secondDependency.Id,
+                    TestContext.Current.CancellationToken)).Status);
+            var previousView = publisher.CommittedView;
+            var previousConsumerGeneration = previousView.Services[consumer.Id].GenerationId;
+            var secondValue = string.Concat("${PUBLISHED_VALUE@", secondDependency.Id, "}");
+            var consumerWithNewEdge = CreateServiceWithLaunch(
+                consumer.Id,
+                ServiceStartMode.Lazy,
+                enabled: true,
+                arguments: ImmutableArray.Create("--value", secondValue),
+                environment: ImmutableDictionary<string, string>.Empty.Add("CONSUMER_VALUE", secondValue));
+            var snapshotV2 = CreateSnapshot(2, firstDependency, secondDependency, consumerWithNewEdge);
+            Assert.True(holder.TryReplace(snapshotV2));
+
+            var readiness = await manager.EnsureReadyAsync(
+                snapshotV2,
+                consumer.Id,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
+            var committed = publisher.CommittedView;
+            Assert.NotEqual(previousConsumerGeneration, committed.Services[consumer.Id].GenerationId);
+            Assert.Equal(consumer.Version, committed.Services[consumer.Id].ServiceVersion);
+            Assert.DoesNotContain(firstDependency.Id, committed.Services[consumer.Id].DependencyBindings.Keys);
+            Assert.Equal(
+                committed.Services[secondDependency.Id].GenerationId,
+                committed.Services[consumer.Id].DependencyBindings[secondDependency.Id].GenerationId);
+            Assert.Equal("same-value", committed.Services[consumer.Id].ResolvedEnvironment["CONSUMER_VALUE"]);
+            Assert.Equal(2, executor.StartedServices.Count(serviceId => serviceId == consumer.Id));
+        }
+        finally
+        {
+            await manager.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task AutomaticDependencyRestartRefreshesChangedInputsAtTheSameConfigurationVersion()
+    {
+        var dependency = CreateServiceWithLaunch(
+            EagerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "${PORT}"),
+            restartPolicy: Nekolla.Nekostick.Contracts.ServiceRestartPolicy.Always);
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("REMOTE_VALUE", remoteValue));
+        var snapshot = CreateSnapshot(1, dependency, consumer);
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var probe = new AutomaticDependencyRestartProbe(dependency.Id);
+        var manager = CreateManager(
+            snapshot,
+            new RecordingExecutor(),
+            probe,
+            publisher,
+            new RecordingLeaseStore());
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(
+                    snapshot,
+                    consumer.Id,
+                    TestContext.Current.CancellationToken)).Status);
+            var previousView = publisher.CommittedView;
+            var previousDependency = previousView.Services[dependency.Id];
+            var previousConsumer = previousView.Services[consumer.Id];
+            Assert.Equal("35000", previousDependency.ResolvedEnvironment["PUBLISHED_VALUE"]);
+            Assert.Equal("35000", previousConsumer.ResolvedEnvironment["REMOTE_VALUE"]);
+
+            var observeReadyHealth = typeof(HostServiceLifecycleManager).GetMethod(
+                "ObserveReadyHealthAsync",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(observeReadyHealth);
+            for (var failure = 0; failure < 3; failure++)
+            {
+                var observation = Assert.IsAssignableFrom<Task>(
+                    observeReadyHealth!.Invoke(manager, [TestContext.Current.CancellationToken]));
+                await observation.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            }
+
+            await probe.ReplacementHealthy.Task.WaitAsync(
+                TimeSpan.FromSeconds(10),
+                TestContext.Current.CancellationToken);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            HostServiceCommittedGraphView committed;
+            while (true)
+            {
+                committed = publisher.CommittedView;
+                if (committed.Services.TryGetValue(consumer.Id, out var committedConsumer) &&
+                    committedConsumer.ResolvedEnvironment.TryGetValue("REMOTE_VALUE", out var remoteValueAfterRestart) &&
+                    !string.Equals(remoteValueAfterRestart, previousConsumer.ResolvedEnvironment["REMOTE_VALUE"], StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(10), timeout.Token);
+            }
+
+            var updatedDependency = committed.Services[dependency.Id];
+            var updatedConsumer = committed.Services[consumer.Id];
+            Assert.Equal(1, committed.ConfigurationVersion);
+            Assert.NotEqual(previousDependency.GenerationId, updatedDependency.GenerationId);
+            Assert.NotEqual(previousConsumer.GenerationId, updatedConsumer.GenerationId);
+            Assert.Equal(
+                updatedDependency.GenerationId,
+                updatedConsumer.DependencyBindings[dependency.Id].GenerationId);
+            Assert.Equal(
+                updatedDependency.ResolvedEnvironment["PUBLISHED_VALUE"],
+                updatedConsumer.ResolvedEnvironment["REMOTE_VALUE"]);
+        }
+        finally
+        {
+            await manager.StopAsync(CancellationToken.None);
+        }
     }
 
     [Fact]
@@ -481,15 +876,21 @@ public sealed class HostServiceLifecycleManagerTests
     [Fact]
     public async Task RemoteTemplateResolvesPublishedDependencyEnvironment()
     {
-        var dependency = CreateService(DependencyServiceId, ServiceStartMode.Lazy, enabled: true);
+        var dependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "ready-dependency"));
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
         var consumer = CreateServiceWithLaunch(
             ConsumerServiceId,
             ServiceStartMode.Lazy,
             enabled: true,
-            arguments: ImmutableArray<string>.Empty,
-            environment: ImmutableDictionary<string, string>.Empty.Add(
-                "REMOTE_PORT",
-                string.Concat("${PORT@", DependencyServiceId, "}")));
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty
+                .Add("REMOTE_PORT", string.Concat("${PORT@", DependencyServiceId, "}"))
+                .Add("REMOTE_VALUE", remoteValue));
         var snapshot = CreateSnapshot(dependency, consumer);
         var executor = new RecordingExecutor();
         var manager = CreateManager(
@@ -509,7 +910,436 @@ public sealed class HostServiceLifecycleManagerTests
         var specification = Assert.Single(
             executor.StartedSpecifications,
             value => value.ServiceId == consumer.Id);
+        Assert.Equal(ImmutableArray.Create("--value", "ready-dependency"), specification.Arguments);
         Assert.Equal("35000", specification.Environment.Values["REMOTE_PORT"]);
+        Assert.Equal("ready-dependency", specification.Environment.Values["REMOTE_VALUE"]);
+    }
+
+    [Fact]
+    public async Task WaitingDependencyDoesNotBypassReadinessThroughEnvironmentEntry()
+    {
+        var dependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty,
+            fileName: System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"nekostick-missing-{Guid.NewGuid():N}"));
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", dependency.Id, "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        var dependencyReadiness = await manager.EnsureReadyAsync(
+            snapshot,
+            dependency.Id,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, dependencyReadiness.Status);
+        Assert.True(manager.TryGet(dependency.Id, out var waitingDependency));
+        Assert.Equal(ExtensionServiceLifecycleState.Waiting, waitingDependency.LifecycleState);
+
+        var consumerReadiness = await manager.EnsureReadyAsync(
+            snapshot,
+            consumer.Id,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, consumerReadiness.Status);
+        Assert.DoesNotContain(consumer.Id, executor.StartedServices);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task StaleEnvironmentWaitsForConfiguredDependencyGeneration()
+    {
+        var dependencyV1 = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "version-one"));
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependencyV1.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty
+                .Add("REMOTE_VALUE", remoteValue)
+                .Add("REMOTE_PORT", string.Concat("${PORT@", dependencyV1.Id, "}")));
+        var snapshotV1 = CreateSnapshot(1, dependencyV1, consumer);
+        var probe = new StartupBarrierProbe(dependencyV1.Id, blockedCall: 2);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshotV1,
+            executor,
+            probe,
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore(),
+            out var holder,
+            out _);
+
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await manager.EnsureReadyAsync(snapshotV1, dependencyV1.Id, TestContext.Current.CancellationToken)).Status);
+        var dependencyV2 = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "version-two"),
+            version: 2);
+        var snapshotV2 = CreateSnapshot(2, dependencyV2, consumer);
+        Assert.True(holder.TryReplace(snapshotV2));
+
+        var consumerStartup = manager.EnsureReadyAsync(
+            snapshotV2,
+            consumer.Id,
+            TestContext.Current.CancellationToken).AsTask();
+        await probe.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.False(consumerStartup.IsCompleted);
+        Assert.DoesNotContain(consumer.Id, executor.StartedServices);
+
+        probe.Release();
+        var readiness = await consumerStartup.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
+        var specification = Assert.Single(
+            executor.StartedSpecifications,
+            value => value.ServiceId == consumer.Id);
+        Assert.Equal(ImmutableArray.Create("--value", "version-two"), specification.Arguments);
+        Assert.Equal("version-two", specification.Environment.Values["REMOTE_VALUE"]);
+        Assert.Equal("35001", specification.Environment.Values["REMOTE_PORT"]);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ManualDependencyRestartCancelsAndRebuildsAffectedGraph()
+    {
+        var dependencyV1 = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: ImmutableDictionary<string, string>.Empty.Add("PUBLISHED_VALUE", "version-one"));
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependencyV1.Id, "}");
+        var consumerV1 = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty.Add("REMOTE_VALUE", remoteValue));
+        var snapshotV1 = CreateSnapshot(1, dependencyV1, consumerV1);
+        var probe = new StartupBarrierProbe(consumerV1.Id, blockedCall: 2);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshotV1,
+            executor,
+            probe,
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out var holder,
+            out _);
+
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await manager.EnsureReadyAsync(snapshotV1, dependencyV1.Id, TestContext.Current.CancellationToken)).Status);
+        var originalDependencyLease = Assert.Single(
+            leaseStore.HeldLeases,
+            value => value.ServiceId == dependencyV1.Id);
+        Assert.Equal(
+            HostServiceReadinessStatus.Ready,
+            (await manager.EnsureReadyAsync(snapshotV1, consumerV1.Id, TestContext.Current.CancellationToken)).Status);
+        Assert.True(manager.TryGet(consumerV1.Id, out var originalConsumer));
+        var originalProcessInstance = originalConsumer.ProcessInstanceId;
+        var originalConsumerLease = Assert.Single(
+            leaseStore.HeldLeases,
+            value => value.ServiceId == consumerV1.Id);
+        var consumerV2 = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty.Add("REMOTE_VALUE", remoteValue),
+            version: 2);
+        var consumerWarmupSnapshot = CreateSnapshot(2, dependencyV1, consumerV2);
+        Assert.True(holder.TryReplace(consumerWarmupSnapshot));
+
+        var consumerStartup = manager.EnsureReadyAsync(
+            consumerWarmupSnapshot,
+            consumerV2.Id,
+            TestContext.Current.CancellationToken).AsTask();
+        await probe.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var dependencyRestart = await manager.RestartAsync(
+            dependencyV1.Id,
+            TestContext.Current.CancellationToken);
+        Assert.True(dependencyRestart.IsSuccess);
+        var restartedDependencyLease = Assert.Single(
+            leaseStore.HeldLeases,
+            value => value.ServiceId == dependencyV1.Id);
+        Assert.NotEqual(originalDependencyLease.GenerationId, restartedDependencyLease.GenerationId);
+
+        probe.Release();
+        var consumerReadiness = await consumerStartup.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, consumerReadiness.Status);
+        Assert.True(manager.TryGet(consumerV2.Id, out var consumerState));
+        Assert.NotEqual(originalProcessInstance, consumerState.ProcessInstanceId);
+        Assert.Equal(ExtensionServiceFailureCode.None, consumerState.FailureCode);
+        var heldConsumerLease = Assert.Single(
+            leaseStore.HeldLeases,
+            value => value.ServiceId == consumerV2.Id);
+        Assert.NotEqual(originalConsumerLease.GenerationId, heldConsumerLease.GenerationId);
+        await manager.StopAsync(CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("generation")]
+    [InlineData("disabled")]
+    public async Task WaitingConsumerDoesNotRetryWithStaleDependencyBinding(string change)
+    {
+        var dependencyEnvironment = ImmutableDictionary<string, string>.Empty
+            .Add("PUBLISHED_VALUE", "ready-dependency");
+        var dependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: dependencyEnvironment);
+        var missingExecutable = System.IO.Path.Combine("/tmp", $"nekostick-missing-{Guid.NewGuid():N}");
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty
+                .Add("REMOTE_PORT", string.Concat("${PORT@", dependency.Id, "}"))
+                .Add("REMOTE_VALUE", remoteValue),
+            fileName: missingExecutable);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            leaseStore,
+            out var holder,
+            out _);
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(snapshot, dependency.Id, TestContext.Current.CancellationToken)).Status);
+            Assert.Equal(
+                HostServiceReadinessStatus.Unavailable,
+                (await manager.EnsureReadyAsync(snapshot, consumer.Id, TestContext.Current.CancellationToken)).Status);
+            Assert.True(manager.TryGet(consumer.Id, out var waitingConsumer));
+            Assert.Equal(ExtensionServiceLifecycleState.Waiting, waitingConsumer.LifecycleState);
+            Assert.DoesNotContain(consumer.Id, executor.StartedServices);
+            System.IO.File.WriteAllText(missingExecutable, string.Empty);
+
+            if (change == "generation")
+            {
+                var dependencyRestart = await manager.RestartAsync(
+                    dependency.Id,
+                    TestContext.Current.CancellationToken);
+                Assert.True(dependencyRestart.IsSuccess);
+            }
+            else
+            {
+                var disabledDependency = CreateServiceWithLaunch(
+                    DependencyServiceId,
+                    ServiceStartMode.Lazy,
+                    enabled: false,
+                    arguments: ImmutableArray<string>.Empty,
+                    environment: dependencyEnvironment);
+                Assert.True(holder.TryReplace(CreateSnapshot(2, disabledDependency, consumer)));
+            }
+
+            var acquireCount = leaseStore.AcquireIntents.Count;
+            await manager.RetryWaitingServicesAsync(
+                DateTimeOffset.MaxValue,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(acquireCount, leaseStore.AcquireIntents.Count);
+            Assert.DoesNotContain(consumer.Id, executor.StartedServices);
+            Assert.True(manager.TryGet(consumer.Id, out var unavailableConsumer));
+            Assert.Equal(ExtensionServiceFailureCode.DependencyUnavailable, unavailableConsumer.FailureCode);
+            Assert.Single(leaseStore.HeldLeases, value => value.ServiceId == dependency.Id);
+        }
+        finally
+        {
+            await manager.StopAsync(CancellationToken.None);
+            if (System.IO.File.Exists(missingExecutable))
+            {
+                System.IO.File.Delete(missingExecutable);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task WaitingConsumerRetriesToReadyWhileDependencyBindingIsUnchanged()
+    {
+        var dependencyEnvironment = ImmutableDictionary<string, string>.Empty
+            .Add("PUBLISHED_VALUE", "ready-dependency");
+        var dependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: dependencyEnvironment);
+        var missingExecutable = System.IO.Path.Combine("/tmp", $"nekostick-missing-{Guid.NewGuid():N}");
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty
+                .Add("REMOTE_PORT", string.Concat("${PORT@", dependency.Id, "}"))
+                .Add("REMOTE_VALUE", remoteValue),
+            fileName: missingExecutable);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var executor = new RecordingExecutor();
+        var manager = CreateManager(
+            snapshot,
+            executor,
+            new RecordingProbe(),
+            new HostServiceEndpointSnapshotPublisher(),
+            new RecordingLeaseStore());
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(snapshot, dependency.Id, TestContext.Current.CancellationToken)).Status);
+            Assert.Equal(
+                HostServiceReadinessStatus.Unavailable,
+                (await manager.EnsureReadyAsync(snapshot, consumer.Id, TestContext.Current.CancellationToken)).Status);
+            System.IO.File.WriteAllText(missingExecutable, string.Empty);
+
+            await manager.RetryWaitingServicesAsync(
+                DateTimeOffset.MaxValue,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(snapshot, consumer.Id, TestContext.Current.CancellationToken)).Status);
+            var specification = Assert.Single(
+                executor.StartedSpecifications,
+                value => value.ServiceId == consumer.Id);
+            Assert.Equal(ImmutableArray.Create("--value", "ready-dependency"), specification.Arguments);
+            Assert.Equal("35000", specification.Environment.Values["REMOTE_PORT"]);
+            Assert.Equal("ready-dependency", specification.Environment.Values["REMOTE_VALUE"]);
+        }
+        finally
+        {
+            await manager.StopAsync(CancellationToken.None);
+            if (System.IO.File.Exists(missingExecutable))
+            {
+                System.IO.File.Delete(missingExecutable);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task WaitingConsumerRetryDoesNotPromoteAfterDependencyGenerationChangesDuringHealthCheck()
+    {
+        var dependencyEnvironment = ImmutableDictionary<string, string>.Empty
+            .Add("PUBLISHED_VALUE", "ready-dependency");
+        var dependency = CreateServiceWithLaunch(
+            DependencyServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray<string>.Empty,
+            environment: dependencyEnvironment);
+        var missingExecutable = System.IO.Path.Combine("/tmp", $"nekostick-missing-{Guid.NewGuid():N}");
+        var remoteValue = string.Concat("${PUBLISHED_VALUE@", dependency.Id, "}");
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Lazy,
+            enabled: true,
+            arguments: ImmutableArray.Create("--value", remoteValue),
+            environment: ImmutableDictionary<string, string>.Empty
+                .Add("REMOTE_PORT", string.Concat("${PORT@", dependency.Id, "}"))
+                .Add("REMOTE_VALUE", remoteValue),
+            fileName: missingExecutable);
+        var snapshot = CreateSnapshot(dependency, consumer);
+        var probe = new StartupBarrierProbe(consumer.Id, blockedCall: 1);
+        var executor = new RecordingExecutor();
+        var leaseStore = new RecordingLeaseStore();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = CreateManager(snapshot, executor, probe, publisher, leaseStore);
+        Task? retry = null;
+
+        try
+        {
+            Assert.Equal(
+                HostServiceReadinessStatus.Ready,
+                (await manager.EnsureReadyAsync(snapshot, dependency.Id, TestContext.Current.CancellationToken)).Status);
+            Assert.Equal(
+                HostServiceReadinessStatus.Unavailable,
+                (await manager.EnsureReadyAsync(snapshot, consumer.Id, TestContext.Current.CancellationToken)).Status);
+            var originalDependencyLease = Assert.Single(
+                leaseStore.HeldLeases,
+                value => value.ServiceId == dependency.Id);
+            System.IO.File.WriteAllText(missingExecutable, string.Empty);
+
+            retry = manager.RetryWaitingServicesAsync(
+                DateTimeOffset.MaxValue,
+                TestContext.Current.CancellationToken);
+            await probe.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            var dependencyRestart = await manager.RestartAsync(
+                dependency.Id,
+                TestContext.Current.CancellationToken);
+            Assert.True(dependencyRestart.IsSuccess);
+            var restartedDependencyLease = Assert.Single(
+                leaseStore.HeldLeases,
+                value => value.ServiceId == dependency.Id);
+            Assert.NotEqual(originalDependencyLease.GenerationId, restartedDependencyLease.GenerationId);
+            probe.Release();
+            await retry.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.True(manager.TryGet(consumer.Id, out var consumerState));
+            Assert.Equal(ExtensionServiceFailureCode.DependencyUnavailable, consumerState.FailureCode);
+            Assert.DoesNotContain(consumer.Id, publisher.Current.Keys);
+            Assert.DoesNotContain(leaseStore.HeldLeases, value => value.ServiceId == consumer.Id);
+            Assert.Contains(consumer.Id, executor.StoppedServices);
+        }
+        finally
+        {
+            probe.Release();
+            if (retry is not null)
+            {
+                await retry;
+            }
+            await manager.StopAsync(CancellationToken.None);
+            if (System.IO.File.Exists(missingExecutable))
+            {
+                System.IO.File.Delete(missingExecutable);
+            }
+        }
     }
 
     [Fact]
@@ -573,6 +1403,43 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.DoesNotContain(MissingDependencyServiceId, executor.StartedServices);
         Assert.DoesNotContain(ConsumerServiceId, executor.StartedServices);
         Assert.True(publisher.Current.ContainsKey(EagerServiceId));
+    }
+
+    [Fact]
+    public async Task ReconcileContinuesAfterFailedGraphRefreshAtSameVersion()
+    {
+        var dependency = CreateService(DependencyServiceId, ServiceStartMode.Eager, enabled: true);
+        var consumer = CreateServiceWithLaunch(
+            ConsumerServiceId,
+            ServiceStartMode.Eager,
+            enabled: true,
+            arguments: [string.Concat("${PORT@", DependencyServiceId, "}")],
+            environment: ImmutableDictionary<string, string>.Empty);
+        var initial = CreateSnapshot(1, dependency, consumer);
+        var unrelated = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
+        var updated = CreateSnapshot(2, consumer, unrelated);
+        var executor = new RecordingExecutor();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = CreateManager(
+            initial,
+            executor,
+            new RecordingProbe(),
+            publisher,
+            new RecordingLeaseStore(),
+            out var holder,
+            out _);
+
+        await manager.ReconcileAsync(initial, TestContext.Current.CancellationToken);
+        Assert.Contains(DependencyServiceId, executor.StartedServices);
+        Assert.Contains(ConsumerServiceId, executor.StartedServices);
+
+        Assert.True(holder.TryReplace(updated));
+        await manager.ReconcileAsync(updated, TestContext.Current.CancellationToken);
+
+        Assert.Contains(DependencyServiceId, executor.StoppedServices);
+        Assert.Contains(EagerServiceId, executor.StartedServices);
+        Assert.Equal(1, executor.StartedServices.Count(value => value == EagerServiceId));
+        await manager.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -702,13 +1569,19 @@ public sealed class HostServiceLifecycleManagerTests
 
         var first = manager.EnsureReadyAsync(snapshot, service.Id, TestContext.Current.CancellationToken).AsTask();
         await executor.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        var second = manager.EnsureReadyAsync(snapshot, service.Id, TestContext.Current.CancellationToken).AsTask();
+        using var waiterCancellation = new CancellationTokenSource();
+        var second = manager.EnsureReadyAsync(snapshot, service.Id, waiterCancellation.Token).AsTask();
 
         Assert.False(second.IsCompleted);
-        executor.ReleaseStart();
-        var results = await Task.WhenAll(first, second);
+        waiterCancellation.Cancel();
+        var cancelledWaiter = await second;
+        Assert.Equal(HostServiceReadinessStatus.Cancelled, cancelledWaiter.Status);
+        Assert.False(first.IsCompleted);
 
-        Assert.All(results, result => Assert.Equal(HostServiceReadinessStatus.Ready, result.Status));
+        executor.ReleaseStart();
+        var readiness = await first;
+
+        Assert.Equal(HostServiceReadinessStatus.Ready, readiness.Status);
         Assert.Equal(new[] { LazyServiceId }, executor.StartedServices);
         Assert.Single(publisher.Current);
     }
@@ -735,7 +1608,7 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.True(publisher.Current.ContainsKey(service.Id));
     }
     [Fact]
-    public async Task PublishVerifiedEndpointsFiltersByReadyServiceAndPort()
+    public async Task PublishVerifiedEndpointsFiltersByReadyServiceGenerationAndPort()
     {
         var service = CreateService(EagerServiceId, ServiceStartMode.Eager, enabled: true);
         var snapshot = CreateSnapshot(service);
@@ -753,12 +1626,18 @@ public sealed class HostServiceLifecycleManagerTests
         publisher.Publish(Array.Empty<HostServiceEndpointLease>());
         await manager.PublishVerifiedEndpointsAsync(
         [
-            new HostServiceEndpointLease(service.Id, readyLease.Port + 1, readyLease.ExpiresAt)
+            new HostServiceEndpointLease(service.Id, readyLease.GenerationId, readyLease.Port + 1, readyLease.ExpiresAt),
+            new HostServiceEndpointLease(
+                service.Id,
+                Guid.Parse("018f0000-0000-7000-8000-000000000099"),
+                readyLease.Port,
+                readyLease.ExpiresAt)
         ]);
         Assert.Empty(publisher.Current);
 
         var matchingLease = new HostServiceEndpointLease(
             service.Id,
+            readyLease.GenerationId,
             readyLease.Port,
             readyLease.ExpiresAt);
         await manager.PublishVerifiedEndpointsAsync([matchingLease]);
@@ -904,7 +1783,7 @@ public sealed class HostServiceLifecycleManagerTests
         var snapshot = CreateSnapshot(service);
         var leaseStore = new RecordingLeaseStore
         {
-            ReturnedAcquireLease = CreateReturnedLease(service.Id, 35100, version: 7)
+            ReturnedAcquireLeaseFactory = request => CreateReturnedLease(request, 35100, version: 7)
         };
         var executor = new RecordingExecutor();
         var publisher = new HostServiceEndpointSnapshotPublisher();
@@ -929,7 +1808,7 @@ public sealed class HostServiceLifecycleManagerTests
         var snapshot = CreateSnapshot(service);
         var leaseStore = new RecordingLeaseStore
         {
-            ReturnedAcquireLease = CreateReturnedLease(service.Id, 35001, version: 8, expired: true)
+            ReturnedAcquireLeaseFactory = request => CreateReturnedLease(request, 35001, version: 8, expired: true)
         };
         var executor = new RecordingExecutor();
         var publisher = new HostServiceEndpointSnapshotPublisher();
@@ -955,8 +1834,8 @@ public sealed class HostServiceLifecycleManagerTests
         var snapshot = CreateSnapshot(service);
         var leaseStore = new RecordingLeaseStore
         {
-            ReturnedAcquireLease = CreateReturnedLease(
-                service.Id,
+            ReturnedAcquireLeaseFactory = request => CreateReturnedLease(
+                request,
                 35003,
                 version: 10,
                 nodeId: new NodeIdentifier("other-node"))
@@ -984,7 +1863,7 @@ public sealed class HostServiceLifecycleManagerTests
         var snapshot = CreateSnapshot(service);
         var leaseStore = new RecordingLeaseStore
         {
-            ReturnedAcquireLease = CreateReturnedLease(service.Id, 35004, version: 11, serviceIdOverride: EagerServiceId)
+            ReturnedAcquireLeaseFactory = request => CreateReturnedLease(request, 35004, version: 11, serviceIdOverride: EagerServiceId)
         };
         var executor = new RecordingExecutor();
         var publisher = new HostServiceEndpointSnapshotPublisher();
@@ -1002,6 +1881,38 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.Single(leaseStore.HeldLeases);
     }
 
+    [Fact]
+    public async Task MismatchedGenerationAutomaticLeaseIsNotReleased()
+    {
+        var service = CreateService(LazyServiceId, ServiceStartMode.Lazy, enabled: true);
+        var snapshot = CreateSnapshot(service);
+        var generationId = Guid.Parse("018f0000-0000-7000-8000-000000000098");
+        var leaseStore = new RecordingLeaseStore
+        {
+            ReturnedAcquireLeaseFactory = request => CreateReturnedLease(
+                request,
+                35005,
+                version: 12,
+                generationIdOverride: generationId)
+        };
+        var executor = new RecordingExecutor();
+        var publisher = new HostServiceEndpointSnapshotPublisher();
+        var manager = CreateManager(snapshot, executor, new RecordingProbe(), publisher, leaseStore);
+
+        var readiness = await manager.EnsureReadyAsync(
+            snapshot,
+            service.Id,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HostServiceReadinessStatus.Unavailable, readiness.Status);
+        Assert.Empty(executor.StartedServices);
+        Assert.Empty(publisher.Current);
+        Assert.Empty(leaseStore.ReleaseIntents);
+        var heldLease = Assert.Single(leaseStore.HeldLeases);
+        Assert.Equal(generationId, heldLease.GenerationId);
+        Assert.NotEqual(Assert.Single(leaseStore.AcquireIntents).Request!.GenerationId, heldLease.GenerationId);
+    }
+
     private static void AssertReleaseIntent(
         RecordingLeaseStore leaseStore,
         NodeIdentifier nodeId,
@@ -1016,22 +1927,26 @@ public sealed class HostServiceLifecycleManagerTests
         Assert.Equal(serviceId, release.ServiceId);
         Assert.Equal(port, release.Port);
         Assert.Equal(version, release.LeaseVersion);
+        Assert.Equal(Assert.Single(leaseStore.AcquireIntents).Request!.GenerationId, release.GenerationId);
     }
 
     private static PortLease CreateReturnedLease(
-        Guid serviceId,
+        PortLeaseRequest request,
         int port,
         long version,
         NodeIdentifier? nodeId = null,
         bool expired = false,
-        Guid? serviceIdOverride = null)
+        Guid? serviceIdOverride = null,
+        Guid? generationIdOverride = null)
     {
-        var owner = nodeId ?? new NodeIdentifier("node");
+        var owner = nodeId ?? request.NodeId;
+        var generationId = generationIdOverride ?? request.GenerationId;
         if (expired)
         {
             return new PortLease(
                 owner,
-                serviceIdOverride ?? serviceId,
+                serviceIdOverride ?? request.ServiceId,
+                generationId,
                 port,
                 DateTimeOffset.UnixEpoch,
                 DateTimeOffset.UnixEpoch.AddTicks(1),
@@ -1041,7 +1956,8 @@ public sealed class HostServiceLifecycleManagerTests
         var acquiredAt = DateTimeOffset.UtcNow;
         return new PortLease(
             owner,
-            serviceIdOverride ?? serviceId,
+            serviceIdOverride ?? request.ServiceId,
+            generationId,
             port,
             acquiredAt,
             acquiredAt.AddMinutes(5),
@@ -1174,23 +2090,27 @@ public sealed class HostServiceLifecycleManagerTests
         ServiceStartMode startMode,
         bool enabled,
         ImmutableArray<string> arguments,
-        ImmutableDictionary<string, string> environment) =>
+        ImmutableDictionary<string, string> environment,
+        long version = 1,
+        string? fileName = null,
+        Nekolla.Nekostick.Contracts.ServiceRestartPolicy restartPolicy =
+            Nekolla.Nekostick.Contracts.ServiceRestartPolicy.Never) =>
         new(
             id,
             enabled,
-            "/bin/sh",
+            fileName ?? "/bin/sh",
             arguments,
             "/tmp",
             environment,
             startMode,
-            Nekolla.Nekostick.Contracts.ServiceRestartPolicy.Never,
+            restartPolicy,
             new ServiceHealthCheckConfiguration(
                 ServiceHealthCheckType.Process,
                 null,
                 TimeSpan.FromSeconds(1)),
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
-            1);
+            version);
 
     private static ServiceConfiguration CreateServiceWithEnvironment(
         Guid id,
@@ -1212,12 +2132,13 @@ public sealed class HostServiceLifecycleManagerTests
             DateTimeOffset.UnixEpoch,
             1);
 
-    private sealed class RecordingExecutor : IProcessExecutor
+    private sealed class RecordingExecutor : IProcessInstanceExecutor, IProcessLiveness
     {
         private readonly TaskCompletionSource<bool> _startGate =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly bool _blockStart;
         private readonly bool _ignoreStartCancellation;
+        private readonly ConcurrentDictionary<ProcessInstanceId, Guid> _runningInstances = new();
 
         public RecordingExecutor(bool blockStart = false, bool ignoreStartCancellation = false)
         {
@@ -1257,7 +2178,13 @@ public sealed class HostServiceLifecycleManagerTests
             }
 
             AcceptedServices.Add(specification.ServiceId);
-            return new(ProcessOperationStatus.Accepted, ServiceStateReasonCode.StartAccepted);
+            var instanceId = new ProcessInstanceId(Guid.NewGuid());
+            _runningInstances[instanceId] = specification.ServiceId;
+            return new(
+                ProcessOperationStatus.Accepted,
+                ServiceStateReasonCode.StartAccepted,
+                instanceId,
+                startedAt: DateTimeOffset.UtcNow);
         }
 
         public ValueTask<ProcessOperationResult> StopAsync(
@@ -1265,24 +2192,57 @@ public sealed class HostServiceLifecycleManagerTests
             TimeSpan gracePeriod,
             CancellationToken cancellationToken = default)
         {
+            foreach (var pair in _runningInstances)
+            {
+                if (pair.Value == serviceId)
+                {
+                    _runningInstances.TryRemove(pair.Key, out _);
+                }
+            }
+
             StoppedServices.Add(serviceId);
             return ValueTask.FromResult(new ProcessOperationResult(
                 ProcessOperationStatus.Completed,
                 ServiceStateReasonCode.StopCompleted));
         }
+        public ValueTask<ProcessOperationResult> StopAsync(
+            ProcessInstanceId instanceId,
+            TimeSpan gracePeriod,
+            CancellationToken cancellationToken = default)
+        {
+            if (_runningInstances.TryRemove(instanceId, out var serviceId))
+            {
+                StoppedServices.Add(serviceId);
+            }
+
+            return ValueTask.FromResult(new ProcessOperationResult(
+                ProcessOperationStatus.Completed,
+                ServiceStateReasonCode.StopCompleted));
+        }
+
 
         public void ReleaseStart() => _startGate.TrySetResult(true);
+        bool IProcessLiveness.IsRunning(Guid serviceId) =>
+            _runningInstances.Any(pair => pair.Value == serviceId);
+
+        bool IProcessLiveness.IsRunning(Guid serviceId, ProcessInstanceId instanceId) =>
+            _runningInstances.TryGetValue(instanceId, out var activeServiceId) &&
+            activeServiceId == serviceId;
     }
 
     private sealed class RecordingLeaseStore : IPortLeaseStore
     {
+        private readonly ConcurrentDictionary<(Guid ServiceId, Guid GenerationId), PortLease> _heldLeases = new();
+        private readonly ConcurrentDictionary<(string NodeId, int Port), (Guid ServiceId, Guid GenerationId)> _portOwners = new();
+        private long _nextVersion;
+
         public TimeSpan AcquireLifetime { get; init; } = TimeSpan.FromMinutes(1);
         public bool FailRenewal { get; set; }
-        public PortLease? ReturnedAcquireLease { get; set; }
-        public List<PortLease> HeldLeases { get; } = [];
-        public List<PortLeaseIntent> ReleaseIntents { get; } = [];
-        public Queue<(PortLeaseOperationStatus Status, bool ValidLease)> AcquireResults { get; } = new();
-        public List<PortLeaseIntent> AcquireIntents { get; } = [];
+        public Func<PortLeaseRequest, PortLease>? ReturnedAcquireLeaseFactory { get; init; }
+        public IReadOnlyCollection<PortLease> HeldLeases => _heldLeases.Values.ToArray();
+        public ConcurrentQueue<PortLeaseIntent> ReleaseIntents { get; } = new();
+        public ConcurrentQueue<(PortLeaseOperationStatus Status, bool ValidLease)> AcquireResults { get; } = new();
+        public ConcurrentQueue<PortLeaseIntent> AcquireIntents { get; } = new();
 
         public ValueTask<PortLeaseOperationResult> ApplyAsync(
             PortLeaseIntent intent,
@@ -1290,44 +2250,94 @@ public sealed class HostServiceLifecycleManagerTests
         {
             if (intent.Kind == PortLeaseIntentKind.Acquire)
             {
-                AcquireIntents.Add(intent);
-                var outcome = AcquireResults.Count == 0
-                    ? (Status: PortLeaseOperationStatus.Applied, ValidLease: true)
-                    : AcquireResults.Dequeue();
+                AcquireIntents.Enqueue(intent);
+                var outcome = AcquireResults.TryDequeue(out var queued)
+                    ? queued
+                    : (Status: PortLeaseOperationStatus.Applied, ValidLease: true);
                 if (outcome.Status != PortLeaseOperationStatus.Applied)
                 {
                     return ValueTask.FromResult(new PortLeaseOperationResult(outcome.Status));
                 }
 
                 var request = intent.Request!;
-                var lease = ReturnedAcquireLease;
+                var lease = ReturnedAcquireLeaseFactory?.Invoke(request);
                 if (lease is null)
                 {
-                    var port = request.Port == 0
-                        ? request.AutomaticPortRangeStart!.Value
-                        : request.Port;
+                    var serviceId = outcome.ValidLease ? request.ServiceId : LazyServiceId;
+                    var generationId = request.GenerationId;
+                    var owner = (serviceId, generationId);
+                    int port;
+                    if (request.Port == 0)
+                    {
+                        port = 0;
+                        var rangeStart = request.AutomaticPortRangeStart!.Value;
+                        var rangeEnd = request.AutomaticPortRangeEnd!.Value;
+                        for (var candidate = rangeStart; candidate <= rangeEnd; candidate++)
+                        {
+                            if (_portOwners.TryAdd((request.NodeId.Value, candidate), owner))
+                            {
+                                port = candidate;
+                                break;
+                            }
+                        }
+
+                        if (port == 0)
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+                        }
+                    }
+                    else
+                    {
+                        port = request.Port;
+                        if (!_portOwners.TryAdd((request.NodeId.Value, port), owner))
+                        {
+                            return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+                        }
+                    }
+
                     var now = DateTimeOffset.UtcNow;
                     lease = new PortLease(
                         request.NodeId,
-                        request.ServiceId,
+                        serviceId,
+                        generationId,
                         port,
                         now,
                         now.Add(AcquireLifetime),
-                        1);
+                        Interlocked.Increment(ref _nextVersion));
+                    if (!_heldLeases.TryAdd(owner, lease))
+                    {
+                        _portOwners.TryRemove((request.NodeId.Value, port), out _);
+                        return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+                    }
                 }
-
-                if (!outcome.ValidLease)
+                else
                 {
-                    lease = new PortLease(
-                        lease.NodeId,
-                        LazyServiceId,
-                        lease.Port,
-                        lease.AcquiredAt,
-                        lease.ExpiresAt,
-                        lease.Version);
+                    if (!outcome.ValidLease)
+                    {
+                        lease = new PortLease(
+                            lease.NodeId,
+                            LazyServiceId,
+                            lease.GenerationId,
+                            lease.Port,
+                            lease.AcquiredAt,
+                            lease.ExpiresAt,
+                            lease.Version);
+                    }
+
+                    var owner = (lease.ServiceId, lease.GenerationId);
+                    var portKey = (lease.NodeId.Value, lease.Port);
+                    if (!_portOwners.TryAdd(portKey, owner))
+                    {
+                        return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+                    }
+
+                    if (!_heldLeases.TryAdd(owner, lease))
+                    {
+                        _portOwners.TryRemove(portKey, out _);
+                        return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+                    }
                 }
 
-                HeldLeases.Add(lease);
                 return ValueTask.FromResult(new PortLeaseOperationResult(
                     PortLeaseOperationStatus.Applied,
                     lease));
@@ -1336,19 +2346,54 @@ public sealed class HostServiceLifecycleManagerTests
             if (intent.Kind == PortLeaseIntentKind.Release)
             {
                 var release = intent.Release!;
-                ReleaseIntents.Add(intent);
-                HeldLeases.RemoveAll(lease =>
+                ReleaseIntents.Enqueue(intent);
+                var owner = (release.ServiceId, release.GenerationId);
+                if (_heldLeases.TryGetValue(owner, out var lease) &&
                     lease.NodeId == release.NodeId &&
-                    lease.ServiceId == release.ServiceId &&
                     lease.Port == release.Port &&
-                    lease.Version == release.LeaseVersion);
+                    lease.Version == release.LeaseVersion &&
+                    _heldLeases.TryRemove(owner, out var removed))
+                {
+                    _portOwners.TryRemove((removed.NodeId.Value, removed.Port), out _);
+                }
+
                 return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.NotFound));
             }
 
-            if (intent.Kind == PortLeaseIntentKind.Renew && FailRenewal)
+            if (intent.Kind == PortLeaseIntentKind.Renew)
             {
-                return ValueTask.FromResult(new PortLeaseOperationResult(
-                    PortLeaseOperationStatus.DatabaseUnavailable));
+                if (FailRenewal)
+                {
+                    return ValueTask.FromResult(new PortLeaseOperationResult(
+                        PortLeaseOperationStatus.DatabaseUnavailable));
+                }
+
+                var renewal = intent.Renewal!;
+                var owner = (renewal.ServiceId, renewal.GenerationId);
+                if (!_heldLeases.TryGetValue(owner, out var lease) ||
+                    lease.NodeId != renewal.NodeId ||
+                    lease.Port != renewal.Port)
+                {
+                    return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.NotFound));
+                }
+
+                if (lease.Version != renewal.LeaseVersion)
+                {
+                    return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var renewed = new PortLease(
+                    lease.NodeId,
+                    lease.ServiceId,
+                    lease.GenerationId,
+                    lease.Port,
+                    now,
+                    now.Add(renewal.TimeToLive),
+                    checked(lease.Version + 1));
+                return _heldLeases.TryUpdate(owner, renewed, lease)
+                    ? ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Applied, renewed))
+                    : ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.Conflict));
             }
 
             return ValueTask.FromResult(new PortLeaseOperationResult(PortLeaseOperationStatus.NotFound));
@@ -1368,6 +2413,76 @@ public sealed class HostServiceLifecycleManagerTests
                 TimeSpan.Zero,
                 1));
     }
+
+    private sealed class AutomaticDependencyRestartProbe : IServiceHealthProbe
+    {
+        private readonly Guid _dependencyId;
+        private readonly ConcurrentDictionary<Guid, int> _calls = new();
+
+        internal AutomaticDependencyRestartProbe(Guid dependencyId) => _dependencyId = dependencyId;
+
+        internal TaskCompletionSource<bool> ReplacementHealthy { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<HealthObservationResult> ProbeAsync(
+            ServiceHealthProbeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var attempt = _calls.AddOrUpdate(request.ServiceId, 1, static (_, previous) => previous + 1);
+            var status = request.ServiceId == _dependencyId && attempt is >= 2 and <= 4
+                ? HealthObservationStatus.Unavailable
+                : HealthObservationStatus.Healthy;
+            if (request.ServiceId == _dependencyId && attempt >= 5)
+            {
+                ReplacementHealthy.TrySetResult(true);
+            }
+
+            return ValueTask.FromResult(new HealthObservationResult(
+                request.ServiceId,
+                status,
+                DateTimeOffset.UtcNow,
+                TimeSpan.Zero,
+                attempt));
+        }
+    }
+    private sealed class StartupBarrierProbe : IServiceHealthProbe
+    {
+        private readonly Guid _serviceId;
+        private readonly int _blockedCall;
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _serviceCallCount;
+
+        public StartupBarrierProbe(Guid serviceId, int blockedCall)
+        {
+            _serviceId = serviceId;
+            _blockedCall = blockedCall;
+        }
+
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<HealthObservationResult> ProbeAsync(
+            ServiceHealthProbeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            if (request.ServiceId == _serviceId && Interlocked.Increment(ref _serviceCallCount) == _blockedCall)
+            {
+                Entered.TrySetResult(true);
+                await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return new HealthObservationResult(
+                request.ServiceId,
+                HealthObservationStatus.Healthy,
+                DateTimeOffset.UtcNow,
+                TimeSpan.Zero,
+                1);
+        }
+
+        public void Release() => _release.TrySetResult(true);
+    }
+
 
     private sealed class ControlledProbe : IServiceHealthProbe
     {

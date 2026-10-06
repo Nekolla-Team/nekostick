@@ -127,7 +127,7 @@ public sealed partial class FixtureEntrypoint
         result switch
         {
             ExtensionEndpointResolutionSuccessResult success =>
-                $"Success:{success.Lease.ServiceId}",
+                $"Success:{success.Lease.ServiceId}:{success.Lease.GenerationId}",
             ExtensionEndpointResolutionFailureResult failure =>
                 $"{failure.Code}:{failure.Detail.Message}",
             _ => "Unknown"

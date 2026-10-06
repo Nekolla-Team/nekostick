@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Nekolla.Nekostick.Domain;
 
 namespace Nekolla.Nekostick.Persistence;
 
@@ -31,6 +32,7 @@ public sealed record PersistencePortLease
     public PersistencePortLease(
         string nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
         DateTimeOffset acquiredAt,
         DateTimeOffset expiresAt,
@@ -46,6 +48,11 @@ public sealed record PersistencePortLease
             throw new ArgumentException("A service identifier is required.", nameof(serviceId));
         }
 
+        if (!UuidV7.IsVersion7(generationId))
+        {
+            throw new ArgumentException("A UUID v7 generation identifier is required.", nameof(generationId));
+        }
+
         if (port is < 1 or > 65535)
         {
             throw new ArgumentOutOfRangeException(nameof(port));
@@ -59,6 +66,7 @@ public sealed record PersistencePortLease
         ArgumentOutOfRangeException.ThrowIfNegative(version);
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         AcquiredAt = acquiredAt.ToUniversalTime();
         ExpiresAt = expiresAt.ToUniversalTime();
@@ -70,6 +78,9 @@ public sealed record PersistencePortLease
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+
+    /// <summary>Gets the service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the leased TCP port.</summary>
     public int Port { get; }
@@ -99,6 +110,7 @@ public sealed record PersistencePortLeaseAcquireRequest
     public PersistencePortLeaseAcquireRequest(
         string nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
         TimeSpan timeToLive,
         long? expectedVersion = null,
@@ -107,6 +119,7 @@ public sealed record PersistencePortLeaseAcquireRequest
     {
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         TimeToLive = timeToLive;
         ExpectedVersion = expectedVersion;
@@ -118,17 +131,21 @@ public sealed record PersistencePortLeaseAcquireRequest
     public static PersistencePortLeaseAcquireRequest Automatic(
         string nodeId,
         Guid serviceId,
+        Guid generationId,
         TimeSpan timeToLive,
         int? rangeStart = null,
         int? rangeEnd = null,
         long? expectedVersion = null) =>
-        new(nodeId, serviceId, 0, timeToLive, expectedVersion, rangeStart, rangeEnd);
+        new(nodeId, serviceId, generationId, 0, timeToLive, expectedVersion, rangeStart, rangeEnd);
 
     /// <summary>Gets the owning node identifier.</summary>
     public string NodeId { get; }
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+
+    /// <summary>Gets the service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the requested fixed port, or zero for automatic allocation.</summary>
     public int Port { get; }
@@ -153,12 +170,14 @@ public sealed record PersistencePortLeaseRenewRequest
     public PersistencePortLeaseRenewRequest(
         string nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
         long leaseVersion,
         TimeSpan timeToLive)
     {
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         LeaseVersion = leaseVersion;
         TimeToLive = timeToLive;
@@ -169,6 +188,9 @@ public sealed record PersistencePortLeaseRenewRequest
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+
+    /// <summary>Gets the service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the leased TCP port.</summary>
     public int Port { get; }
@@ -183,15 +205,17 @@ public sealed record PersistencePortLeaseRenewRequest
 /// <summary>Contains a validated release request for a persisted lease.</summary>
 public sealed record PersistencePortLeaseReleaseRequest
 {
-    /// <summary>Creates a release request.</summary>
+    /// <summary>Creates a release request with an expected lease version.</summary>
     public PersistencePortLeaseReleaseRequest(
         string nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
-        long? leaseVersion = null)
+        long leaseVersion)
     {
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         LeaseVersion = leaseVersion;
     }
@@ -202,11 +226,14 @@ public sealed record PersistencePortLeaseReleaseRequest
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
 
+    /// <summary>Gets the service generation identifier.</summary>
+    public Guid GenerationId { get; }
+
     /// <summary>Gets the leased TCP port.</summary>
     public int Port { get; }
 
-    /// <summary>Gets the expected current version, when supplied.</summary>
-    public long? LeaseVersion { get; }
+    /// <summary>Gets the expected current version.</summary>
+    public long LeaseVersion { get; }
 }
 
 /// <summary>Contains a safe fixed outcome from one lease mutation.</summary>
@@ -292,7 +319,7 @@ public interface IPersistencePortLeaseStore
         PersistencePortLeaseRenewRequest request,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Releases one node-owned port lease with an optional version check.</summary>
+    /// <summary>Releases one node-owned generation lease with an optimistic version check.</summary>
     ValueTask<PersistencePortLeaseOperationResult> ReleaseAsync(
         PersistencePortLeaseReleaseRequest request,
         CancellationToken cancellationToken = default);

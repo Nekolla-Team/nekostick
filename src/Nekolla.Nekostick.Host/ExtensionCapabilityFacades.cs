@@ -234,7 +234,11 @@ internal sealed class ExtensionEndpointFacade : IExtensionEndpointApi
                 .Where(value =>
                     value.IsActive(now) &&
                     string.Equals(value.OwnerExtensionId, _extensionId, StringComparison.Ordinal))
-                .Select(value => new ExtensionEndpointLease(value.ServiceId, value.Port, value.ExpiresAt))
+                .Select(value => new ExtensionEndpointLease(
+                    value.ServiceId,
+                    value.GenerationId,
+                    value.Port,
+                    value.ExpiresAt))
                 .ToImmutableArray();
         }
     }
@@ -295,7 +299,11 @@ internal sealed class ExtensionEndpointFacade : IExtensionEndpointApi
 
         return ValueTask.FromResult<ExtensionEndpointResolutionResult>(
             ExtensionEndpointResolutionResult.Success(
-                new ExtensionEndpointLease(value.ServiceId, value.Port, value.ExpiresAt)));
+                new ExtensionEndpointLease(
+                    value.ServiceId,
+                    value.GenerationId,
+                    value.Port,
+                    value.ExpiresAt)));
     }
 }
 internal sealed class ExtensionConfigurationFacade : IExtensionConfigurationApi

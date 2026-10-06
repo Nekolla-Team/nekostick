@@ -1,3 +1,5 @@
+using Nekolla.Nekostick.Domain;
+
 namespace Nekolla.Nekostick.Supervision;
 
 /// <summary>Contains a validated immutable port lease observation.</summary>
@@ -6,6 +8,7 @@ public sealed record PortLease
     /// <summary>Creates a port lease observation.</summary>
     /// <param name="nodeId">The validated node identifier.</param>
     /// <param name="serviceId">The service identifier.</param>
+    /// <param name="generationId">The UUID v7 service generation identifier.</param>
     /// <param name="port">The TCP port.</param>
     /// <param name="acquiredAt">The UTC acquisition instant.</param>
     /// <param name="expiresAt">The UTC expiration instant.</param>
@@ -13,12 +16,13 @@ public sealed record PortLease
     public PortLease(
         NodeIdentifier nodeId,
         Guid serviceId,
+        Guid generationId,
         int port,
         DateTimeOffset acquiredAt,
         DateTimeOffset expiresAt,
         long version)
     {
-        _ = new PortLeaseRequest(nodeId, serviceId, port, TimeSpan.FromTicks(1));
+        _ = new PortLeaseRequest(nodeId, serviceId, generationId, port, TimeSpan.FromTicks(1));
         if (expiresAt.ToUniversalTime() <= acquiredAt.ToUniversalTime())
         {
             throw new ArgumentException("A lease must expire after acquisition.", nameof(expiresAt));
@@ -28,6 +32,7 @@ public sealed record PortLease
 
         NodeId = nodeId;
         ServiceId = serviceId;
+        GenerationId = generationId;
         Port = port;
         AcquiredAt = acquiredAt.ToUniversalTime();
         ExpiresAt = expiresAt.ToUniversalTime();
@@ -39,6 +44,8 @@ public sealed record PortLease
 
     /// <summary>Gets the service identifier.</summary>
     public Guid ServiceId { get; }
+    /// <summary>Gets the UUID v7 service generation identifier.</summary>
+    public Guid GenerationId { get; }
 
     /// <summary>Gets the TCP port.</summary>
     public int Port { get; }

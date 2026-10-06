@@ -467,6 +467,9 @@ public sealed class NekostickDbContext : DbContext
             table.HasCheckConstraint(
                 "ck_port_leases_id_uuid_v7",
                 PersistenceDatabaseDefaults.UuidV7CheckConstraintSql);
+            table.HasCheckConstraint(
+                "ck_port_leases_generation_id_uuid_v7",
+                "substring(generation_id::text, 15, 1) = '7' AND substring(generation_id::text, 20, 1) IN ('8', '9', 'a', 'b')");
             table.HasCheckConstraint("ck_port_leases_port", "port BETWEEN 1 AND 65535");
         });
 
@@ -474,11 +477,15 @@ public sealed class NekostickDbContext : DbContext
         builder.HasIndex(value => new { value.NodeId, value.Port })
             .IsUnique()
             .HasDatabaseName("ux_port_leases_node_id_port");
+        builder.HasIndex(value => new { value.NodeId, value.ServiceId, value.GenerationId })
+            .IsUnique()
+            .HasDatabaseName("ux_port_leases_node_id_service_id_generation_id");
         builder.HasIndex(value => value.ServiceId).HasDatabaseName("ix_port_leases_service_id");
         builder.Property(value => value.Id).HasColumnName("id").HasColumnType("uuid");
         builder.Property(value => value.NodeId).HasColumnName("node_id").HasMaxLength(128).IsRequired();
         builder.Property(value => value.Port).HasColumnName("port").HasColumnType("integer").IsRequired();
         builder.Property(value => value.ServiceId).HasColumnName("service_id").HasColumnType("uuid").IsRequired();
+        builder.Property(value => value.GenerationId).HasColumnName("generation_id").HasColumnType("uuid").IsRequired();
         ConfigureUtcTimestamp(builder.Property(value => value.LeaseExpiresAt).HasColumnName("lease_expires_at"));
         ConfigureUtcTimestamp(builder.Property(value => value.RenewedAt).HasColumnName("renewed_at"));
         ConfigureVersion(builder.Property(value => value.Version));

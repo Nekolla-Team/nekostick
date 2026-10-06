@@ -1,8 +1,8 @@
 # API 1.4：完善扩展能力、全局管控与微服务输出流
 
-1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。Contracts 包 preview.7 还加入统一的 `ExtensionErrorDetail`，并将若干扩展 API 的 `bool`、`out` 或可空结果改为可判别的结果类型；这些签名迁移见下文。`HostApiVersion.Current` / `ExtensionAbi.Version` 仍为 `1.4.0`，使用新签名的扩展应引用对应的 preview.7 Contracts 包。
+1.4.0 相对 1.3 的变化：完善扩展自身能力的可用性与可观测性，并加强全局管控面的信息暴露。具体追加：`ConfigurationErrorCode.NoSettings` 错误码、`ExtensionHostReadinessState.Publishing` 状态、`ExtensionManagementEntry` 上的扩展自定义上报状态字段、`RouteConfiguration.OwnerExtensionId` 路由属主标识。Contracts 包 preview.8 还加入统一的 `ExtensionErrorDetail`，并将若干扩展 API 的 `bool`、`out` 或可空结果改为可判别的结果类型；这些签名迁移见下文。`HostApiVersion.Current` / `ExtensionAbi.Version` 仍为 `1.4.0`，使用新签名的扩展应引用对应的 1.4.0 Contracts 包。
 
-当前 Contracts 包版本为 **1.4.0-preview.7**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
+当前 Contracts 包版本为 **1.4.0**（`HostApiVersion.Current` / `ExtensionAbi.Version` 均为 `1.4.0`）。探测方式：
 
 ```csharp
 var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersion);
@@ -13,7 +13,7 @@ var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersi
 > preview.3 起追加：manifest `dependencies` / `imports` 的 `optional` 字段与 `IExtensionHostBridge14.Dependencies` 依赖上下文 API，见下文「可选依赖与依赖上下文」。在 1.3.x 及更低的 Host 上：含 `optional` 键的 manifest 字段会被按未知字段拒绝；bridge 不会实现 `IExtensionHostBridge14`。
 
 
-## 结果类型与精确错误详情（Contracts preview.7）
+## 结果类型与精确错误详情（Contracts preview.8）
 
 `ExtensionErrorDetail` 是不可变的错误详情 DTO：`Message` 必须为非空白的人类可读失败原因；`ExceptionType`（完整类型名）和 `InnerDetail`（直接内部异常消息或其他补充上下文）可选。`FromException` 复制异常消息（为空时使用类型名）、完整异常类型名和最多一层内部异常消息，不保留异常对象或 stack trace。调用方应按稳定错误码分支；`Message` 用于诊断，不是机器判别键。
 
@@ -52,6 +52,8 @@ var has14 = ExtensionAbi.IsCompatible(new HostApiVersion(1, 4, 0), host.ApiVersi
 `ExtensionServiceOperationResult` 和 `ExtensionLifecycleOperationResult` 是记录类型：仅 `Succeeded == true` 且 `Code == Accepted` 表示成功，成功时 `Detail` 必须为 `null`；失败时 `Detail` 必须非空。`ExtensionServiceOutputStreamResult` 成功时必须有 `Opened` code 与 stream、且 `Detail == null`；服务日志和运行态订阅成功时必须有订阅句柄、且 `Detail == null`。以上操作的失败结果均无 stream / subscription，并带必需 `Detail`。`ExtensionLifecycleStatus.LastFailureDetail` 在 `LastFailure == None` 时为 `null`；其他失败码也可能因运行时没有可用原因而没有详情。目录刷新中每个 `ExtensionScanSkip.Detail` 则始终非空。
 
 端点解析的 Host 行为统一：未发布、属主不匹配、失效或过期租约均返回缓存的 `NotFound`，详情为“未找到该 service 的活动 endpoint lease”；扩展不得对缺失与过期分支作不同处理。虽然 `ExtensionEndpointResolutionFailureCode.Expired` 保留在 enum 中，Host 的 extension-facing resolver 永不产生它；没有可用 accessor 时返回 `Unavailable`。
+
+`ExtensionEndpointLease` 在 `Current` 与 `ResolveAsync(serviceId)` 的成功结果中暴露 UUID v7 `GenerationId`，用于区分同一 service 的不同服务代次；它不是 lease version 或 process instance ID。配置候选切换期间，候选通过 health check 并成为活动代次前，endpoint 仍指向旧的健康代次；切换后才发布新代次。进程崩溃后的同代重启保留原 `GenerationId`，新的配置候选使用新的 `GenerationId`。
 
 ## 设置文档缺失的专用错误码（NoSettings）
 
@@ -345,6 +347,8 @@ feed 正常终止时，sink 先收到 `Termination` 条目，再收到一次 `On
 ## 微服务运行态通知（ServiceRuntimeState）
 
 `IExtensionHostBridge14.ServiceRuntimeState` 提供当前节点的 service 运行态 snapshots 与后续变更。调用 `SubscribeStatesAsync` 后先收到当前快照，再按序收到后续快照或移除通知；每个通知都标记是否属于初始快照回放。
+
+Endpoint queries (`Current`/`ResolveAsync`) and the runtime-state snapshots exposed by `SubscribeStatesAsync` project the same currently committed service-graph view. While candidate generations are warming, both continue to expose the previous committed view; warming candidates are not query-visible. The graph commit switches endpoints and runtime snapshots together. Runtime-state watch notifications are produced only after commit, but their asynchronous delivery is not atomic with the view switch, so receiving a notification is not a commit boundary. API 1.4 adds no graph-specific control interface or feature flag and introduces no additional authorization fence; lifecycle control continues through the existing API 1.3.3 `Supervisor` contract.
 
 旧版 Host（API 1.3 及更低）不会实现 `IExtensionHostBridge14`。对于实现了该接口但协商版本低于 `1.4.0` 的 Host，`SubscribeStatesAsync` 返回 `Succeeded == false`、`Code == ExtensionServiceRuntimeStateSubscriptionCode.Unsupported` 且 `Subscription == null`，不把能力不支持作为异常。
 

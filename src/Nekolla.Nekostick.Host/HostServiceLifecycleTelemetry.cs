@@ -36,7 +36,8 @@ public sealed record HostServiceRuntimeSnapshot
         int? processExitCode = null,
         int restartCount = 0,
         DateTimeOffset? stateEnteredAt = null,
-        DateTimeOffset? retryAt = null)
+        DateTimeOffset? retryAt = null,
+        Guid? generationId = null)
     {
         ServiceId = serviceId;
         ConfigurationVersion = configurationVersion;
@@ -56,6 +57,7 @@ public sealed record HostServiceRuntimeSnapshot
         RestartCount = restartCount;
         StateEnteredAt = stateEnteredAt ?? lastUpdatedAt;
         RetryAt = retryAt;
+        GenerationId = generationId;
     }
 
     /// <summary>Gets the identifier of the service represented by this snapshot.</summary>
@@ -108,6 +110,7 @@ public sealed record HostServiceRuntimeSnapshot
 
     /// <summary>Gets the UTC time of the next scheduled attempt.</summary>
     public DateTimeOffset? RetryAt { get; }
+    internal Guid? GenerationId { get; }
 
     internal HostServiceRuntimeSnapshot WithStateEnteredAt(DateTimeOffset? stateEnteredAt) => new(
         ServiceId,
@@ -127,7 +130,8 @@ public sealed record HostServiceRuntimeSnapshot
         ProcessExitCode,
         RestartCount,
         stateEnteredAt,
-        RetryAt);
+        RetryAt,
+        GenerationId);
 
     internal HostServiceRuntimeSnapshot WithOwnerExtensionId(string? ownerExtensionId, DateTimeOffset lastUpdatedAt) => new(
         ServiceId,
@@ -147,7 +151,8 @@ public sealed record HostServiceRuntimeSnapshot
         ProcessExitCode,
         RestartCount,
         StateEnteredAt,
-        RetryAt);
+        RetryAt,
+        GenerationId);
     internal HostServiceRuntimeSnapshot WithConfigurationVersion(
         long configurationVersion,
         string? ownerExtensionId,
@@ -169,7 +174,8 @@ public sealed record HostServiceRuntimeSnapshot
             ProcessExitCode,
             RestartCount,
             StateEnteredAt,
-            RetryAt);
+        RetryAt,
+        GenerationId);
     internal HostServiceRuntimeSnapshot WithRetryAt(DateTimeOffset? retryAt) => new(
         ServiceId,
         ConfigurationVersion,
@@ -188,7 +194,8 @@ public sealed record HostServiceRuntimeSnapshot
         ProcessExitCode,
         RestartCount,
         StateEnteredAt,
-        retryAt);
+        retryAt,
+        GenerationId);
 
     internal HostServiceRuntimeSnapshot WithRestartCount(int restartCount) => new(
         ServiceId,
@@ -208,7 +215,8 @@ public sealed record HostServiceRuntimeSnapshot
         ProcessExitCode,
         restartCount,
         StateEnteredAt,
-        RetryAt);
+        RetryAt,
+        GenerationId);
 
 
 
@@ -236,14 +244,16 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
     public ImmutableArray<HostServiceRuntimeSnapshot> ReadCurrent()
     {
         SynchronizePublishedRuntimeConfiguration();
-        return _runtimeRegistry.ReadCurrent();
+        return _endpointPublisher.CommittedView.RuntimeSnapshots.Values
+            .OrderBy(static snapshot => snapshot.ServiceId)
+            .ToImmutableArray();
     }
 
     /// <inheritdoc />
     public bool TryGet(Guid serviceId, out HostServiceRuntimeSnapshot snapshot)
     {
         SynchronizePublishedRuntimeConfiguration();
-        return _runtimeRegistry.TryGet(serviceId, out snapshot);
+        return _endpointPublisher.CommittedView.RuntimeSnapshots.TryGetValue(serviceId, out snapshot!);
     }
 
     private void PublishRuntimeSnapshot(
@@ -266,6 +276,10 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
         int? restartCountIncrementOverride = null,
         bool preserveLastProbe = false)
     {
+        if (generation.GraphPreparation)
+        {
+            return;
+        }
         var supervisor = generation.Supervisor;
         var current = state ?? supervisor.Snapshot;
         var lifecycle = lifecycleState ?? MapLifecycle(current.ObservedLifecycle);
@@ -361,7 +375,8 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
                 lastProbe,
                 processExitCode,
                 0,
-                retryAt: resolvedRetryAt),
+                retryAt: resolvedRetryAt,
+                generationId: generation.GenerationId),
             serviceVersion ?? generation.Configuration.Version,
             enabled: true,
             preserveServiceVersion: preserveServiceVersion,
@@ -414,6 +429,11 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
         ServiceGeneration? active;
         lock (slot.Gate)
         {
+            if (slot.GraphPreparation)
+            {
+                return;
+            }
+
             active = slot.Active;
         }
 
@@ -445,6 +465,11 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
         ServiceGeneration? active;
         lock (slot.Gate)
         {
+            if (slot.GraphPreparation || attempt.GraphPreparation)
+            {
+                return;
+            }
+
             active = slot.Active;
         }
 
@@ -508,10 +533,15 @@ public sealed partial class HostServiceLifecycleManager : IHostServiceRuntimeSna
         DateTimeOffset? updatedAt = null,
         int? attemptNumber = null)
     {
-        var attemptedState = failureState ?? candidate?.Supervisor.Snapshot;
         ServiceGeneration? active;
+        var attemptedState = failureState ?? candidate?.Supervisor.Snapshot;
         lock (slot.Gate)
         {
+            if (candidate?.GraphPreparation == true || (candidate is null && slot.GraphPreparation))
+            {
+                return;
+            }
+
             active = slot.Active;
             attemptNumber ??= slot.StartAttemptNumber;
         }

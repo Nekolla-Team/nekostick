@@ -11,40 +11,22 @@ namespace Nekolla.Nekostick.Host;
 
 public sealed partial class HostServiceLifecycleManager
 {
-    private (ServiceSupervisor Supervisor, ImmutableDictionary<string, string> ResolvedEnvironment) CreateSupervisor(
+    private (ServiceSupervisor Supervisor, ImmutableArray<string> ResolvedArguments, ImmutableDictionary<string, string> ResolvedEnvironment) CreateSupervisor(
         ServiceConfiguration service,
+        Guid generationId,
         int port,
         int attemptNumber,
+        Func<Guid, string, string?> remoteEnvironmentResolver,
         PortLease? initialLease = null,
         DateTimeOffset? initialLeaseNow = null)
     {
-        var dynamicValues = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["PORT"] = port.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ["HOST"] = "127.0.0.1"
-        };
-        var expandedEnvironment = ServiceLaunchTemplate.ExpandEnvironment(
-            service.Environment,
-            dynamicValues,
-            ResolveRemoteEnvironment);
-        var resolvedEnvironment = expandedEnvironment.ToImmutableDictionary(
-            value => value.Key,
-            value => value.Value,
-            StringComparer.Ordinal);
-        var context = new ServiceTemplateContext(
-            expandedEnvironment,
-            ResolveRemoteEnvironment,
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["PORT"] = dynamicValues["PORT"]
-            });
-        var arguments = ServiceLaunchTemplate.ExpandArguments(service.ArgumentList, context);
+        var launchInputs = ResolveLaunchInputs(service, port, remoteEnvironmentResolver);
         var launch = new ProcessLaunchSpecification(
             service.Id,
             ServicePathResolver.Resolve(_dataDirectory, service.FileName),
             ServicePathResolver.Resolve(_dataDirectory, service.WorkingDirectory),
-            arguments,
-            new ProcessEnvironment(expandedEnvironment),
+            launchInputs.Arguments,
+            new ProcessEnvironment(launchInputs.Environment),
             attemptNumber: attemptNumber);
         var healthDefinition = new HealthCheckDefinition(
             service.HealthCheck.Type switch
@@ -63,6 +45,7 @@ public sealed partial class HostServiceLifecycleManager
         var leaseRequest = new PortLeaseRequest(
             _nodeId,
             service.Id,
+            generationId,
             port,
             LeasePolicy.TimeToLive);
         var supervisor = new ServiceSupervisor(
@@ -83,7 +66,35 @@ public sealed partial class HostServiceLifecycleManager
             now: initialLeaseNow,
             initialLease: initialLease,
             logger: _logger);
-        return (supervisor, resolvedEnvironment);
+        return (supervisor, launchInputs.Arguments, launchInputs.Environment);
+    }
+
+    private static (ImmutableArray<string> Arguments, ImmutableDictionary<string, string> Environment) ResolveLaunchInputs(
+        ServiceConfiguration service,
+        int port,
+        Func<Guid, string, string?> remoteEnvironmentResolver)
+    {
+        var dynamicValues = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PORT"] = port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["HOST"] = "127.0.0.1"
+        };
+        var expandedEnvironment = ServiceLaunchTemplate.ExpandEnvironment(
+            service.Environment,
+            dynamicValues,
+            remoteEnvironmentResolver);
+        var resolvedEnvironment = expandedEnvironment.ToImmutableDictionary(
+            static value => value.Key,
+            static value => value.Value,
+            StringComparer.Ordinal);
+        var context = new ServiceTemplateContext(
+            expandedEnvironment,
+            remoteEnvironmentResolver,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["PORT"] = dynamicValues["PORT"]
+            });
+        return (ServiceLaunchTemplate.ExpandArguments(service.ArgumentList, context), resolvedEnvironment);
     }
     private SemaphoreSlim LeaseLifecycleGate(Guid serviceId)
     {
@@ -96,7 +107,7 @@ public sealed partial class HostServiceLifecycleManager
     }
 
     private static PortLeaseReleaseKey ReleaseKey(PortLease lease) =>
-        new(lease.NodeId.Value, lease.ServiceId, lease.Port, lease.Version);
+        new(lease.NodeId.Value, lease.ServiceId, lease.GenerationId, lease.Port, lease.Version);
 
     private void RetainPendingLeaseRelease(PortLease? lease)
     {
@@ -111,7 +122,9 @@ public sealed partial class HostServiceLifecycleManager
         PortLease lease,
         CancellationToken cancellationToken = default)
     {
-        if (lease.NodeId != request.NodeId || lease.ServiceId != request.ServiceId)
+        if (lease.NodeId != request.NodeId ||
+            lease.ServiceId != request.ServiceId ||
+            lease.GenerationId != request.GenerationId)
         {
             return PortLeaseOperationStatus.Rejected;
         }
@@ -128,7 +141,12 @@ public sealed partial class HostServiceLifecycleManager
         {
             var result = await _leaseStore.ApplyAsync(
                 PortLeaseIntent.ReleaseLease(
-                    new PortLeaseRelease(lease.NodeId, lease.ServiceId, lease.Port, lease.Version)),
+                    new PortLeaseRelease(
+                        lease.NodeId,
+                        lease.ServiceId,
+                        lease.GenerationId,
+                        lease.Port,
+                        lease.Version)),
                 cancellationToken).ConfigureAwait(false);
             if (result.Status is PortLeaseOperationStatus.Applied or PortLeaseOperationStatus.NotFound)
             {
@@ -161,6 +179,7 @@ public sealed partial class HostServiceLifecycleManager
 
     private async ValueTask<PortLeaseOperationStatus?> RetryPendingLeaseReleasesAsync(
         Guid serviceId,
+        Guid? generationId,
         DateTimeOffset now,
         CancellationToken cancellationToken,
         PortLease? excludedLease = null)
@@ -179,7 +198,8 @@ public sealed partial class HostServiceLifecycleManager
                 continue;
             }
 
-            if (pair.Key.ServiceId != serviceId)
+            if (pair.Key.ServiceId != serviceId ||
+                (generationId is { } expectedGenerationId && pair.Key.GenerationId != expectedGenerationId))
             {
                 continue;
             }
@@ -274,6 +294,7 @@ public sealed partial class HostServiceLifecycleManager
         foreach (var pair in _pendingLeaseReleases)
         {
             if (pair.Key.ServiceId == serviceId &&
+                pair.Key.GenerationId == excludedLease.GenerationId &&
                 pair.Key != excludedKey &&
                 !pair.Value.IsExpired(now))
             {
@@ -330,7 +351,8 @@ public sealed partial class HostServiceLifecycleManager
         {
             var previousPendingLease = generation.Supervisor.PendingLeaseRelease;
             var pendingFailure = await RetryPendingLeaseReleasesAsync(
-                serviceId,
+                generation.Configuration.Id,
+                generation.GenerationId,
                 now,
                 cancellationToken,
                 previousPendingLease).ConfigureAwait(false);
@@ -361,7 +383,8 @@ public sealed partial class HostServiceLifecycleManager
         {
             var previousPendingLease = generation.Supervisor.PendingLeaseRelease;
             var pendingFailure = await RetryPendingLeaseReleasesAsync(
-                serviceId,
+                generation.Configuration.Id,
+                generation.GenerationId,
                 DateTimeOffset.UtcNow,
                 CancellationToken.None,
                 previousPendingLease).ConfigureAwait(false);
@@ -410,7 +433,13 @@ public sealed partial class HostServiceLifecycleManager
                 isStarting = generation is not null && generation.Supervisor.ActiveProcessInstance == instanceId;
                 if (!isStarting)
                 {
-                    return;
+                    generation = _retiringGenerations.Keys.FirstOrDefault(candidate =>
+                        candidate.Configuration.Id == serviceId &&
+                        candidate.Supervisor.ActiveProcessInstance == instanceId);
+                    if (generation is null)
+                    {
+                        return;
+                    }
                 }
             }
 
@@ -450,8 +479,11 @@ public sealed partial class HostServiceLifecycleManager
             HostLogMessages.ServiceExitedUnexpectedly(_logger, serviceId);
         }
 
-        PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "unavailable");
-        await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        if (!generation.GraphPreparation)
+        {
+            PublishServiceState(generation.Configuration.Id, generation.SnapshotVersion, "unavailable");
+            await PublishReadyEndpointsAsync().ConfigureAwait(false);
+        }
         if (IsStopping)
         {
             return;
@@ -711,6 +743,7 @@ public sealed partial class HostServiceLifecycleManager
             {
                 releaseFailure = await RetryPendingLeaseReleasesAsync(
                     serviceId,
+                    null,
                     DateTimeOffset.UtcNow,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -779,6 +812,7 @@ public sealed partial class HostServiceLifecycleManager
             {
                 releaseStatus = await RetryPendingLeaseReleasesAsync(
                     serviceId,
+                    null,
                     DateTimeOffset.UtcNow,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -816,7 +850,6 @@ public sealed partial class HostServiceLifecycleManager
         CancellationToken cancellationToken)
     {
         generation.Ready = false;
-        RemoveRuntimeEnvironment(generation);
         var leaseGate = LeaseLifecycleGate(generation.Configuration.Id);
         try
         {
@@ -839,6 +872,7 @@ public sealed partial class HostServiceLifecycleManager
             var previousPendingLease = generation.Supervisor.PendingLeaseRelease;
             var pendingFailure = await RetryPendingLeaseReleasesAsync(
                 generation.Configuration.Id,
+                generation.GenerationId,
                 DateTimeOffset.UtcNow,
                 cancellationToken,
                 previousPendingLease).ConfigureAwait(false);
@@ -902,26 +936,117 @@ public sealed partial class HostServiceLifecycleManager
         await _publicationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            if (IsStopping)
+            lock (_lifecycleGate)
             {
-                _endpointPublisher.Publish(Array.Empty<HostServiceEndpointLease>());
-                return;
-            }
-
-            // The fresh-identity/stale-DB-read asymmetry is intentional; the unconditional 1s authoritative republish bounds omissions.
-            var readyIdentities = GetActiveReadyLeases(DateTimeOffset.UtcNow)
-                .Select(static lease => (lease.ServiceId, lease.Port))
-                .ToHashSet();
-            var verifiedLeases = new List<HostServiceEndpointLease>(dbLeases.Count);
-            foreach (var lease in dbLeases)
-            {
-                if (lease is not null && readyIdentities.Contains((lease.ServiceId, lease.Port)))
+                var previous = _endpointPublisher.CommittedView;
+                if (IsStopping)
                 {
-                    verifiedLeases.Add(lease);
+                    _endpointPublisher.CommitGraph(previous with
+                    {
+                        Services = ImmutableDictionary<Guid, HostServiceCommittedService>.Empty,
+                        Endpoints = ImmutableDictionary<Guid, HostServiceEndpointLease>.Empty
+                    });
+                    return;
                 }
-            }
 
-            _endpointPublisher.Publish(verifiedLeases);
+                if (HasGraphPreparation())
+                {
+                    return;
+                }
+
+                var snapshot = _snapshotHolder.Current;
+                var activeGraphPlan = snapshot is null ? null : CreateActiveGraphPlan(snapshot);
+                var pendingNoRestartGraphChange = activeGraphPlan is { IsValid: true } &&
+                    activeGraphPlan.RestartServiceIds.Count == 0 &&
+                    HasExistingCommittedGraphState(activeGraphPlan, previous);
+                // Rebuild no-restart metadata gaps, but keep existing graph entries unchanged until their plan commits.
+                if (activeGraphPlan is not null &&
+                    (!activeGraphPlan.IsValid ||
+                     activeGraphPlan.RestartServiceIds.Count != 0 ||
+                     pendingNoRestartGraphChange))
+                {
+                    return;
+                }
+
+
+                var now = DateTimeOffset.UtcNow;
+                var services = ImmutableDictionary.CreateBuilder<Guid, HostServiceCommittedService>();
+                var endpoints = ImmutableDictionary.CreateBuilder<Guid, HostServiceEndpointLease>();
+                var runtimeSnapshots = previous.RuntimeSnapshots.ToBuilder();
+                var runtimePublications = new List<(HostServiceRuntimeSnapshot Snapshot, long ServiceVersion)>();
+                foreach (var endpoint in dbLeases)
+                {
+                    if (endpoint is null ||
+                        !endpoint.IsActive(now) ||
+                        !_slots.TryGetValue(endpoint.ServiceId, out var slot))
+                    {
+                        continue;
+                    }
+
+                    ServiceGeneration? generation;
+                    lock (slot.Gate)
+                    {
+                        generation = slot.Active;
+                        if (generation is not { Ready: true } ||
+                            generation.Lease is not { } localLease ||
+                            !IsValidDependencyLease(localLease, endpoint.ServiceId, generation.GenerationId, now) ||
+                            generation.GenerationId != endpoint.GenerationId ||
+                            localLease.Port != endpoint.Port ||
+                            !string.Equals(
+                                generation.OwnerExtensionId,
+                                endpoint.OwnerExtensionId,
+                                StringComparison.Ordinal))
+                        {
+                            generation = null;
+                        }
+                    }
+
+                    if (generation is null)
+                    {
+                        continue;
+                    }
+
+                    var hasRuntime = runtimeSnapshots.TryGetValue(endpoint.ServiceId, out var priorRuntime) &&
+                        priorRuntime.GenerationId == generation.GenerationId;
+                    var runtime = hasRuntime
+                        ? priorRuntime!
+                        : CreateGraphRuntimeSnapshot(
+                            generation,
+                            previous.ConfigurationVersion,
+                            priorRuntime);
+                    runtimeSnapshots[endpoint.ServiceId] = runtime;
+                    if (!hasRuntime)
+                    {
+                        runtimePublications.Add((runtime, generation.Configuration.Version));
+                    }
+
+                    var previousService = previous.Services.TryGetValue(endpoint.ServiceId, out var committedService)
+                        ? committedService
+                        : null;
+                    services[endpoint.ServiceId] = CreateCommittedService(
+                        generation,
+                        endpoint,
+                        runtime,
+                        previousService);
+                    endpoints[endpoint.ServiceId] = endpoint;
+                }
+
+                var retained = services.Keys.ToHashSet();
+                PruneCommittedDependencyClosure(services, retained);
+
+                foreach (var serviceId in services.Keys.Where(serviceId => !retained.Contains(serviceId)).ToArray())
+                {
+                    services.Remove(serviceId);
+                    endpoints.Remove(serviceId);
+                }
+
+                var view = new HostServiceCommittedGraphView(
+                    previous.ConfigurationVersion,
+                    services.ToImmutable(),
+                    endpoints.ToImmutable(),
+                    runtimeSnapshots.ToImmutable());
+                _runtimeRegistry.PublishCommittedGraph(view, runtimePublications);
+            }
         }
         finally
         {
@@ -929,50 +1054,44 @@ public sealed partial class HostServiceLifecycleManager
         }
     }
 
-    private ImmutableArray<PortLease> GetActiveReadyLeases(DateTimeOffset now)
-    {
-        var leases = ImmutableArray.CreateBuilder<PortLease>();
-        foreach (var slot in _slots.Values)
-        {
-            lock (slot.Gate)
-            {
-                if (slot.Active is not { Ready: true, Lease: { } lease } || lease.IsExpired(now))
-                {
-                    continue;
-                }
-
-                leases.Add(lease);
-            }
-        }
-
-        return leases.ToImmutable();
-    }
-
     private async Task PublishReadyEndpointsAsync()
     {
         await _publicationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            if (IsStopping)
+            lock (_lifecycleGate)
             {
-                _endpointPublisher.Publish(Array.Empty<HostServiceEndpointLease>());
-                return;
-            }
-
-            var now = DateTimeOffset.UtcNow;
-            var serviceOwners = _snapshotHolder.RoutingSnapshot?.ServiceOwners;
-            var leases = new List<HostServiceEndpointLease>();
-            foreach (var lease in GetActiveReadyLeases(now))
-            {
-                if (serviceOwners is null || !serviceOwners.TryGetValue(lease.ServiceId, out var owner))
+                var previous = _endpointPublisher.CommittedView;
+                if (IsStopping)
                 {
-                    continue;
+                    _endpointPublisher.CommitGraph(previous with
+                    {
+                        Services = ImmutableDictionary<Guid, HostServiceCommittedService>.Empty,
+                        Endpoints = ImmutableDictionary<Guid, HostServiceEndpointLease>.Empty
+                    });
+                    return;
                 }
 
-                leases.Add(new HostServiceEndpointLease(lease.ServiceId, lease.Port, lease.ExpiresAt, owner));
-            }
+                if (HasGraphPreparation())
+                {
+                    return;
+                }
 
-            _endpointPublisher.Publish(leases);
+                var snapshot = _snapshotHolder.Current;
+                var activeGraphPlan = snapshot is null ? null : CreateActiveGraphPlan(snapshot);
+                if (activeGraphPlan is { IsValid: true } &&
+                    activeGraphPlan.RestartServiceIds.Count == 0 &&
+                    HasExistingCommittedGraphState(activeGraphPlan, previous))
+                {
+                    return;
+                }
+
+                var view = BuildLifecycleCommittedGraph(
+                    activeGraphPlan is not null ? null : snapshot,
+                    previous,
+                    out var runtimePublications);
+                _runtimeRegistry.PublishCommittedGraph(view, runtimePublications);
+            }
         }
         finally
         {
@@ -997,6 +1116,7 @@ public sealed partial class HostServiceLifecycleManager
         internal int StartAttemptNumber;
         internal long StartupOperationId;
         internal EagerStartupRetryState? EagerStartupRetry;
+        internal bool GraphPreparation;
 
 
         internal int ReserveStartAttemptNumber()
@@ -1029,30 +1149,40 @@ public sealed partial class HostServiceLifecycleManager
         private volatile PortLease? _lease;
         private volatile bool _ready;
         private volatile bool _processExitRecorded;
+        private volatile bool _graphPreparation;
         private readonly object _restartAttemptsGate = new();
         private RestartAttemptState _lastPublishedRestartAttempts = RestartAttemptState.Empty;
 
         internal ServiceGeneration(
             ServiceConfiguration configuration,
+            Guid generationId,
             ServiceSupervisor supervisor,
             PortLease? lease,
             long snapshotVersion,
             HealthRetryState healthRetryState,
             string? ownerExtensionId,
+            ImmutableArray<string> resolvedArguments,
             ImmutableDictionary<string, string> resolvedEnvironment,
-            bool ready = true)
+            ImmutableDictionary<Guid, ServiceDependencyBinding> dependencyBindings,
+            bool ready = true,
+            bool graphPreparation = false)
         {
             Configuration = configuration;
+            GenerationId = generationId;
             Supervisor = supervisor;
             _lease = lease;
             SnapshotVersion = snapshotVersion;
             HealthRetryState = healthRetryState;
             OwnerExtensionId = ownerExtensionId;
+            ResolvedArguments = resolvedArguments;
             ResolvedEnvironment = resolvedEnvironment;
+            DependencyBindings = dependencyBindings;
             _ready = ready;
+            _graphPreparation = graphPreparation;
         }
 
         internal ServiceConfiguration Configuration { get; }
+        internal Guid GenerationId { get; }
         internal ServiceSupervisor Supervisor { get; }
         internal PortLease? Lease
         {
@@ -1063,7 +1193,14 @@ public sealed partial class HostServiceLifecycleManager
         internal HealthRetryState HealthRetryState { get; set; }
         internal ServiceStateReasonCode LastHealthProbeReason { get; set; }
         internal string? OwnerExtensionId { get; }
+        internal ImmutableArray<string> ResolvedArguments { get; }
         internal ImmutableDictionary<string, string> ResolvedEnvironment { get; }
+        internal ImmutableDictionary<Guid, ServiceDependencyBinding> DependencyBindings { get; }
+        internal bool GraphPreparation
+        {
+            get => _graphPreparation;
+            set => _graphPreparation = value;
+        }
         internal bool Ready
         {
             get => _ready;
