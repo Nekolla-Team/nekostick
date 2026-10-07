@@ -264,6 +264,10 @@ internal static class ExtensionHttpAdapter
 
             headersSet = true;
 
+            // Commit status code and headers before the first body byte so streaming clients
+            // observe the response without waiting for the body stream to complete.
+            await context.Response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+
             if (bodyStream is null)
             {
                 return true;
@@ -281,6 +285,7 @@ internal static class ExtensionHttpAdapter
 
                 await context.Response.Body.WriteAsync(buffer.AsMemory(0, read), cancellationToken)
                     .ConfigureAwait(false);
+                await context.Response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
             return true;

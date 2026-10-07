@@ -595,10 +595,61 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 ### 与路由钩子 / 观测的交互
 
 - 流式路由上的 route hooks 收到的请求体快照为**空**（`Body` 长度 0）；WebSocket upgrade 请求同理。
-- 只有路由上存在 **Return 阶段**钩子且请求不是 upgrade 时，Host 才把响应体缓冲后提供给 hooks 做 snapshot / rollback；仅有 Trigger 阶段钩子（或仅订阅观测）时响应保持直写转发，不做缓冲、校验或重写。
+- 只有路由上存在 **Return 阶段**钩子、请求不是 upgrade，且路由**不是流式处理器路由**时，Host 才把响应体缓冲后提供给 hooks 做 snapshot / rollback；流式处理器路由的响应体从不被缓冲，Return 钩子只收到空响应体快照（见下文「响应交付语义」）。仅有 Trigger 阶段钩子（或仅订阅观测）时响应保持直写转发，不做缓冲、校验或重写。
 - 响应体超过快照上限（64 KiB）只影响给 hooks / 观测的共享快照（截断降级）；**发给客户端的字节不受影响**：hook 全部 `Continue` 时缓冲内容原样放行，只有实际 `ReplaceResponse` 才应用并校验扩展提供的替换。
 - WebSocket upgrade（请求 upgrade，或 101 且带 `Upgrade` header 的响应）完全不进入替换机制；对这类响应尝试 `ReplaceResponse` 按 fail closed 处理。
-- 扩展不需要关心缓冲细节，但应意识到存在 Return 钩子的路由上大响应会被缓冲。
+- 扩展不需要关心缓冲细节，但应意识到存在 Return 钩子的**非流式**路由上大响应会被缓冲。
+
+### 响应交付语义
+
+上文接口定义 `IExtensionStreamingHandler` 的响应交付语义：
+
+- **即时提交、逐块转发。** `HandleStreamingAsync` 返回 `ExtensionStreamingResponse` 后，Host 应用响应状态码与响应头并**立即**提交给客户端——不再等缓冲区积满或响应结束；此后从 `BodyStream` 读到的每个 chunk 都会立即写入并 flush 到客户端。长连接增量流——例如 SSE（`Content-Type: text/event-stream`）——因此可以在扩展处理器路由上工作：客户端随生产进度陆续收到数据，而不是在流结束时才一次性拿到全部内容。
+- **所有权规则不变：Host 只在 `HandleStreamingAsync` 返回后才开始复制 `BodyStream`。** 因此，生产长连接 / 无限流的 handler 必须迅速返回、不等待流结束，由后台任务异步向 `BodyStream` 写入（例如后台生产者写入 pipe / channel 支撑的流）；在 `HandleStreamingAsync` 内阻塞等待流结束，客户端将收不到任何内容（响应状态与响应头也不会提交）。
+- **缓冲式处理器不能流式。** 既有的字节数组处理器 `IExtensionHandler` 仍是整体响应语义：`ExtensionHandlerResponse` 一次性携带完整响应体，不支持流式发送。
+
+下面的示例按上述语义实现 SSE 长连接：立即返回响应，后台任务向 `BodyStream` 生产帧：
+
+```csharp
+// 需要 using System.IO.Pipelines;
+public sealed class SseHandler : IExtensionStreamingHandler
+{
+    public string HandlerId => "example.sse";
+
+    public ValueTask<ExtensionStreamingResponse> HandleStreamingAsync(
+        ExtensionStreamingRequest request,
+        CancellationToken cancellationToken)
+    {
+        var pipe = new Pipe();
+
+        // 后台生产者：Host 只在本方法返回后才开始读取 BodyStream
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    var frame = $"data: {DateTimeOffset.UtcNow:O}\n\n";
+                    await pipe.Writer.WriteAsync(Encoding.UTF8.GetBytes(frame), cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) { } // 请求中止，正常结束
+            finally
+            {
+                pipe.Writer.Complete();
+            }
+        });
+
+        return ValueTask.FromResult(new ExtensionStreamingResponse(
+            200,
+            new[] { new KeyValuePair<string, IEnumerable<string>>("Content-Type", ["text/event-stream"]), new KeyValuePair<string, IEnumerable<string>>("Cache-Control", ["no-cache"]) },
+            pipe.Reader.AsStream()));
+    }
+}
+```
+
+- 流式处理器路由的响应体**从不**被缓冲、**从不**进入替换机制：Host 不把响应体缓冲进内存；Return 阶段钩子仍会触发，且收到**空**响应体快照（`Body` 长度 0，仅可观察状态码与响应头）。对这类响应尝试 `ReplaceResponse` 无法生效（响应已提交、无法回滚），Host 按 fail closed 处理。请求侧与此一致：流式路由上 route hooks 收到的请求体快照为**空**（`Body` 长度 0），与 WebSocket upgrade 请求同理。
 
 ### 何时使用流式处理器
 
@@ -658,7 +709,7 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 | 观测 / 钩子快照 body | 64 KiB（超出按截断降级，不影响转发字节） |
 | 自定义日志单条文本 | 4096 字符 |
 | 流式请求体上限 | 由路由 `MaxRequestBodyBytes` 决定 |
-| 流式响应 hook 缓冲 | 仅存在 Return 阶段钩子且非 upgrade 时完整响应体被缓冲到内存（受 Host 内存限制） |
+| 流式响应 hook 缓冲 | 流式处理器路由的响应体**从不**被缓冲（Return 钩子收到空快照）；非流式响应仅在存在 Return 阶段钩子且非 upgrade 时完整缓冲到内存（受 Host 内存限制） |
 
 ## 从 1.2 迁移
 

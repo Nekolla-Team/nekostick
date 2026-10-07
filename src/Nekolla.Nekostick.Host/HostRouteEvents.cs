@@ -113,7 +113,10 @@ internal static partial class HostRouteEvents
             session.CorrelationId,
             ExtensionRouteEventStage.Trigger,
             trigger.Request), logger);
+        // Streaming handlers write the response to the client themselves; replacing the body here
+        // would stall delivery, so Return hooks observe an empty response snapshot instead.
         if (!isUpgradeRequest &&
+            !isStreamingHandler &&
             generation.HasRouteHooks(match.RouteId, ExtensionRouteEventStage.Return))
         {
             session.OriginalResponseBody = context.Response.Body;

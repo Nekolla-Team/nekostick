@@ -138,6 +138,14 @@ public sealed partial class FixtureEntrypoint : IExtensionEntry
                 "Fixture streaming handler registration");
         }
 
+        if (options.RegisterSseHandler)
+        {
+            EnsureRegistrationSucceeded(
+                context.Registration.TryRegisterStreamingHandler(
+                    new FixtureSseStreamingHandler(options.SseHandlerId)),
+                "Fixture SSE streaming handler registration");
+        }
+
         if (options.RegisterFallback || options.DuplicateFallback)
         {
             EnsureRegistrationSucceeded(

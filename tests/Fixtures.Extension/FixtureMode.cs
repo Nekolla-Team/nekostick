@@ -48,6 +48,10 @@ public sealed record FixtureMode(
 
         internal int StartDelayMilliseconds { get; init; }
 
+        internal bool RegisterSseHandler { get; init; }
+
+        internal string SseHandlerId { get; init; } = "fixture.sse-events";
+
         /// <summary>Reads the small test-only settings document.</summary>
         public static FixtureMode Parse(string? settingsJson)
         {
@@ -100,7 +104,9 @@ public sealed record FixtureMode(
                 ReadBool(root, "startCancelled"))
             {
                 RegisterHandler = ReadBool(root, "registerHandler", fallback: true),
-                StartDelayMilliseconds = ReadInt(root, "startDelayMilliseconds", fallback: 0)
+                StartDelayMilliseconds = ReadInt(root, "startDelayMilliseconds", fallback: 0),
+                RegisterSseHandler = ReadBool(root, "registerSseHandler"),
+                SseHandlerId = ReadString(root, "sseHandlerId", "fixture.sse-events")
             };
         }
 

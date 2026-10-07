@@ -416,13 +416,14 @@ public sealed class HostRouteEventsPipelineTests
     }
 
     [Fact]
-    public async Task StreamingRouteHooksReceiveEmptyRequestBodyAndBufferedResponseBody()
+    public async Task StreamingRouteHooksObserveEmptyBodiesWithoutResponseBuffering()
     {
         using var fixture = TestExtensionDirectory.CreateJson();
         var manifest = Discover(fixture.RootPath);
         var routeId = RoutingTestData.Id(950);
         var triggerBody = (byte[]?)null;
         var returnBody = (byte[]?)null;
+        var returnStatus = 0;
         var factory = new RouteTestFactory
         {
             Configure = events =>
@@ -435,6 +436,7 @@ public sealed class HostRouteEventsPipelineTests
                 Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Return, (context, _) =>
                 {
                     returnBody = context.Response!.Body.ToArray();
+                    returnStatus = context.Response!.StatusCode;
                     return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
                 }));
             }
@@ -478,7 +480,8 @@ public sealed class HostRouteEventsPipelineTests
         context.Request.Path = "/original";
         context.Request.Host = new HostString("example.test");
         context.Request.Body = requestBody;
-        context.Response.Body = new MemoryStream();
+        var originalResponseBody = new MemoryStream();
+        context.Response.Body = originalResponseBody;
 
         var session = await HostRouteEvents.BeginAsync(
             context,
@@ -489,6 +492,11 @@ public sealed class HostRouteEventsPipelineTests
         Assert.False(session!.Cancelled);
         Assert.NotNull(triggerBody);
         Assert.Empty(triggerBody!);
+
+        // Streaming handlers produce the response themselves, so the host must not install a
+        // buffering body; Return hooks still dispatch and observe an empty body snapshot.
+        Assert.Null(session.ResponseBuffer);
+        Assert.Same(originalResponseBody, context.Response.Body);
 
         context.Response.StatusCode = StatusCodes.Status200OK;
         await context.Response.Body.WriteAsync(
@@ -502,7 +510,11 @@ public sealed class HostRouteEventsPipelineTests
 
         Assert.Equal(RouteTargetExecutionResult.Handled, result);
         Assert.NotNull(returnBody);
-        Assert.Equal("response-body", Encoding.UTF8.GetString(returnBody!));
+        Assert.Empty(returnBody!);
+        Assert.Equal(StatusCodes.Status200OK, returnStatus);
+        Assert.Null(session.ResponseBuffer);
+        Assert.Same(originalResponseBody, context.Response.Body);
+        Assert.Equal("response-body", Encoding.UTF8.GetString(await ReadBodyAsync(originalResponseBody)));
     }
 
     [Fact]
