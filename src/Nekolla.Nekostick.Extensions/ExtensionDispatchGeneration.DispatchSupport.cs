@@ -26,11 +26,15 @@ public sealed record ExtensionRouteHookDispatchResult
     private ExtensionRouteHookDispatchResult(
         bool succeeded,
         bool cancelled,
+        bool requestReplaced,
+        bool responseReplaced,
         ExtensionRouteRequestSnapshot request,
         ExtensionRouteResponseSnapshot? response)
     {
         Succeeded = succeeded;
         Cancelled = cancelled;
+        RequestReplaced = requestReplaced;
+        ResponseReplaced = responseReplaced;
         Request = request;
         Response = response;
     }
@@ -47,15 +51,25 @@ public sealed record ExtensionRouteHookDispatchResult
     /// <summary>Gets the final immutable response snapshot, when the stage supplies one.</summary>
     public ExtensionRouteResponseSnapshot? Response { get; }
 
+    /// <summary>Gets whether the winning hook action supplied the final request snapshot.</summary>
+    /// <remarks>When <see langword="false" />, <see cref="Request" /> aliases the caller-supplied input instance and no replacement was applied.</remarks>
+    internal bool RequestReplaced { get; }
+
+    /// <summary>Gets whether the winning hook action supplied the final response snapshot.</summary>
+    /// <remarks>When <see langword="false" />, <see cref="Response" /> aliases the caller-supplied input instance and no replacement was applied.</remarks>
+    internal bool ResponseReplaced { get; }
+
     internal static ExtensionRouteHookDispatchResult Success(
         ExtensionRouteRequestSnapshot request,
-        ExtensionRouteResponseSnapshot? response) =>
-        new(true, false, request, response);
+        ExtensionRouteResponseSnapshot? response,
+        bool requestReplaced,
+        bool responseReplaced) =>
+        new(true, false, requestReplaced, responseReplaced, request, response);
 
     internal static ExtensionRouteHookDispatchResult FailClosed(
         ExtensionRouteRequestSnapshot request,
         ExtensionRouteResponseSnapshot? response) =>
-        new(false, true, request, response);
+        new(false, true, false, false, request, response);
 }
 
 /// <summary>Captures route registrations made by one extension startup for one candidate generation.</summary>
@@ -259,6 +273,16 @@ public sealed partial class ExtensionDispatchGeneration
     public bool HasRouteHooks(Guid routeId) =>
         routeId != Guid.Empty && !IsRetiring && !_routeHooks.IsDefaultOrEmpty;
 
+    /// <summary>Gets whether this generation has a global action-capable route hook registered for the requested stage.</summary>
+    /// <param name="routeId">The matched stable route identifier; registrations are generation-global, so it is only checked for emptiness.</param>
+    /// <param name="stage">The trigger or return stage to probe.</param>
+    /// <returns><see langword="true" /> when at least one hook registration targets the stage.</returns>
+    internal bool HasRouteHooks(Guid routeId, ExtensionRouteEventStage stage) =>
+        routeId != Guid.Empty &&
+        !IsRetiring &&
+        !_routeHooks.IsDefaultOrEmpty &&
+        _routeHooks.Any(registration => registration.Stage == stage);
+
     /// <summary>Publishes one ordinary route observation through standard extension event queues.</summary>
     public int PublishRouteEvent(ExtensionRouteEvent? observation)
     {
@@ -348,6 +372,8 @@ public sealed partial class ExtensionDispatchGeneration
 
         var currentRequest = request;
         var currentResponse = response;
+        var requestReplaced = false;
+        var responseReplaced = false;
         foreach (var registration in _routeHooks)
         {
             if (IsRetiring)
@@ -377,9 +403,11 @@ public sealed partial class ExtensionDispatchGeneration
                     break;
                 case ExtensionRouteHookAction.ReplaceRequest when result.Request is not null:
                     currentRequest = result.Request;
+                    requestReplaced = true;
                     break;
                 case ExtensionRouteHookAction.ReplaceResponse when result.Response is not null:
                     currentResponse = result.Response;
+                    responseReplaced = true;
                     break;
                 case ExtensionRouteHookAction.CancelForwarding:
                     return ExtensionRouteHookDispatchResult.FailClosed(request, response);
@@ -390,7 +418,7 @@ public sealed partial class ExtensionDispatchGeneration
 
         return IsRetiring
             ? ExtensionRouteHookDispatchResult.FailClosed(request, response)
-            : ExtensionRouteHookDispatchResult.Success(currentRequest, currentResponse);
+            : ExtensionRouteHookDispatchResult.Success(currentRequest, currentResponse, requestReplaced, responseReplaced);
     }
 
     internal void InitializeRouteDispatch()

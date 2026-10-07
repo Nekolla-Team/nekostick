@@ -505,6 +505,417 @@ public sealed class HostRouteEventsPipelineTests
         Assert.Equal("response-body", Encoding.UTF8.GetString(returnBody!));
     }
 
+    [Fact]
+    public async Task TriggerContinueReturnsSameInstanceAndNoReplaceFlag()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(960);
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Trigger,
+                (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue))))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var original = Request("/original");
+
+        var result = await generation.DispatchRouteHooksAsync(
+            routeId,
+            RoutingTestData.Id(961),
+            ExtensionRouteEventStage.Trigger,
+            original,
+            null,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Cancelled);
+        Assert.Same(original, result.Request);
+        Assert.False(result.RequestReplaced);
+        Assert.False(result.ResponseReplaced);
+        Assert.Null(result.Response);
+    }
+
+    [Fact]
+    public async Task TriggerReplaceRequestSetsFlagAndCarriesPayload()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(962);
+        var original = Request("/original");
+        var replacement = Request("/replaced");
+        var factory = new RouteTestFactory
+        {
+            Configure = events =>
+            {
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                    ExtensionRouteEventStage.Trigger,
+                    (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue))));
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                    ExtensionRouteEventStage.Trigger,
+                    (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
+                        ExtensionRouteHookAction.ReplaceRequest,
+                        replacement))));
+            }
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+
+        var result = await generation.DispatchRouteHooksAsync(
+            routeId,
+            RoutingTestData.Id(963),
+            ExtensionRouteEventStage.Trigger,
+            original,
+            null,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Cancelled);
+        Assert.True(result.RequestReplaced);
+        Assert.False(result.ResponseReplaced);
+        Assert.Same(replacement, result.Request);
+        Assert.Equal("/replaced", result.Request.Path);
+    }
+
+    [Fact]
+    public async Task ReturnContinueReturnsSameInstanceAndNoReplaceFlag()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(964);
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Return,
+                (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue))))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var original = Request("/original");
+        var originalResponse = new ExtensionRouteResponseSnapshot(200);
+
+        var result = await generation.DispatchRouteHooksAsync(
+            routeId,
+            RoutingTestData.Id(965),
+            ExtensionRouteEventStage.Return,
+            original,
+            originalResponse,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Cancelled);
+        Assert.Same(original, result.Request);
+        Assert.Same(originalResponse, result.Response);
+        Assert.False(result.RequestReplaced);
+        Assert.False(result.ResponseReplaced);
+    }
+
+    [Fact]
+    public async Task ReturnCancelForwardingFailsClosedUnchanged()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(966);
+        var order = new List<int>();
+        var factory = new RouteTestFactory
+        {
+            Configure = events =>
+            {
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Return, (_, _) =>
+                {
+                    order.Add(1);
+                    return ValueTask.FromResult(new ExtensionRouteHookResult(
+                        ExtensionRouteHookAction.ReplaceResponse,
+                        response: new ExtensionRouteResponseSnapshot(201)));
+                }));
+                Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(ExtensionRouteEventStage.Return, (_, _) =>
+                {
+                    order.Add(2);
+                    return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.CancelForwarding));
+                }));
+            }
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var original = Request("/original");
+        var originalResponse = new ExtensionRouteResponseSnapshot(200);
+
+        var result = await generation.DispatchRouteHooksAsync(
+            routeId,
+            RoutingTestData.Id(967),
+            ExtensionRouteEventStage.Return,
+            original,
+            originalResponse,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExpectedRequestHookOrder, order);
+        Assert.False(result.Succeeded);
+        Assert.True(result.Cancelled);
+        Assert.False(result.RequestReplaced);
+        Assert.False(result.ResponseReplaced);
+        Assert.Same(original, result.Request);
+        Assert.Same(originalResponse, result.Response);
+        Assert.Equal(200, result.Response!.StatusCode);
+    }
+
+    [Fact]
+    public async Task ContinueLargeRequestBodyForwardsUnmodified()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(968);
+        var maximum = ExtensionRouteSnapshotLimits.MaximumBodyBytes;
+        var payload = new byte[maximum + 4096];
+        for (var index = 0; index < payload.Length; index++)
+        {
+            payload[index] = (byte)(index % 251);
+        }
+
+        var observedBody = (byte[]?)null;
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Trigger,
+                (context, _) =>
+                {
+                    observedBody = context.Request.Body.ToArray();
+                    return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
+                }))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var context = CreateContext(payload);
+
+        var session = await HostRouteEvents.BeginAsync(
+            context,
+            CreateRoutingSnapshot(routeId, generation),
+            CreateMatch(routeId),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(session);
+        Assert.False(session!.Cancelled);
+        Assert.NotNull(observedBody);
+        Assert.Equal(maximum, observedBody!.Length);
+        Assert.True(payload.AsSpan(0, maximum).SequenceEqual(observedBody));
+        Assert.Equal(payload, await ReadBodyAsync(context.Request.Body));
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        var result = await HostRouteEvents.CompleteAsync(
+            context,
+            session,
+            RouteTargetExecutionResult.Handled,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RouteTargetExecutionResult.Handled, result);
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ContinueLargeResponseBodyPassesUnmodified()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(969);
+        var maximum = ExtensionRouteSnapshotLimits.MaximumBodyBytes;
+        var payload = new byte[maximum + 512];
+        for (var index = 0; index < payload.Length; index++)
+        {
+            payload[index] = (byte)(index % 239);
+        }
+
+        var observedBody = (byte[]?)null;
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Return,
+                (context, _) =>
+                {
+                    observedBody = context.Response!.Body.ToArray();
+                    return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
+                }))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var context = CreateContext([]);
+        var originalBody = context.Response.Body;
+
+        var session = await HostRouteEvents.BeginAsync(
+            context,
+            CreateRoutingSnapshot(routeId, generation),
+            CreateMatch(routeId),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(session);
+        Assert.False(session!.Cancelled);
+        Assert.NotNull(session.ResponseBuffer);
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.Headers["X-Large"] = "yes";
+        await context.Response.Body.WriteAsync(payload, TestContext.Current.CancellationToken);
+
+        var result = await HostRouteEvents.CompleteAsync(
+            context,
+            session,
+            RouteTargetExecutionResult.Handled,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RouteTargetExecutionResult.Handled, result);
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Equal("yes", context.Response.Headers["X-Large"].ToString());
+        Assert.Same(originalBody, context.Response.Body);
+        Assert.Null(session.ResponseBuffer);
+        Assert.Equal(payload, await ReadBodyAsync(originalBody));
+        Assert.NotNull(observedBody);
+        Assert.Equal(maximum, observedBody!.Length);
+        Assert.True(payload.AsSpan(0, maximum).SequenceEqual(observedBody));
+    }
+
+    [Fact]
+    public async Task TriggerOnlyHookLeavesResponseStreamingUntouched()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(970);
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Trigger,
+                (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue))))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var context = CreateContext([]);
+        var originalBody = context.Response.Body;
+
+        var session = await HostRouteEvents.BeginAsync(
+            context,
+            CreateRoutingSnapshot(routeId, generation),
+            CreateMatch(routeId),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(session);
+        Assert.False(session!.Cancelled);
+        Assert.Null(session.ResponseBuffer);
+        Assert.Same(originalBody, context.Response.Body);
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.Body.WriteAsync(
+            Encoding.UTF8.GetBytes("streamed"),
+            TestContext.Current.CancellationToken);
+        var result = await HostRouteEvents.CompleteAsync(
+            context,
+            session,
+            RouteTargetExecutionResult.Handled,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RouteTargetExecutionResult.Handled, result);
+        Assert.Same(originalBody, context.Response.Body);
+        Assert.Equal("streamed", Encoding.UTF8.GetString(await ReadBodyAsync(originalBody)));
+    }
+
+    [Fact]
+    public async Task ContinueOnWebSocketUpgradeResponsePasses()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(971);
+        var observedStatus = 0;
+        var observedBody = (byte[]?)null;
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Return,
+                (context, _) =>
+                {
+                    observedStatus = context.Response!.StatusCode;
+                    observedBody = context.Response.Body.ToArray();
+                    return ValueTask.FromResult(new ExtensionRouteHookResult(ExtensionRouteHookAction.Continue));
+                }))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var context = CreateContext([]);
+        context.Request.Headers["Connection"] = "Upgrade";
+        context.Request.Headers["Upgrade"] = "websocket";
+        var originalBody = context.Response.Body;
+
+        var session = await HostRouteEvents.BeginAsync(
+            context,
+            CreateRoutingSnapshot(routeId, generation),
+            CreateMatch(routeId),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(session);
+        Assert.False(session!.Cancelled);
+        Assert.Null(session.ResponseBuffer);
+        Assert.Same(originalBody, context.Response.Body);
+
+        context.Response.StatusCode = StatusCodes.Status101SwitchingProtocols;
+        context.Response.Headers["Connection"] = "Upgrade";
+        context.Response.Headers["Upgrade"] = "websocket";
+        var result = await HostRouteEvents.CompleteAsync(
+            context,
+            session,
+            RouteTargetExecutionResult.Handled,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RouteTargetExecutionResult.Handled, result);
+        Assert.Equal(StatusCodes.Status101SwitchingProtocols, context.Response.StatusCode);
+        Assert.Equal("Upgrade", context.Response.Headers["Connection"].ToString());
+        Assert.Equal("websocket", context.Response.Headers["Upgrade"].ToString());
+        Assert.Equal(StatusCodes.Status101SwitchingProtocols, observedStatus);
+        Assert.NotNull(observedBody);
+        Assert.Empty(observedBody!);
+        Assert.Same(originalBody, context.Response.Body);
+        Assert.Empty(await ReadBodyAsync(originalBody));
+    }
+
+    [Fact]
+    public async Task ReplaceResponseOnUpgradeStillFailsClosed()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var manifest = Discover(fixture.RootPath);
+        var routeId = RoutingTestData.Id(972);
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Return,
+                (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
+                    ExtensionRouteHookAction.ReplaceResponse,
+                    response: new ExtensionRouteResponseSnapshot(
+                        StatusCodes.Status200OK,
+                        [new("X-Tampered", ["yes"])],
+                        Encoding.UTF8.GetBytes("tampered"))))))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, manifest, routeId);
+        var context = CreateContext([]);
+
+        var session = await HostRouteEvents.BeginAsync(
+            context,
+            CreateRoutingSnapshot(routeId, generation),
+            CreateMatch(routeId),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(session);
+        Assert.False(session!.Cancelled);
+
+        context.Response.StatusCode = StatusCodes.Status101SwitchingProtocols;
+        context.Response.Headers["Connection"] = "Upgrade";
+        context.Response.Headers["Upgrade"] = "websocket";
+        var result = await HostRouteEvents.CompleteAsync(
+            context,
+            session,
+            RouteTargetExecutionResult.Handled,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RouteTargetExecutionResult.Cancelled, result);
+        Assert.Equal(499, context.Response.StatusCode);
+        Assert.Empty(context.Response.Headers);
+        Assert.Empty(await ReadBodyAsync(context.Response.Body));
+    }
+
     private static async Task<ExtensionDispatchGeneration> PrepareAsync(
         ExtensionRuntimeManager manager,
         ExtensionManifest manifest,
@@ -547,8 +958,52 @@ public sealed class HostRouteEventsPipelineTests
     {
         Assert.False(result.Succeeded);
         Assert.True(result.Cancelled);
+        Assert.False(result.RequestReplaced);
+        Assert.False(result.ResponseReplaced);
         Assert.Equal(original.Path, result.Request.Path);
         Assert.Null(result.Response);
+    }
+
+    private static HostRoutingSnapshot CreateRoutingSnapshot(
+        Guid routeId,
+        ExtensionDispatchGeneration generation)
+    {
+        var route = RoutingTestData.CreateRoute(routeId, RouteMatcherType.Exact, "/original");
+        var configuration = RoutingTestData.CreateSnapshot(1, ImmutableArray.Create(route));
+        return new HostRoutingSnapshot(
+            configuration,
+            RoutingTestData.Build(route),
+            ImmutableDictionary<Guid, ExecutableRoute>.Empty,
+            generation,
+            ImmutableDictionary<Guid, string?>.Empty);
+    }
+
+    private static RouteMatch CreateMatch(Guid routeId) =>
+        RoutingTestData.Build(RoutingTestData.CreateRoute(routeId, RouteMatcherType.Exact, "/original"))
+            .Match(new RouteMatchInput("/original", "example.test", "GET"))
+            .Match!;
+
+    private static DefaultHttpContext CreateContext(byte[] requestBody)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = "GET";
+        context.Request.Path = "/original";
+        context.Request.Host = new HostString("example.test");
+        context.Request.Body = new MemoryStream(requestBody);
+        context.Response.Body = new MemoryStream();
+        return context;
+    }
+
+    private static async Task<byte[]> ReadBodyAsync(Stream body)
+    {
+        if (body.CanSeek)
+        {
+            body.Position = 0;
+        }
+
+        using var buffer = new MemoryStream();
+        await body.CopyToAsync(buffer, TestContext.Current.CancellationToken);
+        return buffer.ToArray();
     }
 
     private sealed class RouteTestFactory : IExtensionCapabilityFactory, IExtensionCapabilityFactoryRouteEvents

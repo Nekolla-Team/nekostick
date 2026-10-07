@@ -24,6 +24,14 @@ internal static partial class HostRouteEvents
         }
     }
 
+    private static bool HasUpgradeIntent(HttpContext context) =>
+        context.WebSockets.IsWebSocketRequest ||
+        context.Request.Headers.ContainsKey("Upgrade");
+
+    private static bool IsUpgradeResponse(HttpContext context) =>
+        context.Response.StatusCode == StatusCodes.Status101SwitchingProtocols &&
+        context.Response.Headers.ContainsKey("Upgrade");
+
     internal static async ValueTask<HostRouteEventSession?> BeginAsync(
         HttpContext context,
         HostRoutingSnapshot snapshot,
@@ -39,7 +47,8 @@ internal static partial class HostRouteEvents
 
         var hasHooks = generation.HasRouteHooks(match.RouteId);
         var isStreamingHandler = generation.IsStreamingHandler(match.Target?.HandlerId);
-        var includeBody = hasHooks && !isStreamingHandler;
+        var isUpgradeRequest = HasUpgradeIntent(context);
+        var includeBody = hasHooks && !isStreamingHandler && !isUpgradeRequest;
         ExtensionRouteRequestSnapshot request;
         try
         {
@@ -61,7 +70,10 @@ internal static partial class HostRouteEvents
             match.RouteId,
             Guid.CreateVersion7(),
             request,
-            hasHooks);
+            hasHooks)
+        {
+            UpgradeIntent = isUpgradeRequest
+        };
         if (!hasHooks)
         {
             PublishBestEffort(generation, new ExtensionRouteEvent(
@@ -86,21 +98,29 @@ internal static partial class HostRouteEvents
             return session;
         }
 
-        if (!TryApplyRequest(context, trigger.Request, logger))
+        if (trigger.RequestReplaced || !ReferenceEquals(trigger.Request, request))
         {
-            session.Cancelled = true;
-            return session;
-        }
+            if (!TryApplyRequest(context, trigger.Request, logger))
+            {
+                session.Cancelled = true;
+                return session;
+            }
 
-        session.Request = trigger.Request;
+            session.Request = trigger.Request;
+        }
         PublishBestEffort(generation, new ExtensionRouteEvent(
             match.RouteId,
             session.CorrelationId,
             ExtensionRouteEventStage.Trigger,
             trigger.Request), logger);
-        session.OriginalResponseBody = context.Response.Body;
-        session.ResponseBuffer = new MemoryStream();
-        context.Response.Body = session.ResponseBuffer;
+        if (!isUpgradeRequest &&
+            generation.HasRouteHooks(match.RouteId, ExtensionRouteEventStage.Return))
+        {
+            session.OriginalResponseBody = context.Response.Body;
+            session.ResponseBuffer = new MemoryStream();
+            context.Response.Body = session.ResponseBuffer;
+        }
+
         return session;
     }
 
@@ -139,14 +159,13 @@ internal static partial class HostRouteEvents
             return RouteTargetExecutionResult.Cancelled;
         }
 
-        var response = TryCreateResponseSnapshot(context, session.ResponseBuffer, logger);
+        var isUpgrade = session.UpgradeIntent || IsUpgradeResponse(context);
+        var response = isUpgrade
+            ? TryCreateResponseSnapshot(context, null, logger)
+            : TryCreateResponseSnapshot(context, session.ResponseBuffer, logger);
         if (response is null)
         {
-            RestoreResponseBody(context, session);
-            context.Response.Clear();
-            context.Response.StatusCode = 499;
-            context.Abort();
-            return RouteTargetExecutionResult.Cancelled;
+            return FailClosedResponse(context, session);
         }
 
         var result = await session.Generation.DispatchRouteHooksAsync(
@@ -157,14 +176,15 @@ internal static partial class HostRouteEvents
                 response,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (!result.Succeeded || result.Cancelled || result.Response is null ||
-            !IsValidResponseReplacement(result.Response))
+        if (!result.Succeeded || result.Cancelled || result.Response is null)
         {
-            RestoreResponseBody(context, session);
-            context.Response.Clear();
-            context.Response.StatusCode = 499;
-            context.Abort();
-            return RouteTargetExecutionResult.Cancelled;
+            return FailClosedResponse(context, session);
+        }
+
+        var responseReplaced = result.ResponseReplaced || !ReferenceEquals(result.Response, response);
+        if (responseReplaced && (isUpgrade || !IsValidResponseReplacement(result.Response)))
+        {
+            return FailClosedResponse(context, session);
         }
 
         PublishBestEffort(session.Generation, new ExtensionRouteEvent(
@@ -173,18 +193,24 @@ internal static partial class HostRouteEvents
             ExtensionRouteEventStage.Return,
             result.Request,
             result.Response), logger);
-        RestoreResponseBody(context, session);
+
         if (outcome != RouteTargetExecutionResult.Handled)
         {
+            RestoreResponseBody(context, session);
             return outcome;
         }
 
+        if (!responseReplaced)
+        {
+            await FlushResponseBufferAsync(session, cancellationToken).ConfigureAwait(false);
+            RestoreResponseBody(context, session);
+            return outcome;
+        }
+
+        RestoreResponseBody(context, session);
         if (!await CommitResponseAsync(context, result.Response, cancellationToken, logger).ConfigureAwait(false))
         {
-            context.Response.Clear();
-            context.Response.StatusCode = 499;
-            context.Abort();
-            return RouteTargetExecutionResult.Cancelled;
+            return FailClosedResponse(context, session);
         }
 
         return outcome;
@@ -219,19 +245,24 @@ internal static partial class HostRouteEvents
             var originalPosition = stream.CanSeek ? stream.Position : 0;
             await using var buffer = new MemoryStream();
             var temporary = new byte[16 * 1024];
-            while (true)
+            var maximum = ExtensionRouteSnapshotLimits.MaximumBodyBytes;
+            while (buffer.Length < maximum)
             {
-                var read = await stream.ReadAsync(temporary.AsMemory(), cancellationToken).ConfigureAwait(false);
+                var limit = (int)Math.Min(temporary.Length, maximum - buffer.Length);
+                var read = await stream.ReadAsync(temporary.AsMemory(0, limit), cancellationToken).ConfigureAwait(false);
                 if (read == 0)
                 {
                     break;
                 }
 
                 await buffer.WriteAsync(temporary.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                if (buffer.Length > ExtensionRouteSnapshotLimits.MaximumBodyBytes)
-                {
-                    throw new InvalidOperationException("The route event body exceeded its bound.");
-                }
+            }
+
+            // The observation degrades by truncation: reaching the bound also covers exact-length bodies,
+            // which is acceptable for a debug-only note.
+            if (buffer.Length == maximum)
+            {
+                NotifySnapshotTruncation(logger, "request-snapshot");
             }
 
             if (stream.CanSeek)
@@ -354,12 +385,7 @@ internal static partial class HostRouteEvents
     {
         try
         {
-            var bytes = body is null ? Array.Empty<byte>() : body.ToArray();
-            if (bytes.Length > ExtensionRouteSnapshotLimits.MaximumBodyBytes)
-            {
-                return null;
-            }
-
+            var bytes = ReadSnapshotBody(body, logger);
             var headers = context.Response.Headers.Select(static pair =>
                 new KeyValuePair<string, IEnumerable<string>>(pair.Key, pair.Value.ToArray()!));
             return new ExtensionRouteResponseSnapshot(context.Response.StatusCode, headers, bytes);
@@ -369,6 +395,26 @@ internal static partial class HostRouteEvents
             LogObservationFailure(logger, exception, nameof(TryCreateResponseSnapshot), "response-snapshot");
             return null;
         }
+    }
+
+    private static byte[] ReadSnapshotBody(MemoryStream? body, ILogger? logger)
+    {
+        if (body is null || body.Length == 0)
+        {
+            return Array.Empty<byte>();
+        }
+
+        var maximum = ExtensionRouteSnapshotLimits.MaximumBodyBytes;
+        if (body.Length <= maximum)
+        {
+            return body.ToArray();
+        }
+
+        NotifySnapshotTruncation(logger, "response-snapshot");
+        var bytes = new byte[maximum];
+        body.Position = 0;
+        body.ReadExactly(bytes);
+        return bytes;
     }
 
     internal static void RestoreResponseBody(HttpContext context, HostRouteEventSession? session)
@@ -381,6 +427,44 @@ internal static partial class HostRouteEvents
         context.Response.Body = originalBody;
         session.ResponseBuffer?.Dispose();
         session.ResponseBuffer = null;
+    }
+
+    private static async ValueTask FlushResponseBufferAsync(
+        HostRouteEventSession session,
+        CancellationToken cancellationToken)
+    {
+        if (session.ResponseBuffer is not { Length: > 0 } buffer ||
+            session.OriginalResponseBody is not { } destination)
+        {
+            return;
+        }
+
+        buffer.Position = 0;
+        await buffer.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RouteTargetExecutionResult FailClosedResponse(HttpContext context, HostRouteEventSession session)
+    {
+        RestoreResponseBody(context, session);
+        if (!context.Response.HasStarted)
+        {
+            context.Response.Clear();
+            context.Response.StatusCode = 499;
+        }
+
+        context.Abort();
+        return RouteTargetExecutionResult.Cancelled;
+    }
+
+    private static void NotifySnapshotTruncation(ILogger? logger, string operation)
+    {
+        if (logger is { } target)
+        {
+            HostLogMessages.RouteEventSnapshotTruncated(
+                target,
+                operation,
+                ExtensionRouteSnapshotLimits.MaximumBodyBytes);
+        }
     }
 
     private static async ValueTask<bool> CommitResponseAsync(
@@ -439,6 +523,7 @@ internal sealed class HostRouteEventSession
     internal Guid CorrelationId { get; }
     internal ExtensionRouteRequestSnapshot Request { get; set; }
     internal bool HasHooks { get; }
+    internal bool UpgradeIntent { get; init; }
     internal bool Cancelled { get; set; }
     internal Stream? OriginalResponseBody { get; set; }
     internal MemoryStream? ResponseBuffer { get; set; }

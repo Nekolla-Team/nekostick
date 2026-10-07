@@ -191,6 +191,49 @@ public sealed class HostRouteHeaderSafetyTests
         Assert.Equal("ok", await ReadBodyAsync(context.Response.Body));
     }
 
+    [Fact]
+    public async Task ReplaceResponseValidationStillFiresOnConflict()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson();
+        var routeId = RoutingTestData.Id(945);
+        var factory = new RouteTestFactory
+        {
+            Configure = events => Assert.Same(ExtensionRouteRegistrationResult.Success, events.TryRegisterHook(
+                ExtensionRouteEventStage.Return,
+                (_, _) => ValueTask.FromResult(new ExtensionRouteHookResult(
+                    ExtensionRouteHookAction.ReplaceResponse,
+                    response: new ExtensionRouteResponseSnapshot(
+                        StatusCodes.Status204NoContent,
+                        null,
+                        Encoding.UTF8.GetBytes("body"))))))
+        };
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current, capabilityFactory: factory);
+        var generation = await PrepareAsync(manager, fixture.RootPath, routeId);
+        var context = CreateContext("/original", "example.test", []);
+        var session = await HostRouteEvents.BeginAsync(
+            context,
+            CreateRoutingSnapshot(routeId, generation),
+            CreateMatch(routeId),
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(session);
+        Assert.False(session!.Cancelled);
+
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.Body.WriteAsync(
+            Encoding.UTF8.GetBytes("original"),
+            TestContext.Current.CancellationToken);
+        var result = await HostRouteEvents.CompleteAsync(
+            context,
+            session,
+            RouteTargetExecutionResult.Handled,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RouteTargetExecutionResult.Cancelled, result);
+        Assert.Equal(499, context.Response.StatusCode);
+        Assert.Empty(context.Response.Headers);
+        Assert.Equal("", await ReadBodyAsync(context.Response.Body));
+    }
+
     private static async Task<ExtensionDispatchGeneration> PrepareAsync(
         ExtensionRuntimeManager manager,
         string rootPath,

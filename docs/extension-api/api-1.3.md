@@ -468,6 +468,10 @@ bridge13.RouteEvents.TryRegisterHook(ExtensionRouteEventStage.Trigger, (context,
 | header 总文本最大长度 | 64 KiB |
 | host 最大长度 | 256 |
 
+扩展自己构造替换快照时必须遵守上表；超限抛异常 = 钩子 fail closed。
+
+Host 提供给 hook / 观测的快照则按**截断降级**处理：body 最多复制 64 KiB，超出部分被截断（只记 debug 日志），**不会**抛异常，也绝不因此取消转发或改动转发字节——请求体被截断只影响观察内容，目标收到的仍是完整原始请求体；未实际发生 `ReplaceResponse` 时响应同样原样放行。需要完整 body 的扩展应改用流式处理器。
+
 `ExtensionRouteHookResult.IsValidFor(stage)` 可以在返回前自检动作是否合法。
 
 ## 自定义文本日志（LogWriter）
@@ -590,8 +594,11 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 
 ### 与路由钩子 / 观测的交互
 
-- 流式路由上的 route hooks 收到的请求体快照为**空**（`Body` 长度 0）。
-- 如果某条流式路由上存在 hooks，Host 会把整个流式响应**完全缓冲到内存**后再提供给 hooks 做 snapshot / rollback；扩展不需要关心这一行为，但应意识到大流会被缓冲。
+- 流式路由上的 route hooks 收到的请求体快照为**空**（`Body` 长度 0）；WebSocket upgrade 请求同理。
+- 只有路由上存在 **Return 阶段**钩子且请求不是 upgrade 时，Host 才把响应体缓冲后提供给 hooks 做 snapshot / rollback；仅有 Trigger 阶段钩子（或仅订阅观测）时响应保持直写转发，不做缓冲、校验或重写。
+- 响应体超过快照上限（64 KiB）只影响给 hooks / 观测的共享快照（截断降级）；**发给客户端的字节不受影响**：hook 全部 `Continue` 时缓冲内容原样放行，只有实际 `ReplaceResponse` 才应用并校验扩展提供的替换。
+- WebSocket upgrade（请求 upgrade，或 101 且带 `Upgrade` header 的响应）完全不进入替换机制；对这类响应尝试 `ReplaceResponse` 按 fail closed 处理。
+- 扩展不需要关心缓冲细节，但应意识到存在 Return 钩子的路由上大响应会被缓冲。
 
 ### 何时使用流式处理器
 
@@ -648,10 +655,10 @@ context.Registration.TryRegisterStreamingHandler(new StreamingHandler());
 | 路由观测订阅数（每扩展） | 256 |
 | 动作钩子数（每扩展） | 128 |
 | 动作钩子回调时限 | 250 ms |
-| 观测 / 钩子快照 body | 64 KiB |
+| 观测 / 钩子快照 body | 64 KiB（超出按截断降级，不影响转发字节） |
 | 自定义日志单条文本 | 4096 字符 |
 | 流式请求体上限 | 由路由 `MaxRequestBodyBytes` 决定 |
-| 流式响应 hook 缓冲 | hook 启用时完整响应体被缓冲到内存（受 Host 内存限制） |
+| 流式响应 hook 缓冲 | 仅存在 Return 阶段钩子且非 upgrade 时完整响应体被缓冲到内存（受 Host 内存限制） |
 
 ## 从 1.2 迁移
 
