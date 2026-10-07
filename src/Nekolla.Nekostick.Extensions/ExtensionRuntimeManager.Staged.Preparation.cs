@@ -382,7 +382,9 @@ public sealed partial class ExtensionRuntimeManager
                 routeIdsByExtension,
                 _logger,
                 EnterGenerationDispatchAsync,
-                GetPublishedGeneration);
+                GetPublishedGeneration,
+                IsGenerationEntrySuspended,
+                WaitForGenerationEntryResolutionAsync);
             var handoffPrevious = changedPrevious
                 .Where(previousContext => candidateById.ContainsKey(previousContext.Manifest.Id))
                 .ToImmutableArray();

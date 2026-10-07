@@ -12,8 +12,11 @@ public sealed partial class HostConfigurationPublisher
         bool HasUnavailableLoadedRecord,
         bool HasQuarantinedLoadedRecord,
         ImmutableHashSet<string> ForceReloadIds,
-        ImmutableArray<ExtensionNodeStateWrite> NodeStates);
+        ImmutableArray<ExtensionNodeStateWrite> NodeStates,
+        ImmutableHashSet<string> QuarantinedIds);
     private static readonly ImmutableHashSet<string> EmptyForceReloadIds =
+        ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
+    private static readonly ImmutableHashSet<string> EmptyQuarantinedIds =
         ImmutableHashSet<string>.Empty.WithComparer(StringComparer.Ordinal);
 
     private readonly record struct ExtensionSettingsIdentity(
@@ -52,7 +55,8 @@ public sealed partial class HostConfigurationPublisher
                 false,
                 false,
                 requestedForceReloadIds,
-                ImmutableArray<ExtensionNodeStateWrite>.Empty);
+                ImmutableArray<ExtensionNodeStateWrite>.Empty,
+                EmptyQuarantinedIds);
         }
 
         var durableRecords = new Dictionary<string, ExtensionRecordConfiguration>(StringComparer.Ordinal);
@@ -406,17 +410,66 @@ public sealed partial class HostConfigurationPublisher
         Dictionary<string, ExtensionNodeStateWrite> observations,
         IEnumerable<string> unavailableLoadedIds,
         IEnumerable<string> quarantinedIds,
-        ImmutableHashSet<string> forceReloadIds) =>
-        new(
+        ImmutableHashSet<string> forceReloadIds)
+    {
+        var quarantinedSet = quarantinedIds.ToImmutableHashSet(StringComparer.Ordinal);
+        return new(
             descriptors,
             unavailableLoadedIds.Any(),
-            quarantinedIds.Any(quarantinedId =>
+            quarantinedSet.Any(quarantinedId =>
                 observations.TryGetValue(quarantinedId, out var state) &&
                 state.LoadState == ExtensionLoadState.Failed),
             forceReloadIds,
             observations.Values
                 .OrderBy(static state => state.ExtensionId, StringComparer.Ordinal)
-                .ToImmutableArray());
+                .ToImmutableArray(),
+            quarantinedSet);
+    }
+
+    /// <summary>
+    /// Builds the publication-time snapshot copy without routes owned by quarantined
+    /// extensions; the durable snapshot keeps every route.
+    /// </summary>
+    /// <param name="snapshot">The publication snapshot to filter.</param>
+    /// <param name="routeOwners">The route-to-owner map of the publication snapshot.</param>
+    /// <param name="quarantinedIds">The quarantined extension identifiers.</param>
+    private static HostConfigurationSnapshot ExcludeQuarantinedOwnedRoutes(
+        HostConfigurationSnapshot snapshot,
+        ImmutableDictionary<Guid, string?> routeOwners,
+        ImmutableHashSet<string> quarantinedIds)
+    {
+        if (quarantinedIds.IsEmpty || snapshot.Routes.IsDefaultOrEmpty)
+        {
+            return snapshot;
+        }
+
+        var routes = ImmutableArray.CreateBuilder<RouteConfiguration>(snapshot.Routes.Length);
+        foreach (var route in snapshot.Routes)
+        {
+            var owner = routeOwners.TryGetValue(route.Id, out var mappedOwner) && mappedOwner is not null
+                ? mappedOwner
+                : route.OwnerExtensionId;
+            if (owner is not null && quarantinedIds.Contains(owner))
+            {
+                continue;
+            }
+
+            routes.Add(route);
+        }
+
+        return routes.Count == snapshot.Routes.Length
+            ? snapshot
+            : new HostConfigurationSnapshot(
+                snapshot.Version,
+                snapshot.GlobalSettings,
+                routes.ToImmutable(),
+                snapshot.Services,
+                snapshot.ExtensionRecords,
+                snapshot.ExtensionSettings)
+            {
+                CommittedBy = snapshot.CommittedBy
+            };
+    }
     private static string DirectoryName(string directory)
     {
         var trimmed = directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);

@@ -129,7 +129,8 @@ internal sealed partial class HostRouteDispatcher
         {
             await WriteGenericServiceUnavailableAsync(
                 context,
-                HostGenericUnavailableReason.SnapshotLeaseUnavailable);
+                HostGenericUnavailableReason.SnapshotLeaseUnavailable,
+                _snapshotAccessor.Current);
             return;
         }
 
@@ -483,6 +484,9 @@ internal sealed partial class HostRouteDispatcher
                     (StatusCodes.Status500InternalServerError, "Internal server error."),
                 _ => (StatusCodes.Status503ServiceUnavailable, ServiceUnavailableMessage)
             };
+            var failureDetail = executionResult == RouteTargetExecutionResult.Unavailable
+                ? HostRouteTargetFailureDetail.Get(context)
+                : null;
             var wroteResponse = statusCode == StatusCodes.Status503ServiceUnavailable
                 ? await WriteGenericServiceUnavailableAsync(
                     context,
@@ -490,7 +494,8 @@ internal sealed partial class HostRouteDispatcher
                     snapshot,
                     match.RouteId,
                     routeConfiguration?.Target.Type ?? match.Target?.Type,
-                    routeConfiguration?.OwnerExtensionId)
+                    routeConfiguration?.OwnerExtensionId,
+                    failureDetail)
                 : await WriteResponseAsync(context, statusCode, message);
             if (wroteResponse)
             {

@@ -38,7 +38,8 @@ internal sealed partial class HostRouteDispatcher
         HostRoutingSnapshot? snapshot = null,
         Guid? routeId = null,
         RouteTargetType? targetType = null,
-        string? ownerExtensionId = null)
+        string? ownerExtensionId = null,
+        string? failureDetail = null)
     {
         var wroteResponse = await WriteResponseAsync(
             context,
@@ -64,7 +65,8 @@ internal sealed partial class HostRouteDispatcher
                 snapshot?.DispatchGeneration?.GenerationId,
                 routeId,
                 targetType,
-                ownerExtensionId);
+                ownerExtensionId,
+                failureDetail);
         }
 
         return true;

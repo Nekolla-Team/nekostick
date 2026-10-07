@@ -177,7 +177,7 @@ internal static partial class HostLogMessages
     [LoggerMessage(
         EventId = 1112,
         Level = LogLevel.Warning,
-        Message = "Generic service unavailable response produced. Reason: {Reason}. StatusCode: {StatusCode}. TraceIdentifier: {TraceIdentifier}. ActivityTraceId: {ActivityTraceId}. ConfigurationVersion: {ConfigurationVersion}. PublicationGenerationId: {PublicationGenerationId}. RouteId: {RouteId}. TargetType: {TargetType}. OwnerExtensionId: {OwnerExtensionId}.")]
+        Message = "Generic service unavailable response produced. Reason: {Reason}. StatusCode: {StatusCode}. TraceIdentifier: {TraceIdentifier}. ActivityTraceId: {ActivityTraceId}. ConfigurationVersion: {ConfigurationVersion}. PublicationGenerationId: {PublicationGenerationId}. RouteId: {RouteId}. TargetType: {TargetType}. OwnerExtensionId: {OwnerExtensionId}. FailureDetail: {FailureDetail}.")]
     internal static partial void GenericServiceUnavailable(
         ILogger logger,
         HostGenericUnavailableReason reason,
@@ -188,7 +188,8 @@ internal static partial class HostLogMessages
         long? publicationGenerationId,
         Guid? routeId,
         RouteTargetType? targetType,
-        string? ownerExtensionId);
+        string? ownerExtensionId,
+        string? failureDetail);
 
     [LoggerMessage(
         EventId = 1113,
@@ -802,6 +803,14 @@ internal static partial class HostLogMessages
         Guid serviceId,
         int port,
         PortLeaseOperationStatus status);
+    [LoggerMessage(
+        EventId = 1114,
+        Level = LogLevel.Debug,
+        Message = "Route event snapshot body reached the observation bound and was truncated. Operation: {Operation}. MaximumBodyBytes: {MaximumBodyBytes}.")]
+    internal static partial void RouteEventSnapshotTruncated(
+        ILogger logger,
+        string operation,
+        int maximumBodyBytes);
 
 }
 

@@ -188,6 +188,7 @@ public sealed class HostRouteDispatcherDiagnosticsTests
         Assert.Equal(routeId, unavailableLog.Fields["RouteId"]);
         Assert.Equal(RouteTargetType.StaticFile, Assert.IsType<RouteTargetType>(unavailableLog.Fields["TargetType"]));
         Assert.Equal(extensionId, unavailableLog.Fields["OwnerExtensionId"]);
+        Assert.Null(unavailableLog.Fields["FailureDetail"]);
 
         var recorded = BuildRecordedText(unavailableLog);
         foreach (var sensitiveValue in new[]
@@ -205,6 +206,91 @@ public sealed class HostRouteDispatcherDiagnosticsTests
         {
             Assert.DoesNotContain(sensitiveValue, recorded, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public async Task GenericServiceUnavailableCarriesExtensionFailureDetailWhenPresent()
+    {
+        var routeId = RoutingTestData.Id(344);
+        const string extensionId = "safe-extension-id-marker";
+        const string failureDetail = "entrypoint replaced\nwhile the request was parked";
+        var route = CreateRoute(routeId, "/failure-detail", "/failure-detail-target", extensionId);
+        var configuration = RoutingTestData.CreateSnapshot(18, ImmutableArray.Create(route));
+        var snapshot = new HostRoutingSnapshot(configuration, RoutingTestData.Build(new[] { route }));
+        var logger = new CapturingLogger();
+        var context = CreateContext(
+            "/failure-detail",
+            "/failure-detail",
+            "example.test",
+            "GET",
+            "header",
+            "cookie",
+            "authorization",
+            "connection");
+
+        var statusCode = await DispatchAsync(
+            new FixedSnapshotAccessor(snapshot),
+            context,
+            logger,
+            new UnavailableWithFailureDetailExecutor(failureDetail));
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
+        context.Response.Body.Position = 0;
+        using var reader = new StreamReader(
+            context.Response.Body,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true,
+            bufferSize: 1024,
+            leaveOpen: true);
+        Assert.Equal("Service unavailable.", await reader.ReadToEndAsync(TestContext.Current.CancellationToken));
+
+        var unavailableLog = Assert.Single(
+            logger.Entries,
+            entry => entry.EventId == HostEventIds.GenericServiceUnavailable);
+        Assert.Equal(
+            HostGenericUnavailableReason.TargetUnavailable,
+            Assert.IsType<HostGenericUnavailableReason>(unavailableLog.Fields["Reason"]));
+        Assert.Equal(routeId, unavailableLog.Fields["RouteId"]);
+        Assert.Equal("'" + failureDetail.Replace("\n", "\\n", StringComparison.Ordinal) + "'", unavailableLog.Fields["FailureDetail"]);
+    }
+
+    [Fact]
+    public async Task SnapshotLeaseUnavailableLogsLastPublishedVersionWhenAvailable()
+    {
+        var route = RoutingTestData.CreateRoute(
+            RoutingTestData.Id(345),
+            RouteMatcherType.Exact,
+            "/lease-unavailable");
+        var configuration = RoutingTestData.CreateSnapshot(19, ImmutableArray.Create(route));
+        var snapshot = new HostRoutingSnapshot(configuration, RoutingTestData.Build(new[] { route }));
+        var logger = new CapturingLogger();
+        var context = CreateContext(
+            "/lease-unavailable",
+            "/lease-unavailable",
+            "example.test",
+            "GET",
+            "header",
+            "cookie",
+            "authorization",
+            "connection");
+
+        var statusCode = await DispatchAsync(
+            new UnleaseableSnapshotAccessor(snapshot),
+            context,
+            logger);
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
+        var unavailableLog = Assert.Single(
+            logger.Entries,
+            entry => entry.EventId == HostEventIds.GenericServiceUnavailable);
+        Assert.Equal(
+            HostGenericUnavailableReason.SnapshotLeaseUnavailable,
+            Assert.IsType<HostGenericUnavailableReason>(unavailableLog.Fields["Reason"]));
+        Assert.Equal(19L, Assert.IsType<long>(unavailableLog.Fields["ConfigurationVersion"]));
+        Assert.Null(unavailableLog.Fields["PublicationGenerationId"]);
+        Assert.Null(unavailableLog.Fields["RouteId"]);
+        Assert.Null(unavailableLog.Fields["OwnerExtensionId"]);
+        Assert.Null(unavailableLog.Fields["FailureDetail"]);
     }
 
     [Fact]
@@ -293,14 +379,28 @@ public sealed class HostRouteDispatcherDiagnosticsTests
         return context;
     }
 
-    private static async Task<int> DispatchAsync(
+    private static Task<int> DispatchAsync(
         HostRoutingSnapshot snapshot,
         DefaultHttpContext context,
-        CapturingLogger logger)
+        CapturingLogger logger) =>
+        DispatchAsync(new FixedSnapshotAccessor(snapshot), context, logger);
+
+    private static Task<int> DispatchAsync(
+        IHostRoutingSnapshotAccessor snapshotAccessor,
+        DefaultHttpContext context,
+        CapturingLogger logger) =>
+        DispatchAsync(snapshotAccessor, context, logger, NoOpRouteTargetExecutor.Instance);
+
+    private static async Task<int> DispatchAsync(
+        IHostRoutingSnapshotAccessor snapshotAccessor,
+        DefaultHttpContext context,
+        CapturingLogger logger,
+        IRouteTargetExecutor targetExecutor)
     {
         var dispatcher = new HostRouteDispatcher(
-            new FixedSnapshotAccessor(snapshot),
+            snapshotAccessor,
             new DecliningFallbackDispatcher(),
+            targetExecutor,
             logger);
 
         await dispatcher.DispatchAsync(context);
@@ -317,6 +417,34 @@ public sealed class HostRouteDispatcherDiagnosticsTests
         internal FixedSnapshotAccessor(HostRoutingSnapshot current) => Current = current;
 
         public HostRoutingSnapshot Current { get; }
+    }
+
+    private sealed class UnleaseableSnapshotAccessor : IHostRoutingSnapshotAccessor, IHostRoutingSnapshotLeaseAccessor
+    {
+        internal UnleaseableSnapshotAccessor(HostRoutingSnapshot current) => Current = current;
+
+        public HostRoutingSnapshot Current { get; }
+
+        public HostRoutingSnapshotLease? TryAcquireLease() => null;
+    }
+
+    private sealed class UnavailableWithFailureDetailExecutor : IRouteTargetExecutor
+    {
+        private readonly string _failureDetail;
+
+        internal UnavailableWithFailureDetailExecutor(string failureDetail) => _failureDetail = failureDetail;
+
+        public ValueTask<RouteTargetExecutionResult> ExecuteAsync(
+            HttpContext context,
+            HostRoutingSnapshot snapshot,
+            RouteMatch match,
+            CancellationToken cancellationToken)
+        {
+            // Mirrors HostRouteTargetExecutor, which records the sanitized extension failure
+            // detail for the dispatcher's generic 503 diagnostics.
+            HostRouteTargetFailureDetail.Set(context, _failureDetail);
+            return ValueTask.FromResult(RouteTargetExecutionResult.Unavailable);
+        }
     }
 
     private sealed class DecliningFallbackDispatcher : IRouteFallbackDispatcher

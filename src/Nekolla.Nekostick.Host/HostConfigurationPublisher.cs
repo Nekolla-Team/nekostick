@@ -133,6 +133,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         await _publicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var staged = false;
         var stagedSnapshot = snapshot;
+        var swapped = false;
         ExtensionGenerationPreparation? activePreparation = null;
         try
         {
@@ -281,6 +282,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         snapshot,
                         previousGeneration,
                         desiredSet.NodeStates,
+                        desiredSet.QuarantinedIds,
                         requestedForceReloadIds.Count != 0,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -323,6 +325,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         snapshot,
                         previousGeneration,
                         desiredSet.NodeStates,
+                        desiredSet.QuarantinedIds,
                         requestedForceReloadIds.Count != 0,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -349,6 +352,18 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
             }
             var publishedGeneration = ready.Generation!;
 
+            // The live publication must not expose routes owned by quarantined
+            // extensions; the durable snapshot keeps them, so only this in-memory
+            // publication copy is filtered.
+            _routeOwners = await ReadRouteOwnersAsync(
+                    publicationSnapshot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            publicationSnapshot = ExcludeQuarantinedOwnedRoutes(
+                publicationSnapshot,
+                _routeOwners,
+                desiredSet.QuarantinedIds);
+
             var publicationStageAdmission = _snapshotHolder.TryStage(publicationSnapshot);
             if (publicationStageAdmission != SnapshotAdmission.Accepted)
             {
@@ -362,10 +377,6 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
 
             stagedSnapshot = publicationSnapshot;
             var publicationServiceOwners = await ReadServiceOwnersAsync(
-                    publicationSnapshot,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            _routeOwners = await ReadRouteOwnersAsync(
                     publicationSnapshot,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -384,11 +395,11 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                         $"Extension '{extensionIdForFailureDetail}' could not be reloaded because snapshot replacement failed with admission '{publicationAdmission}'."));
             }
 
+            swapped = true;
             // TryReplace makes the prepared generation the live publication. It
             // must not be aborted or marked rejected when manager completion or
             // event delivery fails afterwards.
             staged = false;
-            activePreparation = null;
             HostLogMessages.ConfigurationSnapshotApplied(
                 _logger,
                 publicationSnapshot.Version,
@@ -412,14 +423,25 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                     publicationSnapshot.Version,
                     excludedBindings);
             }
-            if (!await preparation.CompletePublicationAsync().ConfigureAwait(false))
+            var publicationCompleted = await preparation.CompletePublicationAsync().ConfigureAwait(false);
+            if (!publicationCompleted)
             {
                 HostLogMessages.ConfigurationSnapshotCompletionFailed(_logger, publicationSnapshot.Version);
+                if (swapped)
+                {
+                    // The swapped generation no longer has a completion owner, so
+                    // the replaced previous instance is stopped best effort to
+                    // prevent it from draining forever.
+                    await _runtimeManager.AbandonReplacedPreviousAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                activePreparation = null;
                 // TryReplace already made the snapshot live; completion failure
                 // does not undo the publication, so the goal is achieved.
                 return outcome = PublishOutcome.Superseded;
             }
 
+            activePreparation = null;
             DeliverPublicationEvents(publicationSnapshot, previousSnapshot?.Configuration);
             await ReportNodeStatesAsync(desiredSet.NodeStates, cancellationToken).ConfigureAwait(false);
             return outcome = PublishOutcome.Published;
@@ -438,7 +460,9 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         {
             try
             {
-                if (activePreparation is not null)
+                // A swapped preparation is live and must not be aborted, exactly as
+                // when the reference was cleared before completion ran.
+                if (activePreparation is not null && !swapped)
                 {
                     await activePreparation.AbortAsync().ConfigureAwait(false);
                 }
@@ -620,6 +644,7 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
         HostConfigurationSnapshot snapshot,
         ExtensionDispatchGeneration? previousGeneration,
         ImmutableArray<ExtensionNodeStateWrite> nodeStates,
+        ImmutableHashSet<string> quarantinedIds,
         bool forcedReloadRequested,
         CancellationToken cancellationToken)
     {
@@ -638,6 +663,12 @@ public sealed partial class HostConfigurationPublisher : IAsyncDisposable
                 publicationSnapshot,
                 cancellationToken)
             .ConfigureAwait(false);
+        // The degraded fallback must not expose quarantined-owner routes either;
+        // the durable snapshot keeps them.
+        publicationSnapshot = ExcludeQuarantinedOwnedRoutes(
+            publicationSnapshot,
+            _routeOwners,
+            quarantinedIds);
         var previousSnapshot = _snapshotHolder.Current;
         var changeSummary = HostConfigurationSnapshotChangeSummary.Create(previousSnapshot, publicationSnapshot);
         if (previousGeneration is not null)

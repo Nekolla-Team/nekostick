@@ -190,7 +190,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                         ? RouteTargetExecutionResult.Handled
                         : RouteTargetExecutionResult.InternalServerError,
                 ExtensionInvocationState.Failed => RouteTargetExecutionResult.InternalServerError,
-                ExtensionInvocationState.Unavailable => RouteTargetExecutionResult.Unavailable,
+                ExtensionInvocationState.Unavailable => MarkUnavailable(context, result.FailureDetail),
                 _ => RouteTargetExecutionResult.Unavailable
             };
         }
@@ -253,7 +253,7 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
                         ? RouteTargetExecutionResult.Handled
                         : RouteTargetExecutionResult.InternalServerError,
                 ExtensionInvocationState.Failed => RouteTargetExecutionResult.InternalServerError,
-                ExtensionInvocationState.Unavailable => RouteTargetExecutionResult.Unavailable,
+                ExtensionInvocationState.Unavailable => MarkUnavailable(context, null),
                 _ => RouteTargetExecutionResult.Unavailable
             };
         }
@@ -261,6 +261,14 @@ internal sealed partial class HostRouteTargetExecutor : ILeasedRouteTargetExecut
         {
             await result.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    private static RouteTargetExecutionResult MarkUnavailable(
+        HttpContext context,
+        ExtensionErrorDetail? failureDetail)
+    {
+        HostRouteTargetFailureDetail.Set(context, failureDetail?.Message);
+        return RouteTargetExecutionResult.Unavailable;
     }
 
     private static bool TryGetExecutableRoute(

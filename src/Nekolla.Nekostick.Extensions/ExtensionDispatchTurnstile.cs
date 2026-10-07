@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Nekolla.Nekostick.Contracts;
 
 namespace Nekolla.Nekostick.Extensions;
@@ -13,7 +14,8 @@ internal sealed class ExtensionDispatchTurnstile
     // Entry waits must give up strictly before the owning instance's drain deadline
     // (LifecycleTimeout), so a handler blocked on a suspended turnstile unwinds via its own
     // InvalidOperationException and lets the drain complete instead of failing the stop.
-    private static readonly TimeSpan EntryTimeout =
+    // The same budget bounds the combined entry/wait time shared across dispatch rebind hops.
+    internal static readonly TimeSpan EntryTimeout =
         ExtensionRuntimeManager.LifecycleTimeout - TimeSpan.FromSeconds(5);
     private readonly object _gate = new();
     private TaskCompletionSource _resume = NewCompletionSource();
@@ -86,6 +88,57 @@ internal sealed class ExtensionDispatchTurnstile
             // be violated, or waiters would capture a completed task and spin. Continuations
             // run asynchronously, so completing here is safe.
             _resume.TrySetResult();
+        }
+    }
+
+    /// <summary>Gets whether entry is currently suspended pending a publication resume.</summary>
+    internal bool IsSuspended
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _suspended;
+            }
+        }
+    }
+
+    /// <summary>Waits for a pending suspension to resolve, bounded by the caller's entry budget.</summary>
+    /// <param name="timeout">The maximum time to wait for entry to open.</param>
+    /// <param name="cancellationToken">The caller cancellation token.</param>
+    /// <returns><see langword="true" /> when entry is open; <see langword="false" /> when the budget elapsed first.</returns>
+    internal async ValueTask<bool> WaitForSuspensionResolutionAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var started = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            Task wait;
+            lock (_gate)
+            {
+                if (!_suspended)
+                {
+                    return true;
+                }
+
+                wait = _resume.Task;
+            }
+
+            var remaining = timeout - Stopwatch.GetElapsedTime(started);
+            if (remaining <= TimeSpan.Zero)
+            {
+                return false;
+            }
+
+            try
+            {
+                await wait.WaitAsync(remaining, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                return false;
+            }
         }
     }
 

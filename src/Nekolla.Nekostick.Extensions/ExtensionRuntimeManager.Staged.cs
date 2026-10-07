@@ -91,41 +91,11 @@ public sealed partial class ExtensionRuntimeManager
                     PublishExtensionState(previous, ExtensionLoadState.Unloading);
                 }
 
-                foreach (var previous in preparation.ChangedPrevious)
-                {
-                    operationToken.ThrowIfCancellationRequested();
-                    if (!await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false))
-                    {
-                        var stopFailureDetail = previous.GetStatus().LastFailureDetail ??
-                            new ExtensionErrorDetail(
-                                $"Previous extension '{previous.Manifest.Id}' failed StopAsync while ReadyToPublishAsync was draining its dispatch.");
-                        await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
-                        return ExtensionGenerationCommitResult.Failure(
-                            ExtensionFailureCode.StopFailed,
-                            stopFailureDetail,
-                            preparation.Previous);
-                    }
-                }
-
-                var changedIds = preparation.ChangedPrevious
-                    .Select(static previous => previous.Manifest.Id)
-                    .ToHashSet(StringComparer.Ordinal);
-                foreach (var candidate in preparation.Candidates)
-                {
-                    operationToken.ThrowIfCancellationRequested();
-                    if (changedIds.Contains(candidate.Manifest.Id) &&
-                        !await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout).ConfigureAwait(false))
-                    {
-                        var lifecycleFailureDetail = candidate.GetStatus().LastFailureDetail ??
-                            new ExtensionErrorDetail(
-                                $"Candidate extension '{candidate.Manifest.Id}' failed OnPreviousStoppedAsync before ReadyToPublishAsync could publish generation '{preparation.Generation.GenerationId}'.");
-                        await AbortPreparationCoreAsync(preparation).ConfigureAwait(false);
-                        return ExtensionGenerationCommitResult.Failure(
-                            ExtensionFailureCode.LifecycleFailed,
-                            lifecycleFailureDetail,
-                            preparation.Previous);
-                    }
-                }
+                // The replaced instances stay loaded-but-draining through the Host handoff
+                // window: their stop and the OnPreviousStoppedAsync candidate hook are
+                // deferred to CompletePublicationCoreAsync so requests suspended on the
+                // turnstile keep a live serving instance until the new generation is
+                // published and its turnstiles are resumed.
 
                 foreach (var candidate in preparation.Candidates)
                 {
@@ -314,11 +284,81 @@ public sealed partial class ExtensionRuntimeManager
         var stoppedInstances = new HashSet<ExtensionInstance>();
         foreach (var previous in preparation.ChangedPrevious)
         {
-            if (stoppedInstances.Add(previous))
+            if (!stoppedInstances.Add(previous))
             {
-                previous.MarkStopped();
-                PublishExtensionState(previous, ExtensionLoadState.Stopped);
+                continue;
             }
+
+            // ReadyToPublishAsync deliberately left the replaced generation loaded-but-draining
+            // so requests suspended across the Host handoff stayed serviceable. The new
+            // generation is now published and its turnstiles resumed, so retire the previous
+            // generation. Stop and lifecycle-hook failures are best effort here: the handoff is
+            // already committed, so an honest Stopped state wins over abort or resurrection.
+            var stopFailed = false;
+            try
+            {
+                stopFailed = !await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                stopFailed = true;
+                if (_logger is { } stopLogger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        stopLogger,
+                        exception,
+                        previous.Manifest.Id,
+                        nameof(ExtensionInstance.StopForReplacementAsync));
+                }
+            }
+
+            if (stopFailed && _logger is { } stopFailureLogger)
+            {
+                ExtensionLogMessages.ExtensionCandidateFailed(
+                    stopFailureLogger,
+                    previous.Manifest.Id,
+                    ExtensionFailureCode.StopFailed.ToString());
+            }
+
+            // The hook only makes sense once the previous instance left the serving set, so it
+            // follows the deferred stop instead of the pre-handoff drain phase.
+            foreach (var candidate in preparation.Candidates)
+            {
+                if (!string.Equals(candidate.Manifest.Id, previous.Manifest.Id, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var hookFailed = false;
+                try
+                {
+                    hookFailed = !await candidate.NotifyPreviousStoppedAsync(LifecycleTimeout)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    hookFailed = true;
+                    if (_logger is { } hookLogger)
+                    {
+                        ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                            hookLogger,
+                            exception,
+                            candidate.Manifest.Id,
+                            nameof(ExtensionInstance.NotifyPreviousStoppedAsync));
+                    }
+                }
+
+                if (hookFailed && _logger is { } hookFailureLogger)
+                {
+                    ExtensionLogMessages.ExtensionCandidateFailed(
+                        hookFailureLogger,
+                        candidate.Manifest.Id,
+                        ExtensionFailureCode.LifecycleFailed.ToString());
+                }
+            }
+
+            previous.MarkStopped();
+            PublishExtensionState(previous, ExtensionLoadState.Stopped);
         }
 
         foreach (var detached in preparation.DetachedPrevious)
@@ -330,6 +370,61 @@ public sealed partial class ExtensionRuntimeManager
         }
 
         return true;
+    }
+
+    /// <summary>Best-effort stops the replaced previous instances of the stored active preparation after a post-swap publication divergence.</summary>
+    /// <param name="cancellationToken">The caller cancellation token; cancellation before the first stop skips the abandoned cleanup.</param>
+    /// <remarks>
+    /// The Host snapshot may already reference the prepared generation while the manager never
+    /// adopted it (publication completion returned false after a successful replacement). Stopping
+    /// the replaced previous instances keeps the diverged old generation from serving alongside
+    /// the live publication; every failure stays best effort because the publication outcome is
+    /// already decided and the caller only needs the double-run closed.
+    /// </remarks>
+    internal async Task AbandonReplacedPreviousAsync(CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        ExtensionGenerationPreparation? preparation;
+        lock (_gate)
+        {
+            preparation = _activePreparation;
+        }
+
+        if (preparation is null)
+        {
+            return;
+        }
+
+        foreach (var previous in preparation.ChangedPrevious)
+        {
+            if (previous.GetStatus().State == ExtensionLoadState.Stopped)
+            {
+                continue;
+            }
+
+            try
+            {
+                await previous.StopForReplacementAsync(LifecycleTimeout).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                if (_logger is { } logger)
+                {
+                    ExtensionLogMessages.ExtensionInstanceReleaseFailed(
+                        logger,
+                        exception,
+                        previous.Manifest.Id,
+                        nameof(ExtensionInstance.StopForReplacementAsync));
+                }
+            }
+
+            previous.MarkStopped();
+            PublishExtensionState(previous, ExtensionLoadState.Stopped);
+        }
     }
 
     internal async ValueTask<bool> AbortPreparationAsync(ExtensionGenerationPreparation preparation)
@@ -486,6 +581,23 @@ public sealed partial class ExtensionRuntimeManager
         CancellationToken cancellationToken) =>
         GetTurnstile(instance.Manifest.Id).EnterAsync(instance, cancellationToken);
 
+    /// <summary>Gets whether the instance's extension turnstile is suspended for a pending publication.</summary>
+    /// <param name="instance">The generation-bound instance to inspect.</param>
+    /// <returns><see langword="true" /> while entry waits for the publication to resolve.</returns>
+    private bool IsGenerationEntrySuspended(ExtensionInstance instance) =>
+        GetTurnstile(instance.Manifest.Id).IsSuspended;
+
+    /// <summary>Waits for the instance's extension turnstile suspension to resolve within the entry budget.</summary>
+    /// <param name="instance">The generation-bound instance to wait for.</param>
+    /// <param name="timeout">The remaining shared entry budget.</param>
+    /// <param name="cancellationToken">The request cancellation token.</param>
+    /// <returns><see langword="true" /> when entry is open; <see langword="false" /> when the budget elapsed first.</returns>
+    private ValueTask<bool> WaitForGenerationEntryResolutionAsync(
+        ExtensionInstance instance,
+        TimeSpan timeout,
+        CancellationToken cancellationToken) =>
+        GetTurnstile(instance.Manifest.Id).WaitForSuspensionResolutionAsync(timeout, cancellationToken);
+
     /// <summary>Gets the currently published dispatch generation for rebind retries.</summary>
     /// <returns>The published generation, or null when none is active.</returns>
     private ExtensionDispatchGeneration? GetPublishedGeneration()
@@ -508,7 +620,14 @@ public sealed partial class ExtensionRuntimeManager
                 _instances.TryGetValue(extensionId, out current);
             }
 
-            GetTurnstile(extensionId).Resume(current);
+            // A stopped instance can never serve again; resuming waiters onto it would hand
+            // them a zombie. Only an instance that still serves resolves as the resume target.
+            var resumable = current is not null &&
+                !current.StopStarted &&
+                current.GetStatus().State == ExtensionLoadState.Loaded
+                ? current
+                : null;
+            GetTurnstile(extensionId).Resume(resumable);
         }
     }
 

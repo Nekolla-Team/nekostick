@@ -203,7 +203,7 @@ public sealed partial class ExtensionRuntimeTests
             ImmutableArray.Create(new ExtensionRuntimeDescriptor(
                 manifest,
                 Settings(manifest.Id, label: "old"),
-                [manifest.Id],
+                ["fixture.handler"],
                 true)),
             previous: null,
             cancellationToken: cancellationToken);
@@ -212,28 +212,274 @@ public sealed partial class ExtensionRuntimeTests
         var initialReady = await initial.Preparation!.ReadyToPublishAsync(cancellationToken);
         Assert.True(initialReady.Succeeded, initialReady.FailureCode.ToString());
         Assert.True(await initial.Preparation.CompletePublicationAsync());
+        var initialInstance = initialReady.Generation!.Contexts.Single().Instance;
 
         var replacement = await manager.PrepareGenerationAsync(
             ImmutableArray.Create(new ExtensionRuntimeDescriptor(
                 manifest,
                 Settings(manifest.Id, label: "candidate", previousStoppedFails: true),
-                [manifest.Id],
+                ["fixture.handler"],
                 true)),
             previous: initialReady.Generation,
             cancellationToken: cancellationToken);
         Assert.True(replacement.Succeeded, replacement.FailureCode.ToString());
         Assert.NotNull(replacement.Preparation);
 
+        // The stop and the OnPreviousStoppedAsync hook are deferred behind the Host handoff,
+        // so a failing hook can no longer abort a staged commit that already drained the
+        // previous generation; the failure stays recorded on the candidate instead.
         var ready = await replacement.Preparation!.ReadyToPublishAsync(cancellationToken);
 
-        Assert.False(ready.Succeeded);
-        Assert.Equal(ExtensionFailureCode.LifecycleFailed, ready.FailureCode);
-        Assert.Equal(ExtensionLoadState.Stopped, manager.GetStatus(manifest.Id)!.State);
-        var dispatch = await manager.HandleAsync(
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+        Assert.True(await replacement.Preparation.CompletePublicationAsync());
+        var candidateInstance = ready.Generation!.Contexts.Single().Instance;
+        Assert.Equal(ExtensionLoadState.Stopped, initialInstance.GetStatus().State);
+        Assert.Equal(ExtensionLoadState.Loaded, candidateInstance.GetStatus().State);
+        Assert.Equal(ExtensionFailureCode.LifecycleFailed, candidateInstance.GetStatus().LastFailure);
+        Assert.NotNull(candidateInstance.GetStatus().LastFailureDetail);
+
+        var dispatch = await ready.Generation!.HandleAsync(
             "fixture.handler",
             new ExtensionHandlerRequest("GET", "/fixture"),
             cancellationToken);
-        Assert.Equal(ExtensionInvocationState.Unavailable, dispatch.State);
+        Assert.Equal(ExtensionInvocationState.Handled, dispatch.State);
+        Assert.Equal("candidate:started", Body(dispatch));
+    }
+
+    [Fact]
+    public async Task SuspendedRequestDuringPublicationWindowResolvesToReplacementInstance()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var oldGeneration = await PublishStagedGenerationAsync(
+            manager,
+            manifest,
+            Settings(manifest.Id, label: "old"),
+            previous: null,
+            cancellationToken);
+        var replacement = await manager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                manifest,
+                Settings(manifest.Id, label: "new"),
+                ["fixture.handler"],
+                true)),
+            previous: oldGeneration,
+            cancellationToken: cancellationToken);
+        Assert.True(replacement.Succeeded, replacement.FailureCode.ToString());
+        var preparation = replacement.Preparation!;
+
+        var ready = await preparation.ReadyToPublishAsync(cancellationToken);
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+
+        // The handoff window is open: the turnstile is suspended and the previous instance is
+        // still alive but draining. The request parks on the suspended turnstile instead of
+        // failing fast against the draining instance and resolves to the replacement once the
+        // publication completes.
+        var pending = oldGeneration.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/fixture"),
+            cancellationToken);
+
+        Assert.True(await preparation.CompletePublicationAsync());
+        var result = await pending;
+
+        Assert.Equal(ExtensionInvocationState.Handled, result.State);
+        Assert.StartsWith("new:", Body(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AbortedPublicationResumesTurnstileOntoLivePreviousInstance()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var oldGeneration = await PublishStagedGenerationAsync(
+            manager,
+            manifest,
+            Settings(manifest.Id, label: "old"),
+            previous: null,
+            cancellationToken);
+        var oldInstance = oldGeneration.Contexts.Single().Instance;
+
+        var replacement = await manager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                manifest,
+                Settings(manifest.Id, label: "candidate"),
+                ["fixture.handler"],
+                true)),
+            previous: oldGeneration,
+            cancellationToken: cancellationToken);
+        Assert.True(replacement.Succeeded, replacement.FailureCode.ToString());
+        var preparation = replacement.Preparation!;
+
+        // ReadyToPublishAsync suspends the turnstile but no longer stops the previous
+        // instance; aborting the commit must lift the suspension back onto that still-live
+        // instance instead of a stopped generation.
+        var ready = await preparation.ReadyToPublishAsync(cancellationToken);
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+        await preparation.AbortAsync();
+
+        Assert.Equal(ExtensionLoadState.Loaded, oldInstance.GetStatus().State);
+        var dispatch = await oldGeneration.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/fixture"),
+            cancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, dispatch.State);
+        Assert.Equal("old:started", Body(dispatch));
+    }
+
+    [Fact]
+    public async Task SameGenerationRebindWaitsWithinEntryBudgetThenResolves()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var replacement = await PublishStagedGenerationAsync(
+            manager,
+            manifest,
+            Settings(manifest.Id, label: "rebind"),
+            previous: null,
+            cancellationToken);
+        var context = replacement.Contexts.Single();
+        var waits = new List<TimeSpan>();
+        ExtensionDispatchGeneration? current = null;
+        var generation = new ExtensionDispatchGeneration(
+            generationId: 0,
+            handlers: ImmutableDictionary<string, ExtensionDispatchBinding>.Empty.Add(
+                "fixture.handler",
+                new ExtensionDispatchBinding(context, context.Instance.Handlers["fixture.handler"], null)),
+            fallback: null,
+            contexts: ImmutableArray.Create(context),
+            bindings: ImmutableArray<ExtensionGenerationBindingStatus>.Empty,
+            owner: new object(),
+            enterDispatch: static (_, _) => new ValueTask<ExtensionInstance?>((ExtensionInstance?)null),
+            currentGeneration: () => current,
+            isEntrySuspended: static _ => true,
+            waitForEntryResolution: (_, timeout, _) =>
+            {
+                waits.Add(timeout);
+                current = replacement;
+                return new ValueTask<bool>(true);
+            });
+        current = generation;
+
+        var result = await generation.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/fixture"),
+            cancellationToken);
+
+        Assert.Equal(ExtensionInvocationState.Handled, result.State);
+        Assert.Equal("rebind:started", Body(result));
+        var waited = Assert.Single(waits);
+        Assert.True(waited > TimeSpan.Zero);
+        Assert.True(waited <= ExtensionDispatchTurnstile.EntryTimeout);
+    }
+
+    [Fact]
+    public async Task SameGenerationRebindExhaustingEntryBudgetReturnsUnavailable()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var published = await PublishStagedGenerationAsync(
+            manager,
+            manifest,
+            Settings(manifest.Id, label: "rebind"),
+            previous: null,
+            cancellationToken);
+        var context = published.Contexts.Single();
+        var waits = new List<TimeSpan>();
+        var enterAttempts = 0;
+        ExtensionDispatchGeneration? current = null;
+        var generation = new ExtensionDispatchGeneration(
+            generationId: 0,
+            handlers: ImmutableDictionary<string, ExtensionDispatchBinding>.Empty.Add(
+                "fixture.handler",
+                new ExtensionDispatchBinding(context, context.Instance.Handlers["fixture.handler"], null)),
+            fallback: null,
+            contexts: ImmutableArray.Create(context),
+            bindings: ImmutableArray<ExtensionGenerationBindingStatus>.Empty,
+            owner: new object(),
+            enterDispatch: (_, _) =>
+            {
+                enterAttempts++;
+                return new ValueTask<ExtensionInstance?>((ExtensionInstance?)null);
+            },
+            currentGeneration: () => current,
+            isEntrySuspended: static _ => true,
+            waitForEntryResolution: (_, timeout, _) =>
+            {
+                waits.Add(timeout);
+                return new ValueTask<bool>(false);
+            });
+        current = generation;
+
+        var result = await generation.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/fixture"),
+            cancellationToken);
+
+        Assert.Equal(ExtensionInvocationState.Unavailable, result.State);
+        Assert.NotNull(result.FailureDetail);
+        Assert.Contains("entry timeout budget", result.FailureDetail!.Message, StringComparison.Ordinal);
+        Assert.Equal(1, enterAttempts);
+        var waited = Assert.Single(waits);
+        Assert.True(waited > TimeSpan.Zero);
+        Assert.True(waited <= ExtensionDispatchTurnstile.EntryTimeout);
+    }
+
+    [Fact]
+    public async Task DeferredStopFailureHonestlyMarksStoppedPrevious()
+    {
+        using var fixture = TestExtensionDirectory.CreateJson(RuntimeManifestJson());
+        var manifest = Discover(fixture.RootPath);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var manager = new ExtensionRuntimeManager(HostApiVersion.Current);
+
+        var oldGeneration = await PublishStagedGenerationAsync(
+            manager,
+            manifest,
+            Settings(manifest.Id, label: "old", stopFails: true),
+            previous: null,
+            cancellationToken);
+        var oldInstance = oldGeneration.Contexts.Single().Instance;
+
+        var replacement = await manager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                manifest,
+                Settings(manifest.Id, label: "candidate"),
+                ["fixture.handler"],
+                true)),
+            previous: oldGeneration,
+            cancellationToken: cancellationToken);
+        Assert.True(replacement.Succeeded, replacement.FailureCode.ToString());
+        var preparation = replacement.Preparation!;
+
+        // The stop is deferred behind the Host handoff: a stop failure no longer fails the
+        // ready phase, it stays honest at completion instead of resurrecting the previous
+        // generation or failing the committed publication.
+        var ready = await preparation.ReadyToPublishAsync(cancellationToken);
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+        Assert.True(await preparation.CompletePublicationAsync());
+
+        Assert.Equal(ExtensionLoadState.Stopped, oldInstance.GetStatus().State);
+        Assert.Equal(ExtensionFailureCode.StopFailed, oldInstance.GetStatus().LastFailure);
+
+        var dispatch = await ready.Generation!.HandleAsync(
+            "fixture.handler",
+            new ExtensionHandlerRequest("GET", "/fixture"),
+            cancellationToken);
+        Assert.Equal(ExtensionInvocationState.Handled, dispatch.State);
+        Assert.Equal("candidate:previous-stopped", Body(dispatch));
     }
 
     [Fact]
@@ -574,6 +820,29 @@ public sealed partial class ExtensionRuntimeTests
         var body = Body(result);
         Assert.Contains("\"state\":\"Loaded\"", body, StringComparison.Ordinal);
         Assert.Contains("\"state\":\"Stopped\"", body, StringComparison.Ordinal);
+    }
+
+    private static async Task<ExtensionDispatchGeneration> PublishStagedGenerationAsync(
+        ExtensionRuntimeManager manager,
+        ExtensionManifest manifest,
+        ExtensionSettingsConfiguration settings,
+        ExtensionDispatchGeneration? previous,
+        CancellationToken cancellationToken)
+    {
+        var prepared = await manager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                manifest,
+                settings,
+                ["fixture.handler"],
+                true)),
+            previous,
+            cancellationToken: cancellationToken);
+        Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
+        var preparation = Assert.IsType<ExtensionGenerationPreparation>(prepared.Preparation);
+        var ready = await preparation.ReadyToPublishAsync(cancellationToken);
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+        Assert.True(await preparation.CompletePublicationAsync());
+        return Assert.IsType<ExtensionDispatchGeneration>(ready.Generation);
     }
 
 

@@ -347,6 +347,150 @@ public sealed class HostConfigurationPublisherFallbackPolicyTests
             HostConfigurationPublisher.HasUnsafeUnavailableBinding(generation, null, desired));
     }
 
+    [Fact]
+    public async Task ContentMismatchQuarantinedBindingRoutesAreExcludedImmediately()
+    {
+        var healthy = Healthy("mismatch.healthy", "mismatch.healthy.handler");
+        var quarantined = Healthy("mismatch.drifted", "mismatch.drifted.handler") with
+        {
+            ContentHash = "sha256:" + new string('0', 64)
+        };
+        await using var scenario = PublisherScenario.Create(healthy, quarantined);
+        var snapshot = scenario.CreateSnapshot(17);
+
+        Assert.Equal(
+            PublishOutcome.Published,
+            await scenario.Publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+
+        // The quarantine diagnostic stays exactly as it was; only the published route set changes.
+        var quarantine = Assert.Single(
+            scenario.HostLogger.Entries,
+            static entry => entry.EventId.Id == 1067);
+        Assert.Equal(LogLevel.Warning, quarantine.LogLevel);
+        Assert.Equal(quarantined.Id, quarantine.Fields["ExtensionId"]);
+        Assert.Equal("ContentMismatch", quarantine.Fields["Code"]);
+
+        // The quarantined binding keeps its durable route record but the live publication
+        // no longer exposes it, so it stops matching immediately instead of answering 503.
+        var publishedRoutes = Assert.IsType<HostRoutingSnapshot>(
+                scenario.Holder.RoutingSnapshot)
+            .Configuration.Routes;
+        Assert.Equal(new[] { healthy.RouteId }, publishedRoutes.Select(static route => route.Id));
+        Assert.Equal(2, snapshot.Routes.Length);
+        Assert.Contains(snapshot.Routes, route => route.Id == quarantined.RouteId);
+    }
+
+    [Fact]
+    public async Task ContentMismatchQuarantinedRoutesAreExcludedFromFallbackPublication()
+    {
+        var quarantined = Healthy("fallback.drifted", "fallback.drifted.handler") with
+        {
+            ContentHash = "sha256:" + new string('0', 64)
+        };
+        var failed = CancelledFailure("fallback.cancelled", "fallback.cancelled.handler");
+        await using var scenario = PublisherScenario.Create(quarantined, failed);
+        var snapshot = scenario.CreateSnapshot(18);
+
+        Assert.Equal(
+            PublishOutcome.Published,
+            await scenario.Publisher.PublishAsync(snapshot, cancellationToken: TestContext.Current.CancellationToken));
+
+        // The unsafe binding forces the degraded cold fallback, which still must not
+        // expose the quarantined route it republishes the durable snapshot from.
+        AssertUnsafeFallback(scenario, failed.Id, ExtensionFailureCode.Cancelled);
+        var fallback = Assert.Single(
+            scenario.HostLogger.Entries,
+            static entry => entry.EventId.Id == 1066);
+        Assert.Equal("Empty", fallback.Fields["Mode"]);
+        var quarantine = Assert.Single(
+            scenario.HostLogger.Entries,
+            static entry => entry.EventId.Id == 1067);
+        Assert.Equal(quarantined.Id, quarantine.Fields["ExtensionId"]);
+        Assert.Equal("ContentMismatch", quarantine.Fields["Code"]);
+
+        var publishedRoutes = Assert.IsType<HostRoutingSnapshot>(
+                scenario.Holder.RoutingSnapshot)
+            .Configuration.Routes;
+        Assert.Equal(new[] { failed.RouteId }, publishedRoutes.Select(static route => route.Id));
+        Assert.Equal(2, snapshot.Routes.Length);
+        Assert.Contains(snapshot.Routes, route => route.Id == quarantined.RouteId);
+    }
+
+    [Fact]
+    public async Task CompletePublicationFalseAfterSwapAbandonsReplacedPreviousHonestly()
+    {
+        var extension = Healthy("abandon.previous", "abandon.previous.handler");
+        await using var scenario = PublisherScenario.Create(extension);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var initialSnapshot = scenario.CreateSnapshot(17);
+        Assert.Equal(
+            PublishOutcome.Published,
+            await scenario.Publisher.PublishAsync(initialSnapshot, cancellationToken: cancellationToken));
+
+        var previousGeneration = CurrentGeneration(scenario);
+        var previousInstance = Assert.Single(previousGeneration.Contexts).Instance;
+
+        // Hold one publication lease across the handoff exactly like a suspended in-flight
+        // request would; the replaced publication retires only after its last lease drains.
+        await using var previousPublicationLease = Assert.IsType<HostRoutingSnapshotLease>(
+            scenario.Holder.TryAcquireRoutingLease());
+        Assert.Same(previousGeneration, previousPublicationLease.Snapshot.DispatchGeneration);
+
+        // Prepare a replacement generation and swap it in exactly like the publisher does.
+        var replacementSettings = new ExtensionSettingsConfiguration(
+            extension.Id,
+            schemaVersion: 1,
+            settingsJson: ReplacedSettingsJson(extension.HandlerId),
+            version: 2);
+        var prepared = await scenario.RuntimeManager.PrepareGenerationAsync(
+            ImmutableArray.Create(new ExtensionRuntimeDescriptor(
+                previousInstance.Manifest,
+                replacementSettings,
+                ImmutableArray.Create(extension.HandlerId),
+                true)),
+            previous: previousGeneration,
+            cancellationToken: cancellationToken);
+        Assert.True(prepared.Succeeded, prepared.FailureCode.ToString());
+        Assert.NotNull(prepared.Preparation);
+        var preparation = prepared.Preparation!;
+        var ready = await preparation.ReadyToPublishAsync(cancellationToken);
+        Assert.True(ready.Succeeded, ready.FailureCode.ToString());
+        Assert.NotNull(ready.Generation);
+        var replacementSnapshot = scenario.CreateSnapshot(18, extension);
+        Assert.Equal(
+            SnapshotAdmission.Accepted,
+            scenario.Holder.TryReplace(replacementSnapshot, ready.Generation));
+
+        // The replaced previous instance stays loaded-but-draining while the handoff is open
+        // and its one-way stop pipeline has not started.
+        Assert.Equal(ExtensionLoadState.Unloading, previousInstance.GetStatus().State);
+        Assert.False(previousInstance.StopStarted);
+
+        // The publisher's divergence fallback stops the replaced previous instance instead of
+        // leaving it serving alongside the already-swapped live publication.
+        await scenario.RuntimeManager.AbandonReplacedPreviousAsync(cancellationToken);
+        Assert.Equal(ExtensionLoadState.Stopped, previousInstance.GetStatus().State);
+        Assert.False(previousInstance.IsServing);
+        Assert.Same(ready.Generation, CurrentGeneration(scenario));
+
+        // The abandonment is best effort and idempotent.
+        await scenario.RuntimeManager.AbandonReplacedPreviousAsync(cancellationToken);
+        Assert.Equal(ExtensionLoadState.Stopped, previousInstance.GetStatus().State);
+
+        // The manager abort is the only production path that turns a ready preparation into
+        // the unadoptable outcome, and it finalizes the preparation before the publisher
+        // observes the honest false result for the already-swapped publication.
+        await preparation.AbortAsync();
+        Assert.Equal(ExtensionLoadState.Stopped, previousInstance.GetStatus().State);
+        Assert.False(await preparation.CompletePublicationAsync());
+        Assert.Same(ready.Generation, CurrentGeneration(scenario));
+
+        // After the preparation is finalized the fallback call degrades to its safe no-op
+        // branch and must not disturb the swapped live publication.
+        await scenario.RuntimeManager.AbandonReplacedPreviousAsync(cancellationToken);
+        Assert.Same(ready.Generation, CurrentGeneration(scenario));
+    }
+
     private static ExtensionDispatchGeneration CurrentGeneration(PublisherScenario scenario) =>
         Assert.IsType<ExtensionDispatchGeneration>(scenario.Holder.RoutingSnapshot?.DispatchGeneration);
 
@@ -445,6 +589,17 @@ public sealed class HostConfigurationPublisherFallbackPolicyTests
             registerHandler
         });
 
+    private static string ReplacedSettingsJson(string handlerId) =>
+        JsonSerializer.Serialize(new
+        {
+            label = handlerId + ".replaced",
+            handlerId,
+            startFails = false,
+            startCancelled = false,
+            duplicateHandler = false,
+            registerHandler = true
+        });
+
     private static string RuntimeManifestJson(ExtensionSpec extension) =>
         $$"""
         {
@@ -509,6 +664,8 @@ public sealed class HostConfigurationPublisherFallbackPolicyTests
         long SettingsVersion = 1)
     {
         internal Guid RouteId { get; init; } = Guid.CreateVersion7();
+
+        internal string? ContentHash { get; init; }
     }
 
     private sealed class PublisherScenario : IAsyncDisposable
@@ -640,7 +797,8 @@ public sealed class HostConfigurationPublisherFallbackPolicyTests
                     ExtensionLoadState.Loaded,
                     now,
                     now,
-                    recordVersion: 1))
+                    recordVersion: 1,
+                    contentHash: extension.ContentHash))
                 .ToImmutableArray();
             var settings = snapshotExtensions
                 .Select(extension => new ExtensionSettingsConfiguration(

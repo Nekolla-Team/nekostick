@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using Nekolla.Nekostick.Contracts;
 using Microsoft.Extensions.Logging;
 
@@ -217,6 +218,8 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
     private readonly ExtensionLogThrottle _requestLogThrottle = new();
     private readonly Func<ExtensionInstance, CancellationToken, ValueTask<ExtensionInstance?>> _enterDispatch;
     private readonly Func<ExtensionDispatchGeneration?> _currentGeneration;
+    private readonly Func<ExtensionInstance, bool> _isEntrySuspended;
+    private readonly Func<ExtensionInstance, TimeSpan, CancellationToken, ValueTask<bool>> _waitForEntryResolution;
     private TaskCompletionSource<bool> _leasesDrained =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _releaseTask;
@@ -234,7 +237,9 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         ImmutableDictionary<string, ImmutableArray<Guid>>? routeIdsByExtension = null,
         ILogger? logger = null,
         Func<ExtensionInstance, CancellationToken, ValueTask<ExtensionInstance?>>? enterDispatch = null,
-        Func<ExtensionDispatchGeneration?>? currentGeneration = null)
+        Func<ExtensionDispatchGeneration?>? currentGeneration = null,
+        Func<ExtensionInstance, bool>? isEntrySuspended = null,
+        Func<ExtensionInstance, TimeSpan, CancellationToken, ValueTask<bool>>? waitForEntryResolution = null)
     {
         GenerationId = generationId;
         _handlers = handlers;
@@ -245,6 +250,9 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         _logger = logger;
         _enterDispatch = enterDispatch ?? EnterDirect;
         _currentGeneration = currentGeneration ?? (static () => null);
+        _isEntrySuspended = isEntrySuspended ?? (static _ => false);
+        _waitForEntryResolution = waitForEntryResolution ??
+            (static (_, _, _) => new ValueTask<bool>(true));
         RouteIdsByExtension = routeIdsByExtension ?? ImmutableDictionary<string, ImmutableArray<Guid>>.Empty;
         InitializeRouteDispatch();
         if (_activeLeases == 0)
@@ -385,17 +393,35 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         }
 
         var generation = this;
-        ExtensionDispatchGeneration? triedGeneration = null;
+        ExtensionDispatchGeneration? waitedGeneration = null;
+        var startTimestamp = Stopwatch.GetTimestamp();
         ExtensionDispatchBinding? binding;
         while (true)
         {
             if (!generation._handlers.TryGetValue(handlerId, out binding) ||
                 binding.StreamingHandler is not null ||
-                binding.Handler is null ||
+                binding.Handler is null)
+            {
+                return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                    $"Handler '{handlerId}' is not available in extension dispatch generation '{generation.GenerationId}'."));
+            }
+
+            // Registry state is unreliable while a publication is suspended: the replaced
+            // instance is draining-but-live and its registrations are cleared only when its
+            // stop pipeline runs. Bypass the fail-fast ownership pre-check during a suspension
+            // and re-apply it once an instance is actually entered.
+            if (!generation._isEntrySuspended(binding.Context.Instance) &&
                 !binding.Context.Instance.IsHandlerOwned(handlerId))
             {
                 return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
                     $"Handler '{handlerId}' is not available in extension dispatch generation '{generation.GenerationId}'."));
+            }
+
+            var remaining = ExtensionDispatchTurnstile.EntryTimeout - Stopwatch.GetElapsedTime(startTimestamp);
+            if (remaining <= TimeSpan.Zero)
+            {
+                return ExtensionInvocationResult.Unavailable(
+                    ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
             }
 
             try
@@ -404,6 +430,13 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     .ConfigureAwait(false);
                 if (entered is not null)
                 {
+                    if (!entered.IsHandlerOwned(handlerId))
+                    {
+                        entered.LeaveRequest();
+                        return ExtensionInvocationResult.Unavailable(new ExtensionErrorDetail(
+                            $"Handler '{handlerId}' is not available in extension dispatch generation '{generation.GenerationId}'."));
+                    }
+
                     break;
                 }
             }
@@ -414,26 +447,55 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
 
             // The binding's instance is gone; re-resolve against the manager's published
             // generation so requests suspended across a reload bind the replacement. Rapid
-            // successive publications can walk a short chain (G1 -> G2 -> G3); each hop is
-            // bounded by the entry timeout, monotonic in generation id, and ultimately bounded
-            // by the caller's cancellation token. A rebound call enters the new generation's
-            // instance WITHOUT holding a lease on that generation: a mid-call retirement is
-            // still covered by the instance drain grace (LifecycleTimeout) before any stop.
-            if (ReferenceEquals(generation, triedGeneration))
-            {
-                return ExtensionInvocationResult.Unavailable(
-                    ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
-            }
-
-            triedGeneration = generation;
+            // successive publications can walk a short chain (G1 -> G2 -> G3); hops stop as
+            // soon as the published generation stops advancing, and the combined entry/wait
+            // time across hops shares one entry timeout budget.
             var current = generation._currentGeneration();
-            if (current is null || ReferenceEquals(current, generation))
+            if (current is not null && !ReferenceEquals(current, generation))
+            {
+                generation = current;
+                continue;
+            }
+
+            // The published generation has not advanced, but a publication may still be in
+            // flight (suspension, Host handoff, or completion): wait once per generation for
+            // the suspension to resolve instead of failing against a frozen pointer. A
+            // rebound call enters the new generation's instance WITHOUT holding a lease on
+            // that generation: a mid-call retirement is still covered by the instance drain
+            // grace (LifecycleTimeout) before any stop.
+            if (ReferenceEquals(waitedGeneration, generation))
             {
                 return ExtensionInvocationResult.Unavailable(
                     ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
             }
 
-            generation = current;
+            waitedGeneration = generation;
+            remaining = ExtensionDispatchTurnstile.EntryTimeout - Stopwatch.GetElapsedTime(startTimestamp);
+            if (remaining <= TimeSpan.Zero)
+            {
+                return ExtensionInvocationResult.Unavailable(
+                    ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
+            }
+
+            bool resolved;
+            try
+            {
+                resolved = await generation._waitForEntryResolution(
+                        binding.Context.Instance,
+                        remaining,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException exception)
+            {
+                return ExtensionInvocationResult.Unavailable(ExtensionErrorDetail.FromException(exception));
+            }
+
+            if (!resolved)
+            {
+                return ExtensionInvocationResult.Unavailable(
+                    ExtensionDispatchTurnstile.CreateEntryFailureDetail(binding.Context.Instance));
+            }
         }
 
         var handler = binding.Handler;
@@ -493,13 +555,31 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
         }
 
         var generation = this;
-        ExtensionDispatchGeneration? triedGeneration = null;
+        ExtensionDispatchGeneration? waitedGeneration = null;
+        var startTimestamp = Stopwatch.GetTimestamp();
         ExtensionDispatchBinding? binding;
         while (true)
         {
             if (!generation._handlers.TryGetValue(handlerId, out binding) ||
-                binding.StreamingHandler is null ||
+                binding.StreamingHandler is null)
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            // Registry state is unreliable while a publication is suspended: the replaced
+            // instance is draining-but-live and its registrations are cleared only when its
+            // stop pipeline runs. Bypass the fail-fast ownership pre-check during a suspension
+            // and re-apply it once an instance is actually entered.
+            if (!generation._isEntrySuspended(binding.Context.Instance) &&
                 !binding.Context.Instance.IsStreamingHandler(handlerId))
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            var remaining = ExtensionDispatchTurnstile.EntryTimeout - Stopwatch.GetElapsedTime(startTimestamp);
+            if (remaining <= TimeSpan.Zero)
             {
                 request.BodyStream.Dispose();
                 return ExtensionStreamingInvocationResult.Unavailable;
@@ -511,6 +591,13 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                     .ConfigureAwait(false);
                 if (entered is not null)
                 {
+                    if (!entered.IsStreamingHandler(handlerId))
+                    {
+                        entered.LeaveRequest();
+                        request.BodyStream.Dispose();
+                        return ExtensionStreamingInvocationResult.Unavailable;
+                    }
+
                     break;
                 }
             }
@@ -520,23 +607,55 @@ public sealed partial class ExtensionDispatchGeneration : IAsyncDisposable
                 return ExtensionStreamingInvocationResult.Unavailable;
             }
 
-            // The binding's instance is gone; retry once against the manager's published
-            // generation so requests suspended across a reload bind the replacement.
-            if (ReferenceEquals(generation, triedGeneration))
-            {
-                request.BodyStream.Dispose();
-                return ExtensionStreamingInvocationResult.Unavailable;
-            }
-
-            triedGeneration = generation;
+            // The binding's instance is gone; re-resolve against the manager's published
+            // generation so requests suspended across a reload bind the replacement. Rapid
+            // successive publications can walk a short chain (G1 -> G2 -> G3); hops stop as
+            // soon as the published generation stops advancing, and the combined entry/wait
+            // time across hops shares one entry timeout budget.
             var current = generation._currentGeneration();
-            if (current is null || ReferenceEquals(current, generation))
+            if (current is not null && !ReferenceEquals(current, generation))
+            {
+                generation = current;
+                continue;
+            }
+
+            // The published generation has not advanced, but a publication may still be in
+            // flight (suspension, Host handoff, or completion): wait once per generation for
+            // the suspension to resolve instead of failing against a frozen pointer.
+            if (ReferenceEquals(waitedGeneration, generation))
             {
                 request.BodyStream.Dispose();
                 return ExtensionStreamingInvocationResult.Unavailable;
             }
 
-            generation = current;
+            waitedGeneration = generation;
+            remaining = ExtensionDispatchTurnstile.EntryTimeout - Stopwatch.GetElapsedTime(startTimestamp);
+            if (remaining <= TimeSpan.Zero)
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            bool resolved;
+            try
+            {
+                resolved = await generation._waitForEntryResolution(
+                        binding.Context.Instance,
+                        remaining,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
+
+            if (!resolved)
+            {
+                request.BodyStream.Dispose();
+                return ExtensionStreamingInvocationResult.Unavailable;
+            }
         }
 
         var handler = binding.StreamingHandler;

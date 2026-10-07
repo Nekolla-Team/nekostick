@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http;
+using Nekolla.Nekostick.Extensions;
 using Nekolla.Nekostick.Routing;
 
 namespace Nekolla.Nekostick.Host;
@@ -86,4 +87,28 @@ internal sealed class NoOpRouteTargetExecutor : IRouteTargetExecutor
         RouteMatch match,
         CancellationToken cancellationToken) =>
         ValueTask.FromResult(RouteTargetExecutionResult.Deferred);
+}
+
+/// <summary>
+/// Carries one request-scoped extension failure detail from target execution into
+/// the generic 503 diagnostics of the same request.
+/// </summary>
+internal static class HostRouteTargetFailureDetail
+{
+    private static readonly object ItemKey = new();
+
+    /// <summary>Records a sanitized failure detail for the current request, if any.</summary>
+    internal static void Set(HttpContext context, string? failureDetail)
+    {
+        if (string.IsNullOrEmpty(failureDetail))
+        {
+            return;
+        }
+
+        context.Items[ItemKey] = ExtensionDiagnosticText.Value(failureDetail);
+    }
+
+    /// <summary>Gets the sanitized failure detail recorded for the current request, if any.</summary>
+    internal static string? Get(HttpContext context) =>
+        context.Items.TryGetValue(ItemKey, out var failureDetail) ? failureDetail as string : null;
 }

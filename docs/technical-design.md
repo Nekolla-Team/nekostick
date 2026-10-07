@@ -297,6 +297,8 @@ stdout 和 stderr 采用 UTF-8 按行读取，supervision 捕获契约保留有�
 
 核心入站和微服务出站均使用 HTTP/1.1。代理必须流式转发 method、body、response body 与 WebSocket，不得默认缓冲请求体。WebSocket 建立后不重试。
 
+**路由钩子与流式转发的边界（API 1.3）。** 路由观测与动作钩子不得改变未修改流量的行为：请求体观察快照按 64 KiB 上限截断读取，超限绝不为观察抛错、取消转发或改动转发字节；仅当该路由存在 **Return 阶段**钩子且请求不是 WebSocket / upgrade 时，才用内存缓冲承接响应体——hook 全部 `Continue` 时缓冲按原字节放行并跳过替换校验，只有实际 `ReplaceResponse` 才应用替换并对替换结果 fail closed 校验；upgrade 请求与 101 + `Upgrade` 响应完全绕开缓冲与替换机制，对 upgrade 响应尝试替换按 fail closed 处理。
+
 默认会移除 hop-by-hop headers 及 `Connection` 所列 header。WebSocket upgrade 是例外：核心验证合法 Upgrade 请求后，按协议重建必要的 `Connection: Upgrade` 与 `Upgrade` header，而不盲目透传任意 connection token。未配置改写时保留 `Host`。
 
 对 request 与 response 的 header rewrite 使用 `remove -> set -> add` 顺序：
@@ -372,7 +374,7 @@ Host API 至少提供：
 - extension handler 注册、注销、load、unload、reload API。
 - 共享 contract 的 export/import API。
 
-扩展不注册任意 HTTP endpoint 或 health endpoint。其 HTTP 接入仅限于 route target 指向的稳定 handler ID，以及全局唯一 fallback。Host 在 HTTP 边界将 ASP.NET `HttpContext` 适配为 framework-neutral Contracts DTO `ExtensionHandlerRequest` 后调用 handler 或 fallback；扩展只接收该 DTO，不接收 `HttpContext`、stream 或 Host response object。Host 接收 `ExtensionHandlerResponse`，并负责将其状态码、headers 和 body 写入 `HttpContext.Response`。未加载、已停止或正在切换的 handler target 返回 `503`，handler 未处理异常返回 `500`。系统最多允许一个 fallback；fallback 在所有 404 候选前调用。
+扩展不注册任意 HTTP endpoint 或 health endpoint。其 HTTP 接入仅限于 route target 指向的稳定 handler ID，以及全局唯一 fallback。Host 在 HTTP 边界将 ASP.NET `HttpContext` 适配为 framework-neutral Contracts DTO `ExtensionHandlerRequest` 后调用 handler 或 fallback；扩展只接收该 DTO，不接收 `HttpContext`、stream 或 Host response object。Host 接收 `ExtensionHandlerResponse`，并负责将其状态码、headers 和 body 写入 `HttpContext.Response`。未加载或已停止的 handler target 返回 `503`；替换窗口内到达的请求在 dispatch turnstile 上等待（受 `EntryTimeout` 约束），提交后绑定到替换实例，而不是立即返回 `503`。扩展目标的通用 `503` 诊断（日志事件 1112）携带经清理的 `FailureDetail`。handler 未处理异常返回 `500`。系统最多允许一个 fallback；fallback 在所有 404 候选前调用。
 
 ### 7.3 显式加载、卸载与重载
 
@@ -382,12 +384,14 @@ reload 的状态机为：
 
 1. 在新 collectible ALC 中加载并验证新 manifest、依赖、contracts、入口类型和配置兼容性。
 2. 调用新实例 `Start(reloading: true)`，但尚不接管 route handler。
-3. 旧实例停止接收新 handler 请求并执行 `Stop`/drain；切换窗口内指向该扩展的请求返回 `503`。
-4. 等待旧 handler 请求和后台任务退出；超时后取消其任务并继续停止。
-5. 调用新实例 `OnPreviousStopped`，再原子切换 handler 注册并使新实例开始服务。
+3. 候选就绪后，Host 暂停指向被替换（含被移除）扩展的 dispatch turnstile，并把旧实例标记为 draining：旧实例保持 Loaded 并继续服务在途请求，此时不停止旧实例。
+4. Host 原子替换活动配置快照，随后恢复被暂停的 turnstile，把等待中的请求绑定到新实例。
+5. 交接完成后（锁外）停止旧实例：drain/`Stop` 并等待旧 handler 请求和后台任务退出（超时取消）；随后调用新实例 `OnPreviousStopped`，并把旧状态如实地标记为 `Stopped`。
 6. 尝试卸载旧 ALC，并以弱引用和 GC 验证是否已释放。
 
-新实例验证或 `Start(reloading: true)` 失败时，旧版本持续运行。旧版本停止阶段失败时，系统尝试恢复旧实例并停止新实例；恢复失败则扩展停止、其 handler route 返回 `503`。旧 ALC 因泄漏无法卸载时记录告警并保留残留 ALC，新版本仍可工作，后续 reload 不被自动阻断。
+替换窗口内到达的新请求在 turnstile 上等待而非快速失败：等待受 `EntryTimeout`（`LifecycleTimeout` 减 5 秒）约束，提交后重新绑定到替换实例。中止路径（`ReadyToPublishAsync` 失败、快照暂存或替换被拒、取消）不停止旧实例，等待者恢复到仍在服务的旧实例继续处理；Host 已替换快照但发布完成阶段返回失败（swap 后分歧）时，调用 `AbandonReplacedPreviousAsync` best-effort 停止被替换的旧实例，避免双代次并行残留。
+
+新实例验证或 `Start(reloading: true)` 失败时，旧版本持续运行。停止是单向流程：交接提交后旧实例停止或 `OnPreviousStopped` 失败只记录告警（`StopFailed`/`LifecycleFailed`）并把旧实例如实标记为 `Stopped`，不回滚新实例、不复活旧实例。旧 ALC 因泄漏无法卸载时记录告警并保留残留 ALC，新版本仍可工作，后续 reload 不被自动阻断。
 
 **计划默认值，可配置：** 扩展 handler drain timeout 为 30 秒，后台任务 stop timeout 为 30 秒，ALC 卸载验证在最多 3 轮 GC 后报告结果。
 
@@ -405,7 +409,7 @@ handler、后台任务和事件订阅回调的异常必须在宿主边界捕获�
 
 扩展记录存于共享 PostgreSQL，而 manifest 与程序集文件位于各节点本地磁盘。Host 在扩展启用、bootstrap 首次登记和 refresh 时把 manifest + 入口程序集的 SHA-256 摘要（`sha256:<64 位小写十六进制>`）钉入 `extension_records.content_hash`（版本变更而新摘要暂不可算时改为清除旧摘要，记为未知胜过保留错误旧值）；此后每次发布，各节点重算本地摘要并比较：
 
-- 不一致 → 该节点隔离（quarantine）此扩展，节点状态上报 `ContentMismatch`；隔离是节点本地判定，不改全局记录、不影响其他节点。
+- 不一致 → 该节点隔离（quarantine）此扩展（日志事件 1067），节点状态上报 `ContentMismatch`；隔离扩展拥有的 route 不再进入本节点已发布快照（主发布与 fallback 发布路径均排除），持久化记录不变。隔离是节点本地判定，不改全局记录、不影响其他节点。
 - 本地摘要暂时无法计算 → 同样 fail-closed 隔离，但上报 `ContentHashMissing` 以区分真漂移。
 - 持久化摘要为 `null` → 宽容跳过比较并上报 `ContentHashMissing`。
 - 运行中 binding 的摘要与 publish desired 摘要不一致（含从 `null` 变为有值）即自动替换 generation，与版本是否变化无关；refresh 钉死新摘要后由即时 publish 或后续 `NOTIFY` / 轮询 publish 收敛重载。
