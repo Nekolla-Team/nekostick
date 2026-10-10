@@ -92,7 +92,11 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
         }
         catch (Exception exception)
         {
-            SupervisionLogMessages.HealthProbeOperationFailed(_logger, exception, request.ServiceId);
+            SupervisionLogMessages.HealthProbeOperationFailed(
+                _logger,
+                request.ServiceId,
+                BoundErrorMessage(exception.Message));
+            LogProbeFailureDetailIfTruncated(_logger, request.ServiceId, exception.Message);
             status = HealthObservationStatus.Unavailable;
             if (IsTransportFailure(request.Definition.Kind, exception))
             {
@@ -203,7 +207,25 @@ public sealed class ServiceHealthProbe : IServiceHealthProbe, IDisposable
     }
 
     internal static string BoundErrorMessage(string message) =>
-        message.Length <= 512 ? message : message[..512];
+        message.Length <= ErrorMessageLogLimit ? message : message[..ErrorMessageLogLimit];
+
+    internal static void LogProbeFailureDetailIfTruncated(ILogger logger, Guid serviceId, string fullMessage)
+    {
+        if (fullMessage.Length <= ErrorMessageLogLimit || !logger.IsEnabled(LogLevel.Debug))
+        {
+            return;
+        }
+
+        SupervisionLogMessages.HealthProbeFailureDetail(
+            logger,
+            serviceId,
+            fullMessage.Length <= ErrorMessageDetailLogLimit
+                ? fullMessage
+                : fullMessage[..ErrorMessageDetailLogLimit]);
+    }
+
+    private const int ErrorMessageLogLimit = 512;
+    private const int ErrorMessageDetailLogLimit = 1024 * 1024;
 
     private static bool IsTransportFailure(ServiceHealthCheckKind kind, Exception exception) =>
         (kind == ServiceHealthCheckKind.Tcp || kind == ServiceHealthCheckKind.Http) &&

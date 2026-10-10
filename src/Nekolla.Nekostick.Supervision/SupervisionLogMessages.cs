@@ -53,11 +53,11 @@ internal static partial class SupervisionLogMessages
     [LoggerMessage(
         EventId = 5006,
         Level = LogLevel.Warning,
-        Message = "Supervisor health probe failed. ServiceId: {ServiceId}.")]
+        Message = "Supervisor health probe failed. ServiceId: {ServiceId}. Error: {ErrorMessage}.")]
     internal static partial void HealthProbeFailed(
         ILogger logger,
-        Exception exception,
-        Guid serviceId);
+        Guid serviceId,
+        string errorMessage);
 
     [LoggerMessage(
         EventId = 5007,
@@ -200,8 +200,8 @@ internal static partial class SupervisionLogMessages
     [LoggerMessage(
         EventId = 5021,
         Level = LogLevel.Warning,
-        Message = "Health probe failed. ServiceId: {ServiceId}.")]
-    internal static partial void HealthProbeOperationFailed(ILogger logger, Exception exception, Guid serviceId);
+        Message = "Health probe failed. ServiceId: {ServiceId}. Error: {ErrorMessage}.")]
+    internal static partial void HealthProbeOperationFailed(ILogger logger, Guid serviceId, string errorMessage);
 
     [LoggerMessage(
         EventId = 5022,
@@ -235,5 +235,11 @@ internal static partial class SupervisionLogMessages
         Guid serviceId,
         int port,
         PortLeaseOperationStatus status);
+
+    [LoggerMessage(
+        EventId = 5029,
+        Level = LogLevel.Debug,
+        Message = "Health probe failure detail. ServiceId: {ServiceId}. Error: {ErrorMessage}.")]
+    internal static partial void HealthProbeFailureDetail(ILogger logger, Guid serviceId, string errorMessage);
 
 }

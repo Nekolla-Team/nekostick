@@ -805,7 +805,14 @@ public sealed partial class ServiceSupervisor : IAsyncDisposable
             }
             catch (Exception exception)
             {
-                SupervisionLogMessages.HealthProbeFailed(_logger, exception, launchSpecification.ServiceId);
+                SupervisionLogMessages.HealthProbeFailed(
+                    _logger,
+                    launchSpecification.ServiceId,
+                    ServiceHealthProbe.BoundErrorMessage(exception.Message));
+                ServiceHealthProbe.LogProbeFailureDetailIfTruncated(
+                    _logger,
+                    launchSpecification.ServiceId,
+                    exception.Message);
                 observation = new HealthObservationResult(
                     launchSpecification.ServiceId,
                     HealthObservationStatus.Unavailable,
